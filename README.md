@@ -383,7 +383,7 @@ Die KV-Dropdowns in der GUI zeigen die volle Auswahl: `iq4_nl`,
 The tuner intelligently selects the best binary based on your model and settings:
 - **Gemma 4 (with external draft)** $\rightarrow$ uses `ik_llama.cpp` (external sibling drafter still requires the fork).
 - **Gemma 4 (without draft)** $\rightarrow$ uses standard `llama.cpp`.
-- **Integriertes MTP (z.B. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (b9190+ nativ; kein Fork nötig).
+- **Integriertes MTP (z.B. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (b9190+ nativ; PR #22673 seit 16. Mai 2026 in Mainline; kein Fork nötig).
 - **Ternary-Bonsai** $\rightarrow$ uses `1b_llama.cpp`.
 - **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
 
@@ -484,7 +484,7 @@ Recommended build settings for this system:
 # - AMD Radeon RX 9070 XT 16GB
 # - G.Skill Trident Z 48GB DDR5-8400MHz (2x24GB)
 
-# Main-Fork b9194+ (SPIRV-Headers now required)
+# Main-Fork b9208 (SPIRV-Headers required since b9194)
 cd C:\LAB\ai-local
 git clone https://github.com/KhronosGroup/SPIRV-Headers.git
 cmake -S .\SPIRV-Headers -B .\SPIRV-Headers\build `
@@ -514,10 +514,9 @@ cmake -S .\llama.cpp -B .\llama.cpp\build `
 cmake --build .\llama.cpp\build --config Release --parallel 24
 ```
 
-## Server-Features (Stand b9190)
+## Server-Features (Stand b9208)
 
-Die folgenden `llama-server` Features werden aus der b9190-Ära
-unterstützt (aus `tools/server/README.md`):
+Die folgenden `llama-server` Features werden unterstützt (aus `tools/server/README.md`):
 
 | Flag | Unterstützung |
 |------|---------------|
@@ -528,7 +527,10 @@ unterstützt (aus `tools/server/README.md`):
 | `--chat-template-kwargs ...` | ✅ Dropdown produziert das automatisch |
 | `--jinja` | ✅ Wird sichtbar angehakt |
 | `--mlock` / `--no-mmap` | ✅ Windows-Guard; manuell überschreibbar |
-| `--spec-type draft-mtp` | ✅ Integriertes MTP (Qwen3.6-MTP u.a.) — Wert seit b9190 `draft-mtp` statt `mtp` |
+| `--spec-type draft-mtp` | ✅ Integriertes MTP (Qwen3.6-MTP u.a.) — `draft-mtp` ist der Mainline-Name seit Merge von PR #22673 (16. Mai 2026) |
+| `--spec-draft-n-max` | ✅ Via `draft_max` im YAML-Profil |
+| `--spec-draft-p-min` | ✅ Via `draft_p_min` im YAML-Profil — Default 0.75; wird jetzt in **beiden** Spec-Paths (extern + integriert) emittiert |
+| `--spec-draft-ngl` | ✅ Immer 99 (MTP-Head auf GPU halten) |
 | `--n-cpu-moe` / `--override-tensor` | ✅ Bereits vorhanden |
 | `--rope-scaling yarn` | ✅ Bereits vorhanden |
 | `--numa` | ✅ Bereits vorhanden |

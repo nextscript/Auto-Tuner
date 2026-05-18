@@ -1196,6 +1196,14 @@ def compute_config(
     if n_cpu_moe is not None and n_cpu_moe > 0:
         batch = perf_target.moe_hybrid_batch
         ubatch = perf_target.moe_hybrid_ubatch
+        # When integrated MTP is active on a MoE model, the speculative hook
+        # fires at every ubatch boundary during generation. With moe_hybrid_ubatch
+        # at 2048 or 4096 the D2H transfer overhead per token grows and write speed
+        # regresses below baseline. Cap ubatch at 512 for MTP MoE models so the
+        # generation phase has the same granularity the community uses (b 2048 ub 512).
+        # Prompt processing (PP) is unaffected because PP fills full batches anyway.
+        if model.has_embedded_mtp and ubatch > 512:
+            ubatch = 512
     elif model.size_gb > 30 or ctx > 32768 or model.size_gb > 10:
         batch, ubatch = 1024, 1024
     else:
@@ -1489,9 +1497,19 @@ def build_command(
         # the drafter layers fall back to CPU and the speedup vanishes.
         # In mainline b9190+ the flag value was renamed from "mtp" to
         # "draft-mtp" (see tools/server/README.md --spec-type enum).
+        #
+        # `--spec-draft-p-min` MUST be set here (same as Path A).
+        # Mainline default since b9190 is 0.75 — if we omit the flag the
+        # server uses its own default and our YAML value is silently
+        # ignored. With p_min=0.0 (old YAML default) the MTP hook fires
+        # on every decode step regardless of confidence, adding constant
+        # D2H-transfer overhead and causing write-speed to be slower
+        # than baseline on Vulkan/ROCm. Match mainline default (0.75) or
+        # let the profile override it explicitly.
         cmd += ["--spec-type", "draft-mtp"]
         cmd += ["--spec-draft-n-max", str(draft_val)]
         cmd += ["--spec-draft-ngl", "99"]
+        cmd += ["--spec-draft-p-min", str(draft_p_min)]
 
     if config.flash_attn:
         cmd += ["-fa", "on"]

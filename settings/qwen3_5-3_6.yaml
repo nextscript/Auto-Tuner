@@ -71,9 +71,16 @@ sampling:
 # MTP (Multi-Token Prediction) draft model configuration
 # Qwen3.6-...-MTP uses integrated assistant models for speculative decoding via MTP.
 # draft_max = number of MTP tokens to predict per step (default: 3)
-# draft_p_min = minimum probability threshold for accepting draft tokens
+# draft_p_min = minimum probability threshold for MTP speculation.
+#   Mainline default (b9190+) is 0.75. Setting 0.0 forces speculation on every
+#   step regardless of confidence → constant D2H-overhead → write slower than
+#   baseline on Vulkan/ROCm. Keep 0.75 to match upstream: only speculate when
+#   the draft head is reasonably confident. Community results on Qwen3.6-27B/35B
+#   show ~75-95% acceptance anyway, so the threshold rarely fires and does not
+#   hurt throughput. For pure coding sessions (repetitive token patterns) you
+#   can lower to 0.5 for extra speculation aggressiveness: `-- --spec-draft-p-min 0.5`
 draft_max: 3
-draft_p_min: 0.0
+draft_p_min: 0.75
 
 
 notes: >
@@ -93,4 +100,3 @@ notes: >
   Trennung von <think>-Blöcken ins reasoning_content-API-Feld
   (statt sie inline im content zu lassen):
     -- --jinja
-    
