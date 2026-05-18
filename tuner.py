@@ -821,6 +821,65 @@ def compute_config(
     if effective_free_vram < 0:
         effective_free_vram = 0.0
 
+    # ---- (0.7) Smart multi-GPU pinning detection.
+    #
+    # When the system has multiple GPUs of clearly disparate sizes (e.g.
+    # a 32 GB workstation card paired with a 16 GB desktop card), pin the
+    # whole inference job to the largest one whenever the model is small
+    # enough to live there entirely with a working-floor of KV cache.
+    # This keeps the smaller card free for the desktop / OBS / monitors
+    # workload — the user's stated reason for having two cards.
+    #
+    # Skipped for:
+    # - Single-GPU systems (nothing to pin to)
+    # - Matched dual-GPU setups (smaller >= 80% of largest VRAM) — those
+    #   users almost always want both cards in tensor-split
+    #
+    # MoE: still allowed if the whole model fits on the largest GPU, in
+    # which case n_cpu_moe ends up at 0 anyway and pinning is a clean
+    # win. If MoE doesn't fit on one card, the pin check below fails
+    # and aggregate-VRAM placement takes over.
+    #
+    # When pin engages, ``free_vram`` and ``effective_free_vram`` are
+    # restricted to the largest GPU's headroom so every downstream
+    # decision (layer placement, KV quant, context length) sizes for
+    # one card instead of the aggregate.
+    pin_to_largest_idx: Optional[int] = None
+    if has_gpu and len(system.gpus) > 1:
+        gpu_sizes_mb = [g.total_vram_mb for g in system.gpus]
+        gpu_free_mb = [g.free_vram_mb for g in system.gpus]
+        largest_candidate = max(range(len(gpu_sizes_mb)), key=lambda i: gpu_sizes_mb[i])
+        largest_total_mb = gpu_sizes_mb[largest_candidate]
+        smallest_total_mb = min(gpu_sizes_mb)
+        if largest_total_mb > 0 and smallest_total_mb < 0.8 * largest_total_mb:
+            largest_free_gb = gpu_free_mb[largest_candidate] / 1024.0
+            # Working-floor: 4k tokens of KV at the base rate, halved for
+            # a conservative q4-ish quant estimate. Ensures we don't pin
+            # and then trap ourselves into a ~1k context window.
+            min_kv_reserve_gb = (4096 * base_kv_mb * 0.5) / 1024
+            # User can ask for a specific context via user_ctx — honour it
+            # in the pin decision so a pinned config doesn't silently drop
+            # to a smaller window than requested.
+            if user_ctx is not None and user_ctx > 4096:
+                min_kv_reserve_gb = (user_ctx * base_kv_mb * 0.5) / 1024
+            needed_for_pin_gb = (
+                model.size_gb
+                + vision_vram_gb
+                + draft_vram_gb
+                + vram_safety_gb
+                + min_kv_reserve_gb
+            )
+            if needed_for_pin_gb <= largest_free_gb:
+                pin_to_largest_idx = largest_candidate
+                # Restrict the VRAM budget so downstream KV sizing fits
+                # on this single card. effective_free_vram is recomputed
+                # from the new free_vram so vision/draft reservations
+                # carry through correctly.
+                free_vram = largest_free_gb
+                effective_free_vram = max(
+                    0.0, free_vram - vision_vram_gb - draft_vram_gb
+                )
+
     # ---- (1) Model placement
     n_cpu_moe: Optional[int] = None
     if is_moe and has_gpu and n_layers > 0:
@@ -1260,42 +1319,30 @@ def compute_config(
             )
     no_mmap = mlock
 
-    # ---- (4d) Multi-GPU placement. Skipped for MoE (handled via n_cpu_moe).
+    # ---- (4d) Multi-GPU placement.
     #
-    # Strategy: if the model + KV + safety fits on the largest GPU alone,
-    # pin everything there and zero out the other GPU(s). This preserves a
-    # secondary card (e.g. for OBS / desktop / monitors) when its VRAM is
-    # not needed for inference. Only spread tensors across all GPUs when
-    # the largest one alone is too small.
+    # Three outcomes:
+    # 1. Pinned (single GPU): ``pin_to_largest_idx`` was set during the
+    #    early smart-pin detection (step 0.7) because the model fits on
+    #    the largest GPU alone. Emit "1.000,0.000,..." so the smaller
+    #    GPU stays free for desktop / OBS use.
+    # 2. Proportional spread: multiple GPUs, model too big for a single
+    #    card (or matched dual-GPU). Split tensors by total VRAM ratio.
+    # 3. None: single-GPU system, MoE (handled via n_cpu_moe), or no GPU.
     tensor_split: Optional[str] = None
     main_gpu: Optional[int] = None
     if has_gpu and len(system.gpus) > 1 and n_cpu_moe is None:
         sizes_mb = [g.total_vram_mb for g in system.gpus]
-        free_mb_per_gpu = [g.free_vram_mb for g in system.gpus]
         total_mb = sum(sizes_mb)
         if total_mb > 0:
-            largest_idx = max(range(len(sizes_mb)), key=lambda i: sizes_mb[i])
-            largest_free_gb = free_mb_per_gpu[largest_idx] / 1024.0
-
-            # Everything that has to live in VRAM on the main card for full offload:
-            needed_gb = (
-                model_vram
-                + estimated_kv_gb
-                + vision_vram_gb
-                + draft_vram_gb
-                + effective_vram_safety
-            )
-
-            if full_off and needed_gb <= largest_free_gb:
-                # Fits on the biggest card alone — pin it, free the others.
+            if pin_to_largest_idx is not None:
                 parts = ["0.000"] * len(sizes_mb)
-                parts[largest_idx] = "1.000"
+                parts[pin_to_largest_idx] = "1.000"
                 tensor_split = ",".join(parts)
-                main_gpu = largest_idx
+                main_gpu = pin_to_largest_idx
             else:
-                # Doesn't fit alone — spread proportionally to total VRAM.
                 tensor_split = ",".join(f"{s / total_mb:.3f}" for s in sizes_mb)
-                main_gpu = largest_idx
+                main_gpu = max(range(len(sizes_mb)), key=lambda i: sizes_mb[i])
 
     # ---- (4d) NUMA — immer aktivieren bei genügend Kernen für bessere Performance
     numa = None
