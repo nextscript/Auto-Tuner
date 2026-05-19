@@ -1,0 +1,22 @@
+{
+  "pythonVersion": "3.10",
+
+  // Pyright will include the whole workspace folder by default.
+  // We only need to tell it where the venv lives and what to exclude
+  // so it doesn't accidentally pick up an installed "tuner" package
+  // from site-packages instead of the local tuner.py / tuner.pyi.
+  "venvPath": ".",
+  "venv": ".venv",
+
+  "exclude": [
+    ".venv",
+    "venv",
+    "env",
+    "**/__pycache__"
+  ],
+
+  // Suppress noise about modules that are Windows-only (pythoncom,
+  // win32com) or that have stubs installed separately (PyQt6-stubs).
+  "reportMissingModuleSource": "none"
+}
+

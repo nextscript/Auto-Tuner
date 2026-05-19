@@ -12,7 +12,7 @@ import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +553,24 @@ _QUANT_PATTERN = re.compile(
 )
 
 
+# Matches llama.cpp split-GGUF naming: "model-00002-of-00003.gguf"
+# llama-gguf-split always zero-pads to 5 digits on both sides.
+_SPLIT_PART_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$", re.IGNORECASE)
+
+
+def _split_gguf_key(filename: str) -> Optional[Tuple[str, int, int]]:
+    """Return ``(base_stem, part_idx, total_parts)`` for a split-GGUF shard.
+
+    Recognises the ``-NNNNN-of-NNNNN.gguf`` suffix produced by
+    ``llama-gguf-split`` (e.g. ``Qwen3.5-122B-A10B-UD-Q3_K_XL-00002-of-00003.gguf``).
+    Returns ``None`` for ordinary single-file GGUFs.
+    """
+    m = _SPLIT_PART_RE.search(filename)
+    if m:
+        return filename[: m.start()], int(m.group(1)), int(m.group(2))
+    return None
+
+
 @dataclass
 class ModelEntry:
     path: Path
@@ -562,10 +580,22 @@ class ModelEntry:
     mmproj: Optional[Path] = None
     draft: Optional[Path] = None  # paired assistant/draft model (if any)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    part_paths: List[Path] = field(default_factory=list)
+    """All shard paths in order; length > 1 for split GGUFs, otherwise [path]."""
 
     @property
     def size_gb(self) -> float:
         return self.size_bytes / (1024**3)
+
+    @property
+    def is_split(self) -> bool:
+        """True when this entry represents a multi-part (sharded) GGUF."""
+        return len(self.part_paths) > 1
+
+    @property
+    def part_count(self) -> int:
+        """Number of GGUF shards on disk (1 for single-file models)."""
+        return len(self.part_paths) if self.part_paths else 1
 
     @property
     def has_vision(self) -> bool:
@@ -776,6 +806,12 @@ def scan_models(
 ) -> List[ModelEntry]:
     """Walk `root` recursively and return all loadable GGUF models.
 
+    Multi-part (sharded) GGUFs produced by ``llama-gguf-split`` — e.g.
+    ``model-00001-of-00003.gguf`` — are merged into a single
+    :class:`ModelEntry` whose :attr:`~ModelEntry.path` points to shard 1,
+    :attr:`~ModelEntry.size_bytes` is the sum of all shards, and
+    :attr:`~ModelEntry.part_paths` lists every shard in index order.
+
     Two kinds of files get filtered out of the main list and attached
     to their "big-brother" model instead:
       * mmproj projectors (vision encoders) → :attr:`ModelEntry.mmproj`
@@ -801,30 +837,86 @@ def scan_models(
         else:
             models.append(f)
 
+    # ------------------------------------------------------------------
+    # Separate single-file models from multi-part (sharded) GGUFs.
+    # Split key: (parent_dir_str, base_stem) → {part_index: Path}
+    # ------------------------------------------------------------------
+    split_parts: Dict[Tuple[str, str], Dict[int, Path]] = {}
+    single_models: List[Path] = []
+
+    for m in models:
+        info = _split_gguf_key(m.name)
+        if info is None:
+            single_models.append(m)
+        else:
+            base, part_idx, _total = info
+            split_key = (str(m.parent), base)
+            split_parts.setdefault(split_key, {})[part_idx] = m
+
+    def _group_for(path: Path) -> str:
+        """Return the group label (relative sub-directory) for *path*."""
+        try:
+            rel = path.relative_to(root)
+            rel_parts = rel.parts
+            return "/".join(rel_parts[:-1]) if len(rel_parts) > 1 else "."
+        except ValueError:
+            return str(path.parent)
+
     entries: List[ModelEntry] = []
-    for m in sorted(models):
+
+    # --- Single-file models -------------------------------------------
+    for m in sorted(single_models):
         try:
             size = m.stat().st_size
         except OSError:
             continue
-        try:
-            rel = m.relative_to(root)
-            parts = rel.parts
-            group = "/".join(parts[:-1]) if len(parts) > 1 else "."
-        except ValueError:
-            group = str(m.parent)
         md = read_gguf_metadata(m) if read_metadata else {}
         entries.append(
             ModelEntry(
                 path=m,
                 name=m.stem,
-                group=group,
+                group=_group_for(m),
                 size_bytes=size,
                 mmproj=_find_mmproj(m, mmprojs),
                 draft=_find_draft(m, drafts),
                 metadata=md,
+                part_paths=[m],
             )
         )
+
+    # --- Multi-part (sharded) models ----------------------------------
+    for (parent_str, base), parts_dict in sorted(
+        split_parts.items(), key=lambda kv: kv[0][1].lower()
+    ):
+        # Use shard 1 as the primary path (llama.cpp auto-discovers the rest).
+        # Fall back to the lowest-indexed shard if shard 1 is missing.
+        part1 = parts_dict.get(1) or parts_dict[min(parts_dict)]
+        total_size = 0
+        for p in parts_dict.values():
+            try:
+                total_size += p.stat().st_size
+            except OSError:
+                pass
+        if total_size == 0:
+            continue
+        ordered_parts = [parts_dict[i] for i in sorted(parts_dict)]
+        # Build a synthetic Path whose .name == "<base>.gguf" so the
+        # mmproj / draft pairing functions get the correct base stem.
+        pairing_path = part1.parent / (base + ".gguf")
+        md = read_gguf_metadata(part1) if read_metadata else {}
+        entries.append(
+            ModelEntry(
+                path=part1,
+                name=base,
+                group=_group_for(part1),
+                size_bytes=total_size,
+                mmproj=_find_mmproj(pairing_path, mmprojs),
+                draft=_find_draft(pairing_path, drafts),
+                metadata=md,
+                part_paths=ordered_parts,
+            )
+        )
+
     return entries
 
 

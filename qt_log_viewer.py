@@ -86,9 +86,9 @@ class LogViewerWindow(QMainWindow):
             self.raise_()
             self.activateWindow()
 
-    def closeEvent(self, event: QCloseEvent | None) -> None:  # noqa: N802
+    def closeEvent(self, a0: QCloseEvent | None) -> None:  # noqa: N802
         """Window X button → stop server and quit cleanly."""
         self._stop_server()
-        if event is not None:
-            event.accept()
+        if a0 is not None:
+            a0.accept()
         QApplication.quit()

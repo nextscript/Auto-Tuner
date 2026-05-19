@@ -2794,7 +2794,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Window close
     # ------------------------------------------------------------------
-    def closeEvent(self, event: QCloseEvent | None) -> None:  # noqa: N802
+    def closeEvent(self, a0: QCloseEvent | None) -> None:  # noqa: N802
         # Snapshot the current window layout BEFORE any potential
         # "are you sure?" dialog, so even an Escape-out of that dialog
         # has saved state. The save itself never blocks the close.
@@ -2817,13 +2817,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
-                if event is not None:
-                    event.ignore()
+                if a0 is not None:
+                    a0.ignore()
                 return
             self._stop_server()
 
-        if event is not None:
-            event.accept()
+        if a0 is not None:
+            a0.accept()
 
 
 # ---------------------------------------------------------------------------
