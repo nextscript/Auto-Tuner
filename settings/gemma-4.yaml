@@ -46,12 +46,19 @@ sampling:
     min_p: 0.0
     repeat_penalty: 1.0
 
-# MTP (Multi-Token Prediction) draft model configuration
-# Gemma 4 uses assistant models for speculative decoding via MTP.
-# draft_max = number of MTP tokens to predict per step (default: 3)
-# draft_p_min = minimum probability threshold for accepting draft tokens
-draft_max: 3
-draft_p_min: 0.0
+# MTP / speculative decoding configuration.
+# draft_max = max draft tokens per step.
+#   2 ist der Sweet-Spot für Vulkan/ROCm auf Consumer-GPUs: Token 1 hat
+#   ~85–90% Acceptance wenn p_min=0.75 greift; Token 3 würde nur ~61%
+#   (0.85^3) bringen und der Extra-Overhead auf Vulkan lohnt sich nicht.
+#   Auf CUDA/high-end Hardware kann 3 minimal besser sein — dann via
+#   Expert-Panel überschreiben.
+# draft_p_min = minimum confidence threshold for speculation.
+#   0.75 = mainline default (b9190+). NICHT 0.0 setzen: das erzwingt
+#   Spekulation bei jedem Schritt unabhängig von Confidence → konstanter
+#   D2H-Transfer-Overhead auf Vulkan → schlechter als ohne Spekulation.
+draft_max: 2
+draft_p_min: 0.75
 
 notes: >
   Gemma ist empfindlich gegenüber repeat_penalty > 1.0.

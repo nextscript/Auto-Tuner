@@ -70,8 +70,25 @@ def _read_value(f, vtype: int, want_array_elements: bool = True) -> Any:
     raise ValueError(f"Unknown GGUF value type {vtype}")
 
 
+# Pre-compiled: match "blk.{N}." tensor names — used by MTP tensor scan.
+_BLK_IDX_RE = re.compile(r"^blk\.(\d+)\.")
+
+
 def read_gguf_metadata(path: Path) -> Dict[str, Any]:
-    """Read GGUF header KV pairs. Returns {} on any failure."""
+    """Read GGUF header KV pairs and scan tensor info for MTP detection.
+
+    In addition to the standard KV pairs this function reads the tensor
+    info section (names only — no data) and stores a synthetic flag:
+
+      ``__mtp_tensors__: True``  — set when any tensor has a block index
+      that exceeds the model's declared ``<arch>.block_count``.  This
+      catches community GGUFs produced by "inject MTP" scripts that graft
+      the extra draft block into the file without writing the official
+      ``<arch>.nextn_predict_layers`` key.
+
+    Synthetic keys start with ``__`` and can never collide with real GGUF
+    keys (the GGUF spec forbids leading underscores in key names).
+    """
     try:
         with path.open("rb") as f:
             magic = f.read(4)
@@ -80,7 +97,7 @@ def read_gguf_metadata(path: Path) -> Dict[str, Any]:
             version = struct.unpack("<I", f.read(4))[0]
             if version < 2:
                 return {}  # v1 layout differed; not worth supporting
-            _n_tensors = struct.unpack("<Q", f.read(8))[0]
+            n_tensors = struct.unpack("<Q", f.read(8))[0]
             n_kv = struct.unpack("<Q", f.read(8))[0]
 
             md: Dict[str, Any] = {}
@@ -89,9 +106,106 @@ def read_gguf_metadata(path: Path) -> Dict[str, Any]:
                 key = f.read(key_len).decode("utf-8", errors="replace")
                 vtype = struct.unpack("<I", f.read(4))[0]
                 md[key] = _read_value(f, vtype)
+
+            # ------------------------------------------------------------------
+            # Tensor info scan — GGUF layout after KV section:
+            #   For each tensor: name (u64-len string), n_dims (u32),
+            #                    dims (u64 * n_dims), type (u32), offset (u64)
+            # No padding before this section; data padding is after.
+            #
+            # Goal: detect block indices beyond block_count which indicate
+            # extra MTP/draft heads (e.g. blk.28.* when block_count == 28).
+            # The official converter writes <arch>.nextn_predict_layers for
+            # this, but inject-style community GGUFs often skip that key.
+            # ------------------------------------------------------------------
+            arch = str(md.get("general.architecture", "") or "")
+            block_count: int = 0
+            if arch:
+                bc = md.get(f"{arch}.block_count")
+                if bc is not None:
+                    try:
+                        block_count = int(bc)
+                    except (TypeError, ValueError):
+                        pass
+
+            has_mtp_tensors = False
+            try:
+                for _ in range(n_tensors):
+                    tname_len = struct.unpack("<Q", f.read(8))[0]
+                    tname = f.read(tname_len).decode("utf-8", errors="replace")
+                    n_dims = struct.unpack("<I", f.read(4))[0]
+                    # skip: dims (u64 * n_dims) + type (u32) + offset (u64)
+                    f.read(8 * n_dims + 4 + 8)
+                    if not has_mtp_tensors and block_count > 0:
+                        m = _BLK_IDX_RE.match(tname)
+                        if m:
+                            try:
+                                if int(m.group(1)) >= block_count:
+                                    has_mtp_tensors = True
+                            except (TypeError, ValueError):
+                                pass
+            except (OSError, struct.error, EOFError):
+                pass  # non-fatal; KV data already collected
+
+            if has_mtp_tensors:
+                md["__mtp_tensors__"] = True
+
             return md
     except (OSError, struct.error, EOFError, ValueError, UnicodeDecodeError):
         return {}
+
+
+def metadata_has_embedded_mtp(md: Dict[str, Any]) -> bool:
+    """Return True iff the GGUF contains an integrated MTP/draft-head.
+
+    Detection order (most to least authoritative):
+
+    1. ``<arch>.nextn_predict_layers > 0`` — the official GGUF key written
+       by ``convert_hf_to_gguf.py --mtp`` (llama.cpp gguf-py constants
+       ``Keys.LLM.NEXTN_PREDICT_LAYERS``) and present in all standard
+       MTP GGUFs from the mainstream converter since ~b8000.  A value > 0
+       is definitive proof of embedded draft heads.
+
+    2. ``__mtp_tensors__ = True`` — synthetic key injected by
+       :func:`read_gguf_metadata` when the tensor-info scan finds block-
+       indexed tensors beyond the declared ``block_count``.  Covers
+       community GGUFs produced by tensor-inject scripts that graft MTP
+       weights into an existing GGUF without updating the metadata key.
+
+    3. Generic KV scan for any ``*.nextn_predict_layers > 0`` — forward-
+       compat: catches future architectures before they appear in
+       ``general.architecture``-prefixed key lookup above.
+    """
+    if not md:
+        return False
+
+    # 1. Official key: <arch>.nextn_predict_layers
+    arch = str(md.get("general.architecture", "") or "")
+    if arch:
+        v = md.get(f"{arch}.nextn_predict_layers")
+        if v is not None:
+            try:
+                if int(v) > 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+    # 2. Synthetic tensor-scan flag (set by read_gguf_metadata)
+    if md.get("__mtp_tensors__"):
+        return True
+
+    # 3. Generic scan — forward-compat for new arch prefixes
+    for key, val in md.items():
+        if key.startswith("__"):
+            continue  # skip synthetic keys
+        if "nextn_predict" in key.lower():
+            try:
+                if int(val) > 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+    return False
 
 
 def metadata_layer_count(md: Dict[str, Any]) -> int:
@@ -502,17 +616,33 @@ class ModelEntry:
 
     @property
     def has_embedded_mtp(self) -> bool:
-        """True if the filename contains 'MTP' as a standalone token.
+        """True if this GGUF contains an integrated MTP/draft-head.
 
-        MTP (Multi-Token Prediction) variants bundle the speculative-decoding
-        drafter as extra tensors inside the main GGUF — no sibling assistant
-        file needed. Speculative decoding uses ``--spec-type draft-mtp`` flags rather
-        than ``-md``. Detection is filename-only because metadata key naming
-        differs across forks.
+        Detection is metadata-first with a filename-pattern fallback:
 
-        Examples that match: ``Qwen3.6-27B-MTP-UD-Q3_K_XL``, ``model-mtp-q4``.
-        Examples that don't: ``prometheus`` (contains 'mtp' but not bounded).
+        **Primary** — :func:`metadata_has_embedded_mtp` checks:
+          1. ``<arch>.nextn_predict_layers > 0`` (official GGUF key set by
+             ``convert_hf_to_gguf.py --mtp`` and all standard converters).
+          2. ``__mtp_tensors__`` synthetic flag from the tensor-info scan
+             in :func:`read_gguf_metadata` (catches inject-style community
+             GGUFs that add MTP blocks without updating the metadata key).
+          3. Generic scan for any ``*.nextn_predict_layers > 0``.
+
+        **Fallback** — filename regex ``(?:^|[-_.])\\ mtp(?:[-_.]|$)``
+        (case-insensitive) for rare GGUFs that predate the standardised
+        metadata key and carry no standard keys.
+
+        Examples that are detected by metadata alone (no "MTP" in name):
+            ``Qwen3.6-27B-Q4_K_M.gguf``  (if ``qwen2.nextn_predict_layers=1``)
+        Examples detected by filename fallback only:
+            ``Qwen3.6-27B-MTP-UD-Q3_K_XL.gguf``  (legacy community inject)
+        Examples that never match (correct negative):
+            ``prometheus-13b.gguf``  (contains 'mtp' but not bounded)
         """
+        # Primary: authoritative GGUF metadata
+        if self.metadata and metadata_has_embedded_mtp(self.metadata):
+            return True
+        # Fallback: filename-based for GGUFs missing the standard key
         return bool(re.search(r"(?:^|[-_.])mtp(?:[-_.]|$)", self.name, re.IGNORECASE))
 
     @property

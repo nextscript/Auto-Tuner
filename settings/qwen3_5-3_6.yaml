@@ -68,18 +68,20 @@ sampling:
     repeat_penalty: 1.0
     presence_penalty: 0.0
 
-# MTP (Multi-Token Prediction) draft model configuration
-# Qwen3.6-...-MTP uses integrated assistant models for speculative decoding via MTP.
-# draft_max = number of MTP tokens to predict per step (default: 3)
-# draft_p_min = minimum probability threshold for MTP speculation.
-#   Mainline default (b9190+) is 0.75. Setting 0.0 forces speculation on every
-#   step regardless of confidence → constant D2H-overhead → write slower than
-#   baseline on Vulkan/ROCm. Keep 0.75 to match upstream: only speculate when
-#   the draft head is reasonably confident. Community results on Qwen3.6-27B/35B
-#   show ~75-95% acceptance anyway, so the threshold rarely fires and does not
-#   hurt throughput. For pure coding sessions (repetitive token patterns) you
-#   can lower to 0.5 for extra speculation aggressiveness: `-- --spec-draft-p-min 0.5`
-draft_max: 3
+# MTP / speculative decoding configuration.
+# draft_max = max draft tokens per step.
+#   2 ist der Sweet-Spot für Vulkan/ROCm auf Consumer-GPUs: Token 1 hat
+#   ~85–90% Acceptance wenn p_min=0.75 greift (Qwen3.6 zeigt ~83% lt.
+#   Community-Benchmarks); Token 3 würde nur ~61% (0.85^3) bringen und
+#   der Extra-Kernel-Overhead auf Vulkan überwiegt den Gewinn. CUDA-User
+#   können 3–5 via Expert-Panel testen — auf AMD/Vulkan ist 2 die Grenze.
+#   Für MoE-Varianten (35B-A3B): ebenfalls 2, da die spärlichere Aktivierung
+#   die Acceptance-Rate leicht senkt und das Overhead-Verhältnis ungünstiger ist.
+# draft_p_min = minimum confidence threshold for speculation.
+#   0.75 = mainline default (b9190+). Nur spekulieren wenn der Draft-Head
+#   hinreichend sicher ist — verhindert konstanten D2H-Overhead auf
+#   Vulkan/ROCm wenn das Modell unsicher ist.
+draft_max: 2
 draft_p_min: 0.75
 
 
