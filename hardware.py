@@ -1111,10 +1111,22 @@ def _filter_inference_gpus(
 ) -> Tuple[List[GPUInfo], List[GPUInfo]]:
     """Split detected GPUs into (used for inference, ignored).
 
-    Heuristic: when one GPU is clearly dominant (>= 2x the VRAM of the next),
-    keep only it and mark the smaller ones as ignored. This is what catches
-    the "iGPU + dGPU" case — without it, llama.cpp's tensor-split would
-    bottleneck the dGPU on the iGPU's tiny VRAM and shared bandwidth.
+    Two-stage filter:
+
+    Stage 1 — vendor gate:
+      Intel iGPUs are moved to ignored whenever at least one non-Intel GPU
+      exists. Intel iGPUs on Windows can report large shared-memory VRAM
+      values (e.g. 27 GB on a system with 32 GB RAM) that would fool the
+      VRAM-ratio check below and cause real discrete GPUs (e.g. a 16 GB
+      RX 9070 XT next to a 32 GB R9700) to be wrongly excluded.
+
+    Stage 2 — VRAM-ratio gate:
+      Among the remaining (non-Intel) GPUs drop any that have less than
+      one-third the VRAM of the largest card. This still catches tiny
+      integrated or MXM GPUs (e.g. 2 GB) while correctly keeping a 16 GB
+      card alongside a 32 GB card (16 × 3 = 48 ≥ 32 ✓).
+      The old ½ threshold was too aggressive: 15.9 GB × 2 = 31.8 GB which
+      is just below 32 GB, so the 9070 XT was incorrectly ignored.
 
     Also drops GPUs with 0 reported VRAM when at least one GPU has measured
     VRAM (those are usually iGPUs whose memory we couldn't read).
@@ -1134,15 +1146,26 @@ def _filter_inference_gpus(
         kept_pool = list(gpus)
         ignored = []
 
+    # Stage 1: always ignore Intel iGPUs when real discrete GPUs exist.
+    # Must happen before the VRAM-ratio sort, because iGPUs report shared
+    # system-RAM as "VRAM" and can appear larger than actual dGPUs.
+    non_intel = [g for g in kept_pool if g.vendor != "intel"]
+    intel_igpus = [g for g in kept_pool if g.vendor == "intel"]
+    if non_intel:
+        ignored.extend(intel_igpus)
+        kept_pool = non_intel
+
     if len(kept_pool) < 2:
         return kept_pool, ignored
 
+    # Stage 2: drop GPUs with less than 1/3 of the largest card's VRAM.
     sorted_g = sorted(kept_pool, key=lambda g: g.total_vram_mb, reverse=True)
     largest = sorted_g[0]
     used: List[GPUInfo] = [largest]
     for g in sorted_g[1:]:
-        # Keep as a peer if it's at least half the largest's VRAM
-        if g.total_vram_mb * 2 >= largest.total_vram_mb:
+        # Keep as a peer if it's at least one-third of the largest's VRAM.
+        # Example: 9070 XT ~16 GB next to R9700 32 GB → 16×3=48 ≥ 32 ✓
+        if g.total_vram_mb * 3 >= largest.total_vram_mb:
             used.append(g)
         else:
             ignored.append(g)
