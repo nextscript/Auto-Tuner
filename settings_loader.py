@@ -29,7 +29,7 @@ class ModelProfile:
     # Used e.g. by Ternary-Bonsai (BitNet) to invoke a 1bllama build.
     server_binary: Optional[str] = None
     draft_max: int = 16
-    draft_p_min: float = 0.0
+    draft_p_min: float = 0.75
     # RoPE-Scaling (YaRN): aktiviert wenn ctx > native_ctx und genügend Speicher
     rope_scale_enabled: bool = False  # YAML-Konfiguration: rope_scale: true
     rope_scale_max_ctx: int = 0  # maximales Context mit RoPE-Scaling (0=auto 1M)
@@ -96,7 +96,7 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
                     str(data["server_binary"]) if data.get("server_binary") else None
                 ),
                 draft_max=int(data.get("draft_max", 16)),
-                draft_p_min=float(data.get("draft_p_min", 0.0)),
+                draft_p_min=float(data.get("draft_p_min", 0.75)),
                 rope_scale_enabled=rope_scale_enabled,
                 rope_scale_max_ctx=rope_scale_max_ctx
                 if rope_scale_max_ctx > 0

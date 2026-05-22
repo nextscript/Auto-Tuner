@@ -1268,17 +1268,15 @@ def compute_config(
     # ---- (4d) Multi-GPU placement. Skipped for MoE (handled via n_cpu_moe).
     #
     # Strategy: if the model + KV + safety fits on the largest GPU alone,
-    # select it with --main-gpu <hip_index>.  hip_index IS the Vulkan
-    # enumeration index (resolved by hardware.py via vulkaninfo), which is
-    # the same ordering llama.cpp uses for both Vulkan and ROCm/HIP builds.
-    # HIP_VISIBLE_DEVICES is NOT set — it only affects ROCm runtimes and
-    # is silently ignored by Vulkan builds, causing --main-gpu=0 to land
-    # on the wrong device after the remapping assumption breaks down.
+    # pin everything there with HIP_VISIBLE_DEVICES so the secondary GPU is
+    # never initialised by llama.cpp (prevents driver crashes on immature
+    # RDNA 4/5 drivers). Only spread tensors across all GPUs when the
+    # largest one alone is too small.
     #
-    # GPU priority: when the user pins a GPU via the GUI (user_priority=1),
-    # that GPU is treated as "largest" regardless of raw VRAM size.
-    # Disabled GPUs (removed from system.gpus by the GUI before this call)
-    # never appear here.
+    # AMD Windows caveat: the Windows registry order (system.gpus positions)
+    # does NOT reliably match HIP device indices. We use gpu.hip_index (set
+    # by hardware.py via vulkaninfo) to build correct HIP_VISIBLE_DEVICES and
+    # --main-gpu values. When hip_index is unknown we fall back to positions.
     tensor_split: Optional[str] = None
     main_gpu: Optional[int] = None
     env_overrides: Dict[str, str] = {}
@@ -1288,29 +1286,9 @@ def compute_config(
         free_mb_per_gpu = [g.free_vram_mb for g in system.gpus]
         total_mb = sum(sizes_mb)
         if total_mb > 0:
-            # Respect user_priority (set by GUI GPU control bar) before
-            # falling back to VRAM-based ranking.
-            prio_gpus = [
-                i for i, g in enumerate(system.gpus)
-                if getattr(g, "user_priority", 0) == 1
-            ]
-            if prio_gpus:
-                largest_pos = prio_gpus[0]
-            else:
-                largest_pos = max(range(len(sizes_mb)), key=lambda i: sizes_mb[i])
+            largest_pos = max(range(len(sizes_mb)), key=lambda i: sizes_mb[i])
             largest_gpu = system.gpus[largest_pos]
-
-            # Use free VRAM to check if the model fits alone on the largest
-            # GPU. If free_vram_mb == 0 (WMI couldn't read it — common for
-            # Radeon AI PRO and other workstation cards), fall back to total
-            # VRAM as a conservative estimate (the card is mostly empty when
-            # AutoTuner launches a fresh server).
-            raw_largest_free = free_mb_per_gpu[largest_pos]
-            largest_free_gb = (
-                raw_largest_free / 1024.0
-                if raw_largest_free > 0
-                else sizes_mb[largest_pos] / 1024.0
-            )
+            largest_free_gb = free_mb_per_gpu[largest_pos] / 1024.0
 
             # Ask: do the MODEL WEIGHTS (plus mmproj / draft overhead + safety)
             # fit on the largest GPU alone?  KV cache is NOT included here
@@ -1330,23 +1308,13 @@ def compute_config(
             if full_off and needed_gb <= largest_free_gb:
                 # Fits on the biggest card alone.
                 if hip_known:
-                    # Pass the Vulkan/HIP device index directly as --main-gpu.
-                    #
-                    # HIP_VISIBLE_DEVICES is intentionally NOT set here.
-                    # The previous approach set HIP_VISIBLE_DEVICES=<hip_index>
-                    # and then used --main-gpu 0, assuming the HIP runtime would
-                    # remap device <hip_index> to position 0. That assumption
-                    # only holds for ROCm/HIP builds. On Vulkan builds (which
-                    # enumerate devices via vkEnumeratePhysicalDevices) the env
-                    # var has no effect, so --main-gpu 0 pointed at the wrong
-                    # card (Vulkan0 = 9070 XT instead of Vulkan1 = R9700).
-                    #
-                    # hardware.py derives hip_index from vulkaninfo, so it IS
-                    # the Vulkan enumeration index. Passing it directly works
-                    # correctly for both Vulkan builds (--main-gpu == Vulkan
-                    # device index) and ROCm builds.
-                    main_gpu = largest_gpu.hip_index
-                    # No tensor_split needed — single GPU target.
+                    # Restrict llama.cpp to only the target GPU via
+                    # HIP_VISIBLE_DEVICES — this prevents initialising the
+                    # secondary card entirely, avoiding driver crashes on
+                    # AMD systems where the secondary GPU has immature support.
+                    env_overrides["HIP_VISIBLE_DEVICES"] = str(largest_gpu.hip_index)
+                    main_gpu = 0  # only one device visible after remapping
+                    # No tensor_split needed when a single device is visible.
                 else:
                     # HIP index unknown — fall back to position-based pinning.
                     parts = ["0.000"] * len(sizes_mb)
@@ -1357,19 +1325,19 @@ def compute_config(
                 # Model doesn't fit alone — spread proportionally across GPUs.
                 all_hip_known = all(g.hip_index is not None for g in system.gpus)
                 if all_hip_known:
-                    # Sort GPUs by ascending Vulkan/HIP index so that the
-                    # tensor_split fractions match the device order llama.cpp
-                    # actually sees.  HIP_VISIBLE_DEVICES is NOT set — hip_index
-                    # IS the Vulkan device index, usable directly on both
-                    # Vulkan and ROCm builds.
-                    sorted_gpus = sorted(system.gpus, key=lambda g: g.hip_index or 0)  # type: ignore[arg-type]
+                    # Re-order GPUs by ascending HIP index so that the
+                    # HIP_VISIBLE_DEVICES string and tensor_split fractions
+                    # match the device order llama.cpp actually sees.
+                    sorted_gpus = sorted(system.gpus, key=lambda g: int(g.hip_index))  # type: ignore[arg-type]
+                    env_overrides["HIP_VISIBLE_DEVICES"] = ",".join(
+                        str(g.hip_index) for g in sorted_gpus
+                    )
                     total_sorted_mb = sum(g.total_vram_mb for g in sorted_gpus)
                     tensor_split = ",".join(
                         f"{g.total_vram_mb / total_sorted_mb:.3f}"
                         for g in sorted_gpus
                     )
-                    # Position in the sorted-by-hip_index list == actual Vulkan
-                    # device index, so this is the correct --main-gpu value.
+                    # main_gpu = position of the largest GPU in the sorted list
                     main_gpu = sorted_gpus.index(largest_gpu)
                 else:
                     # HIP indices unknown — use position-based (may be wrong on
@@ -1528,10 +1496,14 @@ def build_command(
     --------------------------
     * ``draft_model`` is set → sibling-drafter path. Adds ``-md`` plus
       ``--spec-draft-n-max`` (no ``--spec-type``; mainline auto-detects from ``-md``).
+      Skipped when vision is loaded (three model graphs in VRAM simultaneously
+      is too risky on 16-GB-class cards).
     * ``draft_model`` is None and the model has embedded MTP (detected
       via ``<arch>.nextn_predict_layers`` metadata or tensor-info scan,
       with filename token ``MTP`` as fallback) →
-      ``--spec-draft-n-max`` only (the drafter rides inside the GGUF).
+      ``--spec-type draft-mtp`` + ``--spec-draft-n-max`` only (the drafter
+      rides inside the GGUF). Compatible with ``--mmproj`` / vision since
+      mainline b9180 (PR #22673, merged 2026-05-16).
     * ``enable_speculative=False`` overrides both paths and emits no
       speculative flags at all — for the case where the user explicitly
       unchecked Draft on an MTP-named model.
@@ -1576,18 +1548,27 @@ def build_command(
     #     no second model-load conflict. Vision and embedded MTP can coexist;
     #     Qwen3.6-MTP models in fact require the mmproj to work correctly.
     draft_val = getattr(profile, "draft_max", 0) or 2
-    draft_p_min = getattr(profile, "draft_p_min", 0.0) or 0.0
+    draft_p_min = getattr(profile, "draft_p_min", 0.75) or 0.75
     vision_loaded = model.mmproj is not None
-    # Path A: sibling drafter — skip when vision is active (conflict).
+    # Path A: sibling drafter — skip when vision is active.
+    # Loading *two separate model files* (-m + -md) while also loading a
+    # vision encoder (--mmproj) puts three large graphs in VRAM at once and
+    # can exhaust memory. Integrated MTP (Path B) does not have this problem
+    # because the draft head is already inside the main GGUF — there is no
+    # second model file to load.
     use_external = enable_speculative and draft_model is not None and not vision_loaded
-    # Path B: integrated MTP — NOT compatible with vision (--mmproj + --spec-type draft-mtp
-    # is explicitly unsupported in mainline llama.cpp; the server exits immediately).
-    # Skip when vision is loaded, same as Path A.
+    # Path B: integrated MTP (draft-mtp) — compatible with vision (--mmproj)
+    # since mainline b9180 (PR #22673, merged 2026-05-16). The MTP draft head
+    # lives inside the same GGUF as the main model; llama.cpp loads it as part
+    # of the same graph so there is no second-model-load conflict.
+    # NOTE: Very long contexts (≥200k) combined with actual image input can
+    # trigger CUDA OOM on high-VRAM cards; on Vulkan/AMD at typical contexts
+    # (≤128k) the combination is stable. The Qwen3.6 multimodal community
+    # actively uses --spec-type draft-mtp + --mmproj together.
     use_integrated = (
         enable_speculative
         and _has_integrated_mtp(model)
         and draft_model is None
-        and not vision_loaded
     )
 
     if use_external:
@@ -1607,17 +1588,23 @@ def build_command(
         # Path B — integrated MTP drafter inside the main GGUF.
         # `--spec-draft-ngl 99` keeps the MTP head on GPU; without it
         # the drafter layers fall back to CPU and the speedup vanishes.
-        # In mainline b9190+ the flag value was renamed from "mtp" to
-        # "draft-mtp" (see tools/server/README.md --spec-type enum).
+        # In mainline b9180+ (PR #22673, merged 2026-05-16) the spec-type
+        # was renamed from the old "mtp" alias to the canonical "draft-mtp".
         #
-        # `--spec-draft-p-min` MUST be set here (same as Path A).
-        # Mainline default since b9190 is 0.75 — if we omit the flag the
-        # server uses its own default and our YAML value is silently
-        # ignored. With p_min=0.0 (old YAML default) the MTP hook fires
-        # on every decode step regardless of confidence, adding constant
-        # D2H-transfer overhead and causing write-speed to be slower
-        # than baseline on Vulkan/ROCm. Match mainline default (0.75) or
-        # let the profile override it explicitly.
+        # Vision (--mmproj) and integrated MTP can coexist — the draft head
+        # lives inside the same GGUF so there is no second model-load conflict.
+        # Multiple community guides actively combine --spec-type draft-mtp with
+        # --mmproj for Qwen3.6 multimodal use. At very large contexts (≥200k)
+        # with simultaneous image encoding there can be CUDA OOM; on Vulkan/AMD
+        # at typical contexts this is stable.
+        #
+        # `--spec-draft-p-min` is always emitted explicitly (same as Path A).
+        # The mainline server default is 0.75; omitting the flag would make the
+        # YAML value silently ignored. With p_min=0.0 the MTP hook fires on
+        # every decode step regardless of confidence, adding constant D2H-transfer
+        # overhead and causing write-speed to be slower than baseline on Vulkan/ROCm.
+        # The settings_loader default is now also 0.75 so profiles without an
+        # explicit setting still get the correct behaviour.
         cmd += ["--spec-type", "draft-mtp"]
         cmd += ["--spec-draft-n-max", str(draft_val)]
         cmd += ["--spec-draft-ngl", "99"]
