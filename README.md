@@ -482,15 +482,16 @@ Recommended build settings for this system:
 # Example-System:
 # - Intel Core Ultra 9 285K
 # - AMD Radeon RX 9070 XT 16GB
+# - AMD Radeon R9700 AI Pro 32GB
 # - G.Skill Trident Z 48GB DDR5-8400MHz (2x24GB)
 
-# Main-Fork b9208 (SPIRV-Headers required since b9194)
-cd C:\LAB\ai-local
+# Main-Fork b9208+ (SPIRV-Headers required since b9194) - Windows
+cd H:\LAB\ai-local
 git clone https://github.com/KhronosGroup/SPIRV-Headers.git
 cmake -S .\SPIRV-Headers -B .\SPIRV-Headers\build `
   -G "Visual Studio 18 2026" `
   -A x64 `
-  -DCMAKE_INSTALL_PREFIX="C:/LAB/ai-local/SPIRV-Headers/install"
+  -DCMAKE_INSTALL_PREFIX="H:/LAB/ai-local/SPIRV-Headers/install"
 cmake --build .\SPIRV-Headers\build --config Release
 cmake --install .\SPIRV-Headers\build --config Release
 git clone https://github.com/ggml-org/llama.cpp.git
@@ -510,9 +511,15 @@ cmake -S .\llama.cpp -B .\llama.cpp\build `
   -DLLAMA_CURL=OFF `
   -DGGML_CCACHE=OFF `
   -DGGML_VULKAN_CHECK_RESULTS=OFF `
-  -DCMAKE_PREFIX_PATH="C:/LAB/ai-local/SPIRV-Headers/install"
+  -DCMAKE_PREFIX_PATH="H:/LAB/ai-local/SPIRV-Headers/install"
 cmake --build .\llama.cpp\build --config Release --parallel 24
-```
+
+# Main-Fork - Ubuntu
+git clone https://github.com/ggerganov/llama.cpp llama.cpp
+cd ~/llama.cpp
+rm -rf build
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j $(nproc)```
 
 ## Server-Features (Stand b9208)
 

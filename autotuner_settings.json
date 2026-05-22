@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "C:\\LAB\\ai-local\\b9247_llama.cpp",
+  "fork_path": "H:\\LAB\\ai-local\\b9279_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -51,6 +51,16 @@
   "mode": "coding",
   "window_geometry": "AdnQywADAAAAAADpAAAAOAAABbsAAAUFAAAA6QAAAFcAAAW7AAAFBQAAAAAAAAAADXAAAADpAAAAVwAABbsAAAUF",
   "window_state": "AAAA/wAAAAD9AAAAAAAABNMAAAR6AAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
-  "fork_container_path": "C:\\LAB\\ai-local",
-  "font_size": 10
+  "fork_container_path": "H:\\LAB\\ai-local",
+  "font_size": 10,
+  "gpu_overrides": {
+    "AMD Radeon AI PRO R9700": {
+      "enabled": true,
+      "priority": 2
+    },
+    "AMD Radeon RX 9070 XT": {
+      "enabled": true,
+      "priority": 1
+    }
+  }
 }

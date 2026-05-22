@@ -1302,8 +1302,8 @@
 						0
 					],
 					"deviceLUID": [
-						97,
-						123,
+						78,
+						112,
 						1,
 						0,
 						0,
@@ -11133,7 +11133,7 @@
 			"history": [
 				{
 					"revision": 1,
-					"date": "2026-5-20",
+					"date": "2026-5-22",
 					"author": "Automated export from vulkaninfo",
 					"comment": ""
 				}

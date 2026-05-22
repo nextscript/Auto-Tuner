@@ -43,7 +43,7 @@ def _get_vram_from_registry() -> Dict[str, int]:
     )
 
     for i in range(100):
-        key_name = f"000{i}"
+        key_name = f"{i:04d}"  # "0000", "0001", ..., "0099" — old f"000{i}" was wrong for i≥10
         try:
             key = winreg.OpenKey(
                 winreg.HKEY_LOCAL_MACHINE,
@@ -759,7 +759,7 @@ foreach ($k in $regKeys) {
 # VideoProcessor enthält z.B. "AMD Radeon Graphics Processor (0x7550)"
 $devidToName = @{}
 foreach ($a in $adapters) {
-    $processor = ($a.VideoProcessor or "").Trim()
+    $processor = "$($a.VideoProcessor)".Trim()  # safe null→"" coercion; 'or' is not a PS operator
     if ($processor -match '\(0x([0-9a-fA-F]+)\)') {
         $devId = $matches[1].ToLower()
         $devidToName[$devId] = $a.Name.Trim()

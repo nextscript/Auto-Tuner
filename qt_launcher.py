@@ -53,7 +53,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from hardware import detect_system, SystemInfo, GPUInfo
+from hardware import detect_system, SystemInfo
 from scanner import scan_models, group_entries, ModelEntry
 from settings_loader import load_profiles, match_profile, ModelProfile
 from tuner import build_command, compute_config, TunedConfig
@@ -175,11 +175,26 @@ class _HwDetectWorker(QObject):
         self._timeout = timeout
 
     def run(self) -> None:
-        try:
-            s = detect_system()
-            self.finished.emit(s, "")
-        except Exception as exc:
-            self.finished.emit(None, str(exc))
+        result: list = [None, ""]  # [SystemInfo|None, error_str]
+
+        def _detect() -> None:
+            try:
+                result[0] = detect_system()
+            except Exception as exc:
+                result[1] = str(exc)
+
+        t = threading.Thread(target=_detect, daemon=True)
+        t.start()
+        t.join(self._timeout)
+
+        if t.is_alive():
+            # Detection timed out — emit with whatever partial result exists.
+            # result[0] may still be None if detect_system() never returned.
+            self.finished.emit(result[0], "Hardware detection timed out (partial result).")
+        elif result[1]:
+            self.finished.emit(None, result[1])
+        else:
+            self.finished.emit(result[0], "")
 
 
 # ---------------------------------------------------------------------------
@@ -1017,191 +1032,6 @@ class ExpertPanel(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# GPU control bar — compact per-GPU priority + enable/disable widget
-#
-# Replaces the plain GPU label in the sysbar. Each active and ignored GPU
-# gets a small "pill" showing:
-#   ①  priority badge (click to promote to main device)
-#   ✓  enabled checkbox
-# Full info (name, VRAM, Vulkan index) is in the hover tooltip so the bar
-# stays compact (fits in the 24 px sysbar).
-#
-# The bar emits settingsChanged({name: {enabled, priority}}) whenever the
-# user interacts with it. MainWindow connects that to app_settings and
-# triggers a sysinfo refresh so the tuner sees the updated GPU list.
-
-
-class _GpuPill(QWidget):
-    """Single-GPU control: priority badge + enable checkbox."""
-
-    # Circled digit badges ①②③④⑤⑥⑦⑧⑨ (U+2460…)
-    _BADGES = [chr(0x2460 + i) for i in range(9)]
-
-    promoted = pyqtSignal(object)   # emits self when badge is clicked
-    toggled  = pyqtSignal(object)   # emits self when checkbox changes
-
-    def __init__(self, gpu: GPUInfo, priority: int, enabled: bool,
-                 parent: "QWidget | None" = None) -> None:
-        super().__init__(parent)
-        self.gpu = gpu
-        self._priority = priority
-        self._enabled  = enabled
-
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(2, 0, 4, 0)
-        lay.setSpacing(1)
-
-        self._badge = QLabel(self._badge_text())
-        self._badge.setFixedWidth(16)
-        self._badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._badge.setStyleSheet(
-            "color:#fa0;font-weight:bold;cursor:pointer;"
-            "border-radius:3px;padding:0 1px;"
-        )
-        # Make the badge respond to mouse clicks via a0 filter
-        self._badge.mousePressEvent = lambda ev: self.promoted.emit(self)  # type: ignore[method-assign]
-
-        self._chk = QCheckBox()
-        self._chk.setChecked(enabled)
-        self._chk.setFixedWidth(18)
-        self._chk.stateChanged.connect(self._on_toggle)
-
-        lay.addWidget(self._badge)
-        lay.addWidget(self._chk)
-        self._refresh_tooltip()
-
-    # ------------------------------------------------------------------
-    def _badge_text(self) -> str:
-        idx = max(0, min(self._priority - 1, len(self._BADGES) - 1))
-        return self._BADGES[idx]
-
-    def _refresh_tooltip(self) -> None:
-        g = self.gpu
-        free_s = (
-            f"{g.free_vram_gb:.1f} GB free / " if g.free_vram_mb > 0 else ""
-        )
-        vk_s = (
-            f"Vulkan{g.hip_index}" if g.hip_index is not None else "Vulkan?"
-        )
-        state_s = "enabled" if self._enabled else "disabled"
-        tip = (
-            f"<b>{g.name}</b><br>"
-            f"VRAM: {free_s}{g.total_vram_gb:.1f} GB total<br>"
-            f"Device: {vk_s} &nbsp;·&nbsp; Priority: {self._priority}<br>"
-            f"Status: {state_s} — click ① to promote, ✓ to toggle"
-        )
-        self.setToolTip(tip)
-        self._badge.setToolTip(tip)
-        self._chk.setToolTip(tip)
-
-    # ------------------------------------------------------------------
-    def set_priority(self, p: int) -> None:
-        self._priority = p
-        self._badge.setText(self._badge_text())
-        self._refresh_tooltip()
-        # Grey out badge for disabled GPUs
-        color = "#888" if not self._enabled else "#fa0"
-        self._badge.setStyleSheet(
-            f"color:{color};font-weight:bold;cursor:pointer;"
-            "border-radius:3px;padding:0 1px;"
-        )
-
-    def _on_toggle(self, _state: int) -> None:
-        self._enabled = self._chk.isChecked()
-        self._refresh_tooltip()
-        self.set_priority(self._priority)   # refresh badge colour
-        self.toggled.emit(self)
-
-    # ------------------------------------------------------------------
-    @property
-    def priority(self) -> int:
-        return self._priority
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-
-class GpuControlBar(QWidget):
-    """Horizontal strip of _GpuPill widgets, one per (active + ignored) GPU."""
-
-    settingsChanged = pyqtSignal(dict)  # {gpu_name: {"enabled": bool, "priority": int}}
-
-    def __init__(self, parent: "QWidget | None" = None) -> None:
-        super().__init__(parent)
-        self._lay = QHBoxLayout(self)
-        self._lay.setContentsMargins(4, 0, 4, 0)
-        self._lay.setSpacing(6)
-        self._pills: list[_GpuPill] = []
-
-    # ------------------------------------------------------------------
-    def set_gpus(
-        self,
-        all_gpus: list[GPUInfo],
-        overrides: dict,
-    ) -> None:
-        """Rebuild pills from *all_gpus* (active + ignored) applying *overrides*."""
-        # Remove old pills
-        for pill in self._pills:
-            self._lay.removeWidget(pill)
-            pill.deleteLater()
-        self._pills.clear()
-
-        for gpu in all_gpus:
-            ov = overrides.get(gpu.name, {})
-            priority = int(ov.get("priority", gpu.index + 1))
-            enabled  = bool(ov.get("enabled", True))
-            pill = _GpuPill(gpu, priority, enabled, self)
-            pill.promoted.connect(self._on_promote)
-            pill.toggled.connect(self._on_toggle)
-            self._pills.append(pill)
-            self._lay.addWidget(pill)
-
-        self._renumber()
-
-    # ------------------------------------------------------------------
-    def _on_promote(self, pill: _GpuPill) -> None:
-        """Make *pill*'s GPU the primary device (priority 1)."""
-        if not pill.enabled:
-            return
-        # Shift current priority-1 pill to the promoted pill's slot
-        for p in self._pills:
-            if p is pill:
-                continue
-            if p.enabled and p.priority < pill.priority:
-                p.set_priority(p.priority + 1)
-        pill.set_priority(1)
-        self._renumber()
-        self._emit()
-
-    def _on_toggle(self, _pill: _GpuPill) -> None:
-        self._renumber()
-        self._emit()
-
-    def _renumber(self) -> None:
-        """Re-assign 1..n priorities: enabled first (sorted by current priority),
-        then disabled (sorted by current priority)."""
-        enabled  = sorted([p for p in self._pills if p.enabled],
-                          key=lambda p: p.priority)
-        disabled = sorted([p for p in self._pills if not p.enabled],
-                          key=lambda p: p.priority)
-        for i, p in enumerate(enabled,  1): p.set_priority(i)
-        for i, p in enumerate(disabled, len(enabled) + 1): p.set_priority(i)
-
-    def _emit(self) -> None:
-        self.settingsChanged.emit(
-            {p.gpu.name: {"enabled": p.enabled, "priority": p.priority}
-             for p in self._pills}
-        )
-
-    def get_overrides(self) -> dict:
-        return {
-            p.gpu.name: {"enabled": p.enabled, "priority": p.priority}
-            for p in self._pills
-        }
-
-
-# ---------------------------------------------------------------------------
 # Main window
 
 
@@ -1382,15 +1212,10 @@ class MainWindow(QMainWindow):
         self._cpu_lbl = QLabel("CPU: —")
         self._vram_lbl = QLabel("VRAM: —")
         self._ram_lbl = QLabel("RAM: —")
-        for lbl in (self._cpu_lbl, self._vram_lbl, self._ram_lbl):
+        self._gpu_lbl = QLabel("GPU: —")
+        for lbl in (self._cpu_lbl, self._vram_lbl, self._ram_lbl, self._gpu_lbl):
             lbl.setStyleSheet("color:#8be;padding:0 12px;")
             sl.addWidget(lbl)
-
-        # GPU control bar: compact per-GPU priority badge + enable checkbox
-        self._gpu_bar = GpuControlBar()
-        self._gpu_bar.settingsChanged.connect(self._on_gpu_settings_changed)
-        sl.addWidget(self._gpu_bar)
-
         sl.addStretch()
         sysbar.setMaximumHeight(24)
         sysbar.setStyleSheet("background:#161625;")
@@ -2744,6 +2569,17 @@ class MainWindow(QMainWindow):
     def _sysinfo_async(self) -> None:
         if self._sysinfo_busy:
             return
+        # Do NOT start a concurrent detect_system() while the initial
+        # _HwDetectWorker QThread is still running.  On new RDNA5 hardware the
+        # WMI / PowerShell calls inside detect_system() can take longer than the
+        # 6-second timer interval, and two simultaneous calls to
+        # pythoncom.CoInitialize() + WMI queries reliably crash the GUI.
+        try:
+            hw_thread = getattr(self, "_hw_detect_thread", None)
+            if hw_thread is not None and hw_thread.isRunning():
+                return
+        except RuntimeError:
+            pass  # QThread was already deleted via deleteLater — safe to continue
         self._sysinfo_busy = True
         threading.Thread(target=self._sysinfo_bg, daemon=True).start()
 
@@ -2772,17 +2608,9 @@ class MainWindow(QMainWindow):
     def _update_sysinfo_labels(self, s: SystemInfo) -> None:
         """Update system info labels in the UI bar.
 
-        Applies persisted GPU overrides (enable/disable + priority) to the
-        SystemInfo before storing it so that tuner.py sees the adjusted GPU
-        list — disabled GPUs are removed from s.gpus; priority-1 GPU has
-        gpu.user_priority=1 so the tuner selects it as --main-gpu.
-
         Always updates self._system to ensure model selection and config
         preview work even if hardware detection happened after startup.
         """
-        # Apply stored GPU overrides to SystemInfo
-        overrides = app_settings.get_gpu_overrides()
-        s = self._apply_gpu_overrides(s, overrides)
         self._system = s
 
         # VRAM-Anzeige
@@ -2802,81 +2630,32 @@ class MainWindow(QMainWindow):
         if s.cpu_name:
             self._cpu_lbl.setText(f"CPU: {s.cpu_name}")
 
-        # GPU control bar — show all GPUs (active + ignored) so the user
-        # can toggle/prioritise even cards that were auto-filtered out.
-        all_gpus = list(s.gpus) + list(s.ignored_gpus)
-        self._gpu_bar.set_gpus(all_gpus, overrides)
+        # GPU-Anzeige mit Utilization
+        if s.gpus:
+            gpu_parts = []
+            for g in s.gpus:
+                util = f"{g.gpu_util_percent:.0f}%" if g.gpu_util_percent > 0 else "—"
+                gpu_parts.append(f"{g.name} ({util})")
+            txt = "GPU: " + ", ".join(gpu_parts)
+            # Ignorierte GPUs (iGPU etc.) auch zeigen — Transparenz darüber, was
+            # erkannt aber bewusst nicht für Inference verwendet wird.
+            if s.ignored_gpus:
+                ign_parts = []
+                for g in s.ignored_gpus:
+                    size = (
+                        f"{g.total_vram_gb:.1f} GB"
+                        if g.total_vram_mb > 0
+                        else "VRAM unknown"
+                    )
+                    ign_parts.append(f"{g.name} ({size}, ignored)")
+                txt += "  ·  " + ", ".join(ign_parts)
+            self._gpu_lbl.setText(txt)
+        else:
+            self._gpu_lbl.setText("GPU: keine")
 
         self._log(
             f"[SysInfo] CPU={s.cpu_name}, VRAM={s.free_vram_gb:.1f}/{s.total_vram_gb:.1f}GB, RAM={s.free_ram_gb:.1f}/{s.total_ram_gb:.1f}GB, GPU={[g.name for g in s.gpus]}"
         )
-
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _apply_gpu_overrides(s: SystemInfo, overrides: dict) -> SystemInfo:
-        """Return a copy of *s* with user GPU overrides applied.
-
-        Disabled GPUs are moved to ignored_gpus. The priority-1 GPU gets
-        user_priority=1; others get their numeric priority so tuner.py can
-        rank them correctly without relying on VRAM size alone.
-        """
-        if not overrides:
-            return s
-
-        import dataclasses
-
-        new_used:    list[GPUInfo] = []
-        new_ignored: list[GPUInfo] = list(s.ignored_gpus)
-
-        for gpu in s.gpus:
-            ov = overrides.get(gpu.name, {})
-            enabled  = bool(ov.get("enabled", True))
-            priority = int(ov.get("priority", 999))
-            # Clone the dataclass so we don't mutate the original
-            g2 = dataclasses.replace(gpu, user_priority=priority)  # type: ignore[call-arg]
-            if enabled:
-                new_used.append(g2)
-            else:
-                new_ignored.append(g2)
-
-        # Also check ignored_gpus: user may have re-enabled an auto-filtered GPU
-        still_ignored: list[GPUInfo] = []
-        for gpu in s.ignored_gpus:
-            ov = overrides.get(gpu.name, {})
-            enabled  = bool(ov.get("enabled", False))   # default OFF for ignored
-            priority = int(ov.get("priority", 999))
-            g2 = dataclasses.replace(gpu, user_priority=priority)  # type: ignore[call-arg]
-            if enabled:
-                new_used.append(g2)
-            else:
-                still_ignored.append(g2)
-
-        # Re-sort used GPUs by user_priority so index 0 = priority-1 GPU
-        new_used.sort(key=lambda g: getattr(g, "user_priority", 0) or 999)  # type: ignore[attr-defined]
-
-        return dataclasses.replace(
-            s,
-            gpus=new_used,
-            ignored_gpus=still_ignored,
-        )
-
-    def _on_gpu_settings_changed(self, overrides: dict) -> None:
-        """Persist GPU overrides and re-apply them to the current system snapshot."""
-        app_settings.set_gpu_overrides(overrides)
-        if self._system is not None:
-            # Re-apply immediately without a full hardware re-detect so the
-            # config preview updates instantly.
-            import copy
-            s_orig = copy.copy(self._system)
-            # Restore raw GPU list from raw sysinfo (undo previous overrides)
-            # by re-running the apply with the new overrides.
-            self._system = self._apply_gpu_overrides(s_orig, overrides)
-            self._vram_lbl.setText(
-                f"VRAM: {self._system.free_vram_gb:.1f} / {self._system.total_vram_gb:.1f} GB free"
-                if self._system.total_vram_gb > 0 else "VRAM: keine GPU"
-            )
-            self._log(f"[GPU] Overrides updated: {overrides}")
-            self._on_selection_changed(self._model_list.currentItem(), None)
 
     # ------------------------------------------------------------------
     # Binary resolution
@@ -3054,6 +2833,19 @@ class MainWindow(QMainWindow):
         # has saved state. The save itself never blocks the close.
         self._persist_window_geometry()
 
+        # Stop periodic timers first so no new background work is started
+        # while we're tearing down.  Both timers are children of self so Qt
+        # would delete them anyway, but stopping them explicitly prevents a
+        # slot from firing between now and the actual object deletion.
+        try:
+            self._sysinfo_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._poll_timer.stop()
+        except Exception:
+            pass
+
         # Guard against already-deleted QThread (deleteLater race)
         try:
             if self._scan_thread is not None and self._scan_thread.isRunning():
@@ -3062,6 +2854,18 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self._scan_thread = None
+
+        # Clean up the initial hardware-detection thread.  If it is still
+        # running (slow WMI / PowerShell on new RDNA5 hardware) we ask it to
+        # stop gracefully and wait briefly.  Without this the worker emits
+        # _hw_detect_done on a half-destroyed MainWindow which can segfault.
+        try:
+            hw_thread = getattr(self, "_hw_detect_thread", None)
+            if hw_thread is not None and hw_thread.isRunning():
+                hw_thread.quit()
+                hw_thread.wait(3000)
+        except RuntimeError:
+            pass
 
         if self._server is not None and self._server.is_running():
             reply = QMessageBox.question(
