@@ -503,6 +503,85 @@ def test_multi_gpu_spreads_when_model_too_large_for_single_gpu(tmp_path):
     assert not pinned, f"Expected proportional split, got pinned: {cfg.tensor_split}"
 
 
+def _fake_dual_gpu_system_with_vk_order(
+    large_total: float = 32,
+    large_free: float = 31,
+    small_total: float = 16,
+    small_free: float = 14,
+    ram_total: float = 96,
+    ram_free: float = 80,
+    large_vk_idx: int = 1,
+    small_vk_idx: int = 0,
+) -> SystemInfo:
+    """Two-GPU system with hip_index set (simulating vulkaninfo resolution).
+
+    Default: small GPU is Vulkan device 0, large is device 1 — the
+    typical case on Windows where the primary display adapter (the
+    gaming GPU) enumerates first in Vulkan.
+    """
+    return SystemInfo(
+        os_name="Windows 11 test",
+        cpu_name="Test CPU",
+        cpu_cores_physical=24,
+        cpu_cores_logical=24,
+        total_ram_gb=ram_total,
+        free_ram_gb=ram_free,
+        gpus=[
+            GPUInfo(
+                index=0,
+                name="AMD Radeon AI PRO R9700",
+                vendor="amd",
+                total_vram_mb=int(large_total * 1024),
+                free_vram_mb=int(large_free * 1024),
+                hip_index=large_vk_idx,
+            ),
+            GPUInfo(
+                index=1,
+                name="AMD Radeon RX 9070 XT",
+                vendor="amd",
+                total_vram_mb=int(small_total * 1024),
+                free_vram_mb=int(small_free * 1024),
+                hip_index=small_vk_idx,
+            ),
+        ],
+    )
+
+
+def test_vulkan_env_var_emitted_for_single_gpu_pinning(tmp_path):
+    """When hip_index is known and the model fits on one GPU, both
+    HIP_VISIBLE_DEVICES and GGML_VK_VISIBLE_DEVICES must be emitted
+    so the config works on both ROCm and Vulkan backends."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_dual_gpu_system_with_vk_order()
+    cfg = compute_config(model, sys_info, profile)
+
+    assert cfg.full_offload is True
+    assert cfg.main_gpu == 0  # remapped: only one device visible
+    # Both env vars must point to the R9700's Vulkan index (1).
+    assert "HIP_VISIBLE_DEVICES" in cfg.env_overrides
+    assert "GGML_VK_VISIBLE_DEVICES" in cfg.env_overrides
+    assert cfg.env_overrides["HIP_VISIBLE_DEVICES"] == "1"
+    assert cfg.env_overrides["GGML_VK_VISIBLE_DEVICES"] == "1"
+
+
+def test_vulkan_env_var_emitted_for_multi_gpu_spread(tmp_path):
+    """When a large model must spread across both GPUs, both
+    HIP_VISIBLE_DEVICES and GGML_VK_VISIBLE_DEVICES must list
+    all devices in Vulkan order."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Mistral-Medium-3.5-128B-UD-IQ3_XXS", size_gb=40.0)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_dual_gpu_system_with_vk_order()
+    cfg = compute_config(model, sys_info, profile)
+
+    assert "GGML_VK_VISIBLE_DEVICES" in cfg.env_overrides
+    # Both env vars must list devices in ascending Vulkan order.
+    expected = cfg.env_overrides["HIP_VISIBLE_DEVICES"]
+    assert cfg.env_overrides["GGML_VK_VISIBLE_DEVICES"] == expected
+
+
 # ---------------------------------------------------------------------------
 # llama-server resolver
 

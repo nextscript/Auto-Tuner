@@ -1295,14 +1295,20 @@ def compute_config(
     # ---- (4d) Multi-GPU placement. Skipped for MoE (handled via n_cpu_moe).
     #
     # Strategy: if the model + KV + safety fits on the largest GPU alone,
-    # pin everything there with HIP_VISIBLE_DEVICES so the secondary GPU is
-    # never initialised by llama.cpp (prevents driver crashes on immature
-    # RDNA 4/5 drivers). Only spread tensors across all GPUs when the
-    # largest one alone is too small.
+    # pin everything there so the secondary GPU is never used by llama.cpp.
+    # Only spread tensors across all GPUs when the largest one alone is too
+    # small.
+    #
+    # Backend-agnostic device visibility:
+    #   - HIP_VISIBLE_DEVICES        → ROCm/HIP builds
+    #   - GGML_VK_VISIBLE_DEVICES    → Vulkan builds
+    # Both are always emitted so the config works regardless of backend.
+    # The Vulkan env var was introduced in llama.cpp PR #5321 and uses the
+    # same device indices as vulkaninfo (which is what hip_index stores).
     #
     # AMD Windows caveat: the Windows registry order (system.gpus positions)
-    # does NOT reliably match HIP device indices. We use gpu.hip_index (set
-    # by hardware.py via vulkaninfo) to build correct HIP_VISIBLE_DEVICES and
+    # does NOT reliably match HIP/Vulkan device indices. We use gpu.hip_index
+    # (set by hardware.py via vulkaninfo) to build correct env vars and
     # --main-gpu values. When hip_index is unknown we fall back to positions.
     tensor_split: Optional[str] = None
     main_gpu: Optional[int] = None
@@ -1346,11 +1352,15 @@ def compute_config(
             if full_off and needed_gb <= largest_free_gb:
                 # Fits on the biggest card alone.
                 if hip_known:
-                    # Restrict llama.cpp to only the target GPU via
-                    # HIP_VISIBLE_DEVICES — this prevents initialising the
-                    # secondary card entirely, avoiding driver crashes on
-                    # AMD systems where the secondary GPU has immature support.
+                    # Restrict llama.cpp to only the target GPU via device
+                    # visibility env vars — prevents initialising the secondary
+                    # card entirely, avoiding driver overhead and potential
+                    # crashes on AMD systems with mixed GPU generations.
+                    #   HIP_VISIBLE_DEVICES        → ROCm/HIP builds
+                    #   GGML_VK_VISIBLE_DEVICES    → Vulkan builds (b5321+)
+                    # Both are emitted so the config is backend-agnostic.
                     env_overrides["HIP_VISIBLE_DEVICES"] = str(largest_gpu.hip_index)
+                    env_overrides["GGML_VK_VISIBLE_DEVICES"] = str(largest_gpu.hip_index)
                     main_gpu = 0  # only one device visible after remapping
                     # No tensor_split needed when a single device is visible.
                 else:
@@ -1363,13 +1373,15 @@ def compute_config(
                 # Model doesn't fit alone — spread proportionally across GPUs.
                 all_hip_known = all(g.hip_index is not None for g in system.gpus)
                 if all_hip_known:
-                    # Re-order GPUs by ascending HIP index so that the
-                    # HIP_VISIBLE_DEVICES string and tensor_split fractions
-                    # match the device order llama.cpp actually sees.
+                    # Re-order GPUs by ascending HIP/Vulkan index so that the
+                    # visibility env vars and tensor_split fractions match
+                    # the device order llama.cpp actually sees.
                     sorted_gpus = sorted(system.gpus, key=lambda g: int(g.hip_index))  # type: ignore[arg-type]
-                    env_overrides["HIP_VISIBLE_DEVICES"] = ",".join(
+                    vis_str = ",".join(
                         str(g.hip_index) for g in sorted_gpus
                     )
+                    env_overrides["HIP_VISIBLE_DEVICES"] = vis_str
+                    env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis_str
                     total_sorted_mb = sum(g.total_vram_mb for g in sorted_gpus)
                     tensor_split = ",".join(
                         f"{g.total_vram_mb / total_sorted_mb:.3f}"
