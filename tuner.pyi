@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from hardware import SystemInfo, GPUInfo
+from hardware import SystemInfo
 from performance_target import PerformanceTarget
 from scanner import ModelEntry
 from settings_loader import ModelProfile
