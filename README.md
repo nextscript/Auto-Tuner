@@ -540,6 +540,7 @@ cd ~/llama.cpp
 rm -rf build
 cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j $(nproc)```
+```
 
 ## Server-Features (Stand b9297)
 
