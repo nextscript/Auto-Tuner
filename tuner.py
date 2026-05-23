@@ -877,12 +877,26 @@ def compute_config(
     if effective_primary_free_vram < 0:
         effective_primary_free_vram = 0.0
 
+    # For MoE models with multiple GPUs, use the combined VRAM for expert
+    # placement. This allows large MoE models like Qwen3.5-122B-A10B to
+    # utilise both GPUs (R9700 + RX 9070 XT = 48 GB total) instead of
+    # being restricted to the primary GPU only.
+    has_multiple_gpus = has_gpu and len(system.gpus) > 1
+    if has_multiple_gpus:
+        # Combined free VRAM across all GPUs for MoE expert placement.
+        combined_free_vram_gb = sum(g.free_vram_mb / 1024.0 for g in system.gpus)
+        effective_moe_vram = combined_free_vram_gb - vision_vram_gb - draft_vram_gb
+    else:
+        effective_moe_vram = effective_primary_free_vram
+    if effective_moe_vram < 0:
+        effective_moe_vram = 0.0
+
     # ---- (1) Model placement
     n_cpu_moe: Optional[int] = None
     if is_moe and has_gpu and n_layers > 0:
         ngl, n_cpu_moe, model_vram, model_ram, full_off = _decide_moe_offload(
             model_size_gb=model.size_gb,
-            free_vram_gb=effective_primary_free_vram,
+            free_vram_gb=effective_moe_vram,
             free_ram_gb=system.free_ram_gb,
             n_layers=n_layers,
             expert_count=expert_count,
@@ -905,13 +919,13 @@ def compute_config(
             n_cpu_moe is not None
             and n_layers > 0
             and n_cpu_moe >= n_layers
-            and effective_primary_free_vram > 4.0
+            and effective_moe_vram > 4.0
             and perf_target.moe_placement_ctx_target > 16384
         ):
             shrunk_target = max(16384, perf_target.moe_placement_ctx_target // 2)
             ngl_2, cpu_moe_2, vram_2, ram_2, full_2 = _decide_moe_offload(
                 model_size_gb=model.size_gb,
-                free_vram_gb=effective_primary_free_vram,
+                free_vram_gb=effective_moe_vram,
                 free_ram_gb=system.free_ram_gb,
                 n_layers=n_layers,
                 expert_count=expert_count,
@@ -1381,9 +1395,13 @@ def compute_config(
         model_footprint_gb = model_vram + vision_vram_gb + draft_vram_gb
 
         # MoE: experts already spilled to CPU via --n-cpu-moe, so model_vram is
-        # the GPU-resident portion and it fits on the primary by construction —
-        # pin it. Dense: pin when the model weights fit the primary cap.
-        pin_to_primary = is_moe_cfg or (model_footprint_gb <= primary_cap)
+        # the GPU-resident portion. Pin to primary ONLY if it fits; otherwise
+        # allow distribution across all GPUs to utilise the full VRAM pool.
+        # Dense: pin when the model weights fit the primary cap.
+        if is_moe_cfg:
+            pin_to_primary = model_footprint_gb <= primary_cap
+        else:
+            pin_to_primary = model_footprint_gb <= primary_cap
 
         if pin_to_primary:
             if hip_known:
