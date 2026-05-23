@@ -17,6 +17,7 @@ import psutil
 import os
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -483,8 +484,16 @@ class GPUInfo:
     gpu_util_percent: float = 0.0  # GPU-Auslastung in %
     # HIP/ROCm device index as seen by llama.cpp (Vulkan enumeration order).
     # None = unknown (Windows registry order may differ from HIP order).
-    # Set by detect_system() via _detect_vulkan_device_order() when possible.
+    # Set by detect_system() via _assign_hip_indices() when possible.
     hip_index: Optional[int] = None
+    # PCI device ID (e.g. 0x7550 for RX 9070 XT, 0x7551 for R9700). This is
+    # the *stable physical identity* of the card — it appears identically in
+    # the Windows PNPDeviceID (``...&DEV_7550&...``) / Win32_VideoController
+    # VideoProcessor field ("(0x7550)") AND in vulkaninfo's per-device
+    # ``deviceID``. It is therefore the authoritative "Rosetta Stone" used to
+    # map a Windows-enumerated GPU onto its llama.cpp/Vulkan device index,
+    # independent of the (differing) registry vs Vulkan ordering.
+    pci_device_id: Optional[int] = None
 
     @property
     def total_vram_gb(self) -> float:
@@ -1176,6 +1185,82 @@ def _filter_inference_gpus(
     return used, ignored
 
 
+def _resolve_llama_binary(explicit: Optional[str]) -> Optional[str]:
+    """Best-effort resolution of a runnable llama-server binary path.
+
+    Used only to query the device order via ``--list-devices``. When
+    *explicit* is given it is returned verbatim; otherwise we ask
+    app_settings for the configured fork path and reuse auto_tuner's
+    resolver. Every step is guarded — detection must never fail because
+    the binary could not be located (we simply fall back to vulkaninfo).
+    """
+    if explicit:
+        return explicit
+    try:
+        import app_settings  # lazy: avoids import cycle with auto_tuner
+        from auto_tuner import _resolve_server_binary
+
+        fork = app_settings.get_fork_path()
+        if fork:
+            cand = _resolve_server_binary(str(Path(fork) / "llama-server"))
+            if cand and Path(cand).is_file():
+                return cand
+        cand = _resolve_server_binary("llama-server")
+        if cand and Path(cand).is_file():
+            return cand
+    except Exception:
+        return None
+    return None
+
+
+def _detect_llama_device_order(binary: Optional[str]) -> List[str]:
+    """Return GPU names in llama.cpp's backend enumeration order (lowercased).
+
+    Runs ``<binary> --list-devices`` and parses the device table. This is
+    the AUTHORITATIVE order that llama.cpp's GGML backend uses for
+    ``--main-gpu``, ``--tensor-split`` and the ``GGML_VK_VISIBLE_DEVICES`` /
+    ``HIP_VISIBLE_DEVICES`` env vars — far more reliable than vulkaninfo,
+    because it is the exact binary that will run inference (so the index a
+    name maps to here is the index llama-server will honour).
+
+    Expected output (Vulkan build), names appear after "BackendN:":
+
+        Available devices:
+          Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)
+          Vulkan1: AMD Radeon AI PRO R9700 (32624 MiB, 31704 MiB free)
+          Vulkan2: Intel(R) Graphics (...)
+
+    Returns an empty list when the binary is missing, errors, or its
+    output can't be parsed.
+    """
+    if not binary:
+        return []
+    out = _run([binary, "--list-devices"], timeout=15)
+    if not out:
+        return []
+    # "<Backend><index>: <name> (<NNNN MiB>, ...)" — Backend ∈ {Vulkan, ROCm, CUDA, …}
+    # Anchored on the "(NNNN MiB" memory annotation so device names that
+    # themselves contain parentheses (e.g. "Intel(R) Graphics") aren't
+    # truncated at the first '('.
+    pat = re.compile(
+        r"^\s*[A-Za-z][A-Za-z0-9]*?(\d+):\s*(.+?)\s*\(\s*\d+\s*(?:MiB|MB|GiB|GB)",
+        re.MULTILINE,
+    )
+    indexed: List[Tuple[int, str]] = []
+    for m in pat.finditer(out):
+        try:
+            idx = int(m.group(1))
+        except ValueError:
+            continue
+        name = m.group(2).strip()
+        if name:
+            indexed.append((idx, name.lower()))
+    if not indexed:
+        return []
+    indexed.sort(key=lambda t: t[0])
+    return [n for _, n in indexed]
+
+
 def _detect_vulkan_device_order() -> List[str]:
     """Return GPU display names in Vulkan / HIP enumeration order (lowercased).
 
@@ -1256,12 +1341,201 @@ def _match_gpu_to_vulkan(gpu_name: str, vulkan_names: List[str]) -> Optional[int
     return None
 
 
-def detect_system() -> SystemInfo:
+def _get_pci_device_ids() -> Dict[str, int]:
+    """Return mapping of GPU name (lowercased) → PCI device ID (int).
+
+    The PCI device ID is the stable physical identity of a card and is the
+    one value that is identical across the Windows side (PNPDeviceID
+    ``...&DEV_7550&...`` / Win32_VideoController.VideoProcessor "(0x7550)")
+    and the Vulkan side (per-device ``deviceID = 0x7550``).  We use it to
+    map a Windows-enumerated GPU onto its llama.cpp/Vulkan device index
+    without depending on either side's enumeration *order* (which differ:
+    registry lists the R9700 first, Vulkan lists the RX 9070 XT first).
+
+    Source: ``Win32_VideoController.VideoProcessor`` which embeds the PCI
+    device ID in parentheses, e.g. "AMD Radeon Graphics Processor (0x7550)".
+    Empty dict on non-Windows or when WMI is unavailable.
+    """
+    result: Dict[str, int] = {}
+    if platform.system() != "Windows":
+        return result
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError:
+        return result
+    try:
+        pythoncom.CoInitialize()
+        wmi = win32com.client.GetObject("winmgmts:\\\\root\\\\cimv2")
+        for vc in wmi.ExecQuery(
+            "SELECT Name, VideoProcessor, PNPDeviceID FROM Win32_VideoController"
+        ):
+            name = (getattr(vc, "Name", "") or "").strip()
+            if not name:
+                continue
+            dev_id: Optional[int] = None
+            # Primary: PCI device ID from the VideoProcessor "(0x7550)" suffix.
+            processor = (getattr(vc, "VideoProcessor", "") or "").strip()
+            m = re.search(r"\(0x([0-9a-fA-F]+)\)", processor)
+            if m:
+                try:
+                    dev_id = int(m.group(1), 16)
+                except ValueError:
+                    dev_id = None
+            # Fallback: parse DEV_7550 out of the PNPDeviceID.
+            if dev_id is None:
+                pnp = (getattr(vc, "PNPDeviceID", "") or "")
+                m = re.search(r"DEV_([0-9A-Fa-f]{4})", pnp)
+                if m:
+                    try:
+                        dev_id = int(m.group(1), 16)
+                    except ValueError:
+                        dev_id = None
+            if dev_id is not None:
+                result[name.lower()] = dev_id
+    except Exception:
+        pass
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+    return result
+
+
+def _detect_vulkan_summary() -> List[Tuple[int, str, Optional[int]]]:
+    """Parse ``vulkaninfo --summary`` → list of (vulkan_index, name, device_id).
+
+    This is the modern, stable vulkaninfo output (Vulkan SDK ≥ 1.3) and the
+    format actually produced on this system. Each GPU appears as a ``GPUn:``
+    block with ``deviceName`` and ``deviceID`` lines, in Vulkan enumeration
+    order — which is identical to the order llama.cpp's Vulkan backend uses.
+
+    Crucially this gives us the per-index ``deviceID`` (e.g. 0x7550), letting
+    us match Vulkan devices to Windows GPUs by *physical PCI id* rather than
+    by name or by (mismatched) registry position.
+
+    Returns an empty list when vulkaninfo is unavailable or unparsable.
+    """
+    out = _run(["vulkaninfo", "--summary"], timeout=12)
+    if not out:
+        return []
+    devices: List[Tuple[int, str, Optional[int]]] = []
+    cur_idx: Optional[int] = None
+    cur_name: str = ""
+    cur_devid: Optional[int] = None
+
+    def _flush() -> None:
+        nonlocal cur_idx, cur_name, cur_devid
+        if cur_idx is not None and cur_name:
+            devices.append((cur_idx, cur_name.lower(), cur_devid))
+        cur_idx, cur_name, cur_devid = None, "", None
+
+    # "GPU0:" / "GPU1:" headers start a new device block. Inside a block we
+    # collect deviceName + deviceID. (The instance/extension sections above
+    # the Devices list contain neither, so they're naturally skipped.)
+    re_gpu = re.compile(r"^\s*GPU(\d+)\s*:", re.IGNORECASE)
+    re_name = re.compile(r"deviceName\s*=\s*(.+?)\s*$")
+    re_devid = re.compile(r"deviceID\s*=\s*0x([0-9a-fA-F]+)")
+    for line in out.splitlines():
+        gm = re_gpu.match(line)
+        if gm:
+            _flush()
+            try:
+                cur_idx = int(gm.group(1))
+            except ValueError:
+                cur_idx = None
+            continue
+        if cur_idx is None:
+            continue
+        nm = re_name.search(line)
+        if nm and not cur_name:
+            cur_name = nm.group(1).strip()
+            continue
+        dm = re_devid.search(line)
+        if dm and cur_devid is None:
+            try:
+                cur_devid = int(dm.group(1), 16)
+            except ValueError:
+                cur_devid = None
+    _flush()
+    devices.sort(key=lambda t: t[0])
+    return devices
+
+
+def _assign_hip_indices(
+    gpus: List[GPUInfo], llama_binary: Optional[str]
+) -> None:
+    """Resolve and set ``gpu.hip_index`` for every GPU (mutates in place).
+
+    This is the single source of truth for "which llama.cpp/Vulkan device
+    index does this Windows-enumerated GPU correspond to". It deliberately
+    does **not** trust the Windows registry/detection order, which differs
+    from the Vulkan order on multi-AMD-GPU systems and was the root cause of
+    the model loading onto the 16 GB RX 9070 XT instead of the 32 GB R9700.
+
+    Resolution, most → least authoritative:
+
+      1. **PCI device ID match** (the Rosetta Stone). vulkaninfo --summary
+         gives each Vulkan index its ``deviceID``; we match that against the
+         GPU's ``pci_device_id`` (from WMI). Order- and name-independent, so
+         it is correct even for two identically *named* cards.
+      2. **Name match against ``--list-devices``** — the authoritative order
+         reported by the very binary that will run inference. Used when the
+         PCI id is unavailable on either side.
+      3. **Name match against vulkaninfo** (summary, then legacy) as a final
+         fallback when the llama binary can't be located.
+
+    Whatever resolves first wins per GPU; unresolved GPUs keep hip_index=None
+    and the caller (tuner.py) must NOT fall back to registry position.
+    """
+    if not gpus:
+        return
+
+    # --- Source A: vulkaninfo --summary → ordered (idx, name, device_id) ---
+    vk_summary = _detect_vulkan_summary()
+    devid_to_idx: Dict[int, int] = {
+        devid: idx for (idx, _name, devid) in vk_summary if devid is not None
+    }
+    summary_names: List[str] = [name for (_idx, name, _d) in vk_summary]
+
+    # --- Source B: llama-server --list-devices → ordered names (preferred
+    #     for *name* matching since it is the runtime's own enumeration). ---
+    llama_names = _detect_llama_device_order(llama_binary)
+
+    # --- Source C: legacy vulkaninfo name probe (last resort). ------------
+    legacy_names = llama_names or summary_names or _detect_vulkan_device_order()
+
+    for gpu in gpus:
+        if gpu.hip_index is not None:
+            continue
+        # 1. PCI device-id match — strongest, order/name independent.
+        if gpu.pci_device_id is not None and gpu.pci_device_id in devid_to_idx:
+            gpu.hip_index = devid_to_idx[gpu.pci_device_id]
+            continue
+        # 2. Name match against the llama binary's own device list.
+        if llama_names:
+            idx = _match_gpu_to_vulkan(gpu.name, llama_names)
+            if idx is not None:
+                gpu.hip_index = idx
+                continue
+        # 3. Name match against vulkaninfo (summary → legacy).
+        idx = _match_gpu_to_vulkan(gpu.name, legacy_names)
+        if idx is not None:
+            gpu.hip_index = idx
+
+
+def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
     """Detect everything in one call. Best-effort; never raises.
 
     Every sub-detection step is wrapped in try/except so that a failure
     in one component (e.g. nvidia-smi timeout) does not break the entire
     detection pipeline.
+
+    *llama_binary* optionally points at a llama-server/llama-cli binary
+    used to query the authoritative GPU enumeration order via
+    ``--list-devices`` (Windows multi-GPU). When omitted it is resolved
+    automatically from the configured fork path.
     """
     try:
         vm = psutil.virtual_memory()
@@ -1286,35 +1560,50 @@ def detect_system() -> SystemInfo:
         except Exception:
             pass
 
-    # Re-index in detection order for stable display
+    # Re-index in detection order for stable display. NOTE: g.index is the
+    # Windows registry / detection order and is used ONLY for display and for
+    # the WMI/LUID VRAM lookups (which are keyed by name, not by this index).
+    # It MUST NOT be used as a llama.cpp device index — see hip_index below.
     for i, g in enumerate(raw):
         g.index = i
 
+    # Attach the stable PCI device ID to each GPU (Windows). This is the
+    # Rosetta Stone for the hip_index resolution below — it lets us map a
+    # Windows-enumerated card onto its Vulkan index by *physical identity*
+    # rather than by the (differing) registry vs Vulkan ordering.
+    try:
+        pci_ids = _get_pci_device_ids()
+        if pci_ids:
+            for g in raw:
+                if g.pci_device_id is None:
+                    g.pci_device_id = pci_ids.get(g.name.lower())
+    except Exception:
+        pass
+
     used, ignored = _filter_inference_gpus(raw)
 
-    # --- HIP device index resolution (Windows AMD multi-GPU only) ----------
-    # On Windows, the Windows device-manager/registry order in which AMD GPUs
-    # appear does NOT reliably match the HIP device index order used by
-    # llama.cpp (ROCm/HIP enumerates by Vulkan order, not registry order).
-    # Assigning wrong HIP indices to --main-gpu / --tensor-split causes
-    # ACCESS_VIOLATION (0xC0000005) crashes when the model lands on the
-    # smaller GPU instead of the intended one.
+    # --- HIP / Vulkan device index resolution (multi-GPU) ------------------
+    # The Windows registry/detection order in which GPUs appear does NOT match
+    # the Vulkan/HIP device order llama.cpp uses. Concretely on this system:
+    #   registry order : [0] R9700 (32 GB), [1] RX 9070 XT (16 GB), [2] Intel
+    #   Vulkan  order  : [0] RX 9070 XT,    [1] R9700,              [2] Intel
+    # Feeding the registry position to --main-gpu / GGML_VK_VISIBLE_DEVICES
+    # therefore selects the WRONG physical card — the 16 GB gaming GPU instead
+    # of the 32 GB R9700 — and the model OOMs / lands on the wrong device.
     #
-    # Solution: query vulkaninfo (Vulkan SDK) which returns devices in Vulkan
-    # order — identical to HIP enumeration order on AMD Windows.  We set
-    # gpu.hip_index for every GPU (used + ignored) so tuner.py can build
-    # correct HIP_VISIBLE_DEVICES + --main-gpu values.
+    # _assign_hip_indices() resolves the correct Vulkan index per GPU using,
+    # in order: (1) PCI-device-id match via vulkaninfo --summary, (2) name
+    # match via `llama-server --list-devices`, (3) name match via vulkaninfo.
+    # Anything still unresolved keeps hip_index=None and tuner.py must NOT
+    # fall back to registry position.
     try:
-        if platform.system() == "Windows":
-            vk_names = _detect_vulkan_device_order()
-            if vk_names:
-                for gpu in list(used) + list(ignored):
-                    if gpu.hip_index is None:
-                        idx = _match_gpu_to_vulkan(gpu.name, vk_names)
-                        if idx is not None:
-                            gpu.hip_index = idx
+        if (len(used) + len(ignored)) > 1:
+            _assign_hip_indices(
+                list(used) + list(ignored),
+                _resolve_llama_binary(llama_binary),
+            )
     except Exception:
-        pass  # non-fatal — falls back to position-based indexing
+        pass  # non-fatal — hip_index stays None, tuner handles that safely
     os_name = f"{platform.system()} {platform.release()}"
 
     try:

@@ -801,6 +801,29 @@ def compute_config(
     is_moe = expert_count > 1
     params_b = extract_params_billion(model.name)
 
+    # ---- (0.2) Primary inference GPU selection (multi-GPU only)
+    # The user's preferred main GPU is the one with the highest
+    # priority×VRAM score (e.g. R9700 32 GB @ priority 2 beats RX 9070 XT
+    # 16 GB @ priority 1).  Two things are computed against THIS card:
+    #   • MoE expert placement (n_cpu_moe) — experts never spread onto the
+    #     secondary GPU, they spill to CPU/RAM, so only the primary's free
+    #     VRAM is relevant.  Using the *summed* free VRAM of all GPUs (the
+    #     old behaviour) overcommits and crashes with ErrorOutOfDeviceMemory
+    #     once the KV cache grows past what the primary alone can hold.
+    #   • Single-GPU pinning via device-visibility env vars (section 4d).
+    # Falls back gracefully to the summed value on single-GPU / CPU systems.
+    _prio_map = gpu_priorities or {}
+
+    def _gpu_score(g: GPUInfo) -> float:
+        return max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb
+
+    primary_gpu: Optional[GPUInfo] = None
+    primary_free_vram_gb = free_vram  # default = summed (single-GPU / CPU)
+    if has_gpu and system.gpus:
+        primary_gpu = max(system.gpus, key=_gpu_score)
+        if len(system.gpus) > 1:
+            primary_free_vram_gb = max(0.0, primary_gpu.free_vram_mb / 1024.0)
+
     # ---- (0.1) KV per-token: MUST be defined before any branch uses it.
     # This is the bug that caused crashes on selection of any non-Qwen
     # model in v3.x — base_kv_mb was previously only set inside the
@@ -847,12 +870,19 @@ def compute_config(
     if effective_free_vram < 0:
         effective_free_vram = 0.0
 
+    # Same, but scoped to the PRIMARY GPU only — MoE expert placement must
+    # use this (experts spill to CPU, never to the secondary GPU). On
+    # single-GPU systems this equals effective_free_vram.
+    effective_primary_free_vram = primary_free_vram_gb - vision_vram_gb - draft_vram_gb
+    if effective_primary_free_vram < 0:
+        effective_primary_free_vram = 0.0
+
     # ---- (1) Model placement
     n_cpu_moe: Optional[int] = None
     if is_moe and has_gpu and n_layers > 0:
         ngl, n_cpu_moe, model_vram, model_ram, full_off = _decide_moe_offload(
             model_size_gb=model.size_gb,
-            free_vram_gb=effective_free_vram,
+            free_vram_gb=effective_primary_free_vram,
             free_ram_gb=system.free_ram_gb,
             n_layers=n_layers,
             expert_count=expert_count,
@@ -875,13 +905,13 @@ def compute_config(
             n_cpu_moe is not None
             and n_layers > 0
             and n_cpu_moe >= n_layers
-            and effective_free_vram > 4.0
+            and effective_primary_free_vram > 4.0
             and perf_target.moe_placement_ctx_target > 16384
         ):
             shrunk_target = max(16384, perf_target.moe_placement_ctx_target // 2)
             ngl_2, cpu_moe_2, vram_2, ram_2, full_2 = _decide_moe_offload(
                 model_size_gb=model.size_gb,
-                free_vram_gb=effective_free_vram,
+                free_vram_gb=effective_primary_free_vram,
                 free_ram_gb=system.free_ram_gb,
                 n_layers=n_layers,
                 expert_count=expert_count,
@@ -1292,145 +1322,139 @@ def compute_config(
             )
     no_mmap = mlock
 
-    # ---- (4d) Multi-GPU placement. Skipped for MoE (handled via n_cpu_moe).
+    # ---- (4d) Multi-GPU placement & device visibility.
     #
-    # Strategy: if the model + KV + safety fits on the largest GPU alone,
-    # pin everything there so the secondary GPU is never used by llama.cpp.
-    # Only spread tensors across all GPUs when the largest one alone is too
-    # small.
+    # Runs for BOTH dense and MoE configs.  The previous version skipped
+    # MoE entirely (`n_cpu_moe is None` gate), which left llama.cpp to
+    # default to Vulkan0 — the 16 GB gaming GPU — and crash with
+    # ErrorOutOfDeviceMemory while building the (MTP) draft context, even
+    # though the 32 GB R9700 sat idle at Vulkan1.
     #
-    # Backend-agnostic device visibility:
+    # Fill strategy (matches the requested target: ~30/32 GB on the R9700,
+    # ~13/16 GB on the RX 9070 XT, *then* system RAM):
+    #
+    #   1. Compute a per-card usable cap = total_vram − headroom, where the
+    #      headroom keeps a card breathing for the OS/compositor/OBS.  The
+    #      primary keeps ~2 GB, secondary cards keep ~3 GB (OBS encode).
+    #   2. If the whole GPU footprint (weights + KV + vision + draft) fits in
+    #      the PRIMARY's cap → pin everything to the primary and hide the
+    #      secondary GPU completely, so it stays free for gaming/OBS.
+    #   3. Otherwise → SEQUENTIALLY fill the primary up to its cap, then spill
+    #      the remainder onto the secondary (and so on).  Only once every GPU
+    #      cap is exhausted does llama.cpp fall back to RAM (dense: reduced
+    #      ngl handled upstream; MoE: --n-cpu-moe).
+    #
+    # Device visibility / indices come from gpu.hip_index, resolved in
+    # hardware.py by PCI-device-id (vulkaninfo --summary) → --list-devices →
+    # vulkaninfo name match.  We NEVER use the Windows registry/detection
+    # position as a device index (it is the opposite order on this system).
+    # Both env vars are emitted so the config is backend-agnostic:
     #   - HIP_VISIBLE_DEVICES        → ROCm/HIP builds
-    #   - GGML_VK_VISIBLE_DEVICES    → Vulkan builds
-    # Both are always emitted so the config works regardless of backend.
-    # The Vulkan env var was introduced in llama.cpp PR #5321 and uses the
-    # same device indices as vulkaninfo (which is what hip_index stores).
-    #
-    # AMD Windows caveat: the Windows registry order (system.gpus positions)
-    # does NOT reliably match HIP/Vulkan device indices. We use gpu.hip_index
-    # (set by hardware.py via vulkaninfo) to build correct env vars and
-    # --main-gpu values. When hip_index is unknown we fall back to positions.
+    #   - GGML_VK_VISIBLE_DEVICES    → Vulkan builds (PR #5321+)
     tensor_split: Optional[str] = None
     main_gpu: Optional[int] = None
     env_overrides: Dict[str, str] = {}
 
-    if has_gpu and len(system.gpus) > 1 and n_cpu_moe is None:
-        sizes_mb = [g.total_vram_mb for g in system.gpus]
-        free_mb_per_gpu = [g.free_vram_mb for g in system.gpus]
-        total_mb = sum(sizes_mb)
-        if total_mb > 0:
-            # Primary GPU selection: highest (user_priority × total_vram_mb) score.
-            # When gpu_priorities is absent or all GPUs have the same priority,
-            # this degenerates to pure VRAM-size ordering (existing behaviour).
-            # Example: R9700 (priority=2, 32 GB) → score=65536; RX 9070 XT
-            # (priority=1, 16 GB) → score=16384 → R9700 wins as primary.
-            prio_map = gpu_priorities or {}
+    if has_gpu and len(system.gpus) > 1 and primary_gpu is not None:
+        primary_pos = system.gpus.index(primary_gpu)
+        hip_known = all(g.hip_index is not None for g in system.gpus)
+        is_moe_cfg = n_cpu_moe is not None
 
-            def _primary_score(gpu: GPUInfo) -> float:
-                p = max(1, prio_map.get(gpu.name, 1))
-                return p * gpu.total_vram_mb
+        # Per-card usable VRAM cap (GB). Keep a little headroom so the card
+        # never runs bone-dry: 2 GB on the primary, 3 GB on secondaries
+        # (the RX 9070 XT also drives the desktop + OBS encode). Clamp by the
+        # card's *free* VRAM so we never plan to use memory that other apps
+        # already hold — "inclusive was schon genutzt wird".
+        def _usable_cap_gb(gpu: GPUInfo, is_primary: bool) -> float:
+            headroom = 2.0 if is_primary else 3.0
+            cap_by_total = gpu.total_vram_mb / 1024.0 - headroom
+            free_gb = gpu.free_vram_mb / 1024.0
+            return max(0.0, min(cap_by_total, free_gb))
 
-            largest_pos = max(range(len(system.gpus)), key=lambda i: _primary_score(system.gpus[i]))
-            largest_gpu = system.gpus[largest_pos]
-            largest_free_gb = free_mb_per_gpu[largest_pos] / 1024.0
+        primary_cap = _usable_cap_gb(primary_gpu, True)
 
-            # Ask: do the MODEL WEIGHTS (plus mmproj / draft overhead + safety)
-            # fit on the largest GPU alone?  KV cache is NOT included here
-            # because llama.cpp allocates it dynamically from whatever VRAM
-            # remains after loading the weights — adding the full KV estimate
-            # (sized for the combined-VRAM ctx budget) would incorrectly force
-            # a tensor-split even when the model trivially fits on one card.
-            needed_gb = (
-                model_vram
-                + vision_vram_gb
-                + draft_vram_gb
-                + effective_vram_safety
-            )
+        # Full GPU footprint we need to place: weights + KV + vision + draft.
+        # KV is INCLUDED here (unlike the old code) so a model whose weights
+        # fit on the primary but whose large KV cache would push it past the
+        # cap correctly spills onto the secondary GPU instead of overcommitting
+        # the primary and crashing.
+        footprint_gb = model_vram + estimated_kv_gb + vision_vram_gb + draft_vram_gb
 
-            hip_known = largest_gpu.hip_index is not None
+        # MoE: experts already spilled to CPU via --n-cpu-moe, so model_vram is
+        # the GPU-resident portion and it fits on the primary by construction —
+        # pin it. Dense: pin only when the whole footprint fits the primary cap.
+        pin_to_primary = is_moe_cfg or (full_off and footprint_gb <= primary_cap)
 
-            if full_off and needed_gb <= largest_free_gb:
-                # Fits on the biggest card alone.
-                if hip_known:
-                    # Restrict llama.cpp to only the target GPU via device
-                    # visibility env vars — prevents initialising the secondary
-                    # card entirely, avoiding driver overhead and potential
-                    # crashes on AMD systems with mixed GPU generations.
-                    #   HIP_VISIBLE_DEVICES        → ROCm/HIP builds
-                    #   GGML_VK_VISIBLE_DEVICES    → Vulkan builds (b5321+)
-                    # Both are emitted so the config is backend-agnostic.
-                    env_overrides["HIP_VISIBLE_DEVICES"] = str(largest_gpu.hip_index)
-                    env_overrides["GGML_VK_VISIBLE_DEVICES"] = str(largest_gpu.hip_index)
-                    main_gpu = 0  # only one device visible after remapping
-                    # No tensor_split needed when a single device is visible.
-                else:
-                    # HIP index unknown — fall back to position-based pinning.
-                    parts = ["0.000"] * len(sizes_mb)
-                    parts[largest_pos] = "1.000"
-                    tensor_split = ",".join(parts)
-                    main_gpu = largest_pos
+        if pin_to_primary:
+            if hip_known:
+                # Expose ONLY the primary GPU. After this remap the primary is
+                # the sole visible device (index 0), so EVERY allocation —
+                # including the draft/MTP context that was crashing on Vulkan0 —
+                # lands on the intended card (the R9700).
+                vis = str(primary_gpu.hip_index)
+                env_overrides["HIP_VISIBLE_DEVICES"] = vis
+                env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis
+                main_gpu = 0  # only one device visible after remapping
             else:
-                # Model doesn't fit alone — spread proportionally across GPUs.
-                #
-                # Proportioning strategy: free_vram_mb × user_priority.
-                #
-                # Using *free* VRAM (not total) naturally respects whatever
-                # the OS, display compositor, OBS, or other apps already
-                # occupy on a secondary GPU. The priority multiplier from
-                # gpu_overrides lets the user steer even more load toward
-                # the primary inference GPU (e.g. R9700 priority=2 gets
-                # double the share per free-MB vs the 9070 XT at priority=1).
-                #
-                # Example — R9700 (prio=2, 31 GB free), 9070 XT (prio=1, 14 GB free):
-                #   R9700:   2 × 31 = 62  →  62/76 = 0.816  (81.6%)
-                #   9070 XT: 1 × 14 = 14  →  14/76 = 0.184  (18.4%)
-                # For a 28 GB model: R9700 ~22.8 GB, 9070 XT ~5.2 GB
-                # → leaves ~10.8 GB on the gaming GPU for OBS/desktop.
+                # Index unknown — pin weights via a position-based split. This
+                # steers the main model to the primary but cannot HIDE the
+                # secondary GPU. Ensure the llama binary / Vulkan SDK is
+                # reachable so hardware.py can resolve hip_index next time.
+                parts = ["0.000"] * len(system.gpus)
+                parts[primary_pos] = "1.000"
+                tensor_split = ",".join(parts)
+                main_gpu = primary_pos
+        else:
+            # Spread: sequentially fill the primary to its cap, then the
+            # secondary, in priority order. The resulting per-GPU GB amounts
+            # are turned into tensor_split fractions (proportions of the whole
+            # model). llama.cpp distributes BOTH weights and KV by these
+            # fractions, so they target the requested ~30 GB / ~13 GB split.
+            ordered = sorted(
+                system.gpus,
+                key=lambda g: max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb,
+                reverse=True,  # primary (highest score) first
+            )
+            caps = [_usable_cap_gb(g, g is primary_gpu) for g in ordered]
+            total_cap = sum(caps)
 
-                def _split_share(gpu: GPUInfo) -> float:
-                    p = max(1, prio_map.get(gpu.name, 1))
-                    return p * max(0, gpu.free_vram_mb)
+            # Sequential allocation of the footprint across the caps.
+            remaining = footprint_gb
+            alloc: List[float] = []
+            for cap in caps:
+                take = min(cap, max(0.0, remaining))
+                alloc.append(take)
+                remaining -= take
+            # If the footprint exceeds the combined cap (shouldn't happen once
+            # full_off is True, but guard anyway), fall back to filling each
+            # card to its full cap so nothing is left unplaced on the GPUs.
+            if sum(alloc) <= 0:
+                alloc = list(caps)
+            denom = sum(alloc) if sum(alloc) > 0 else (total_cap or 1.0)
 
-                all_hip_known = all(g.hip_index is not None for g in system.gpus)
-                if all_hip_known:
-                    # Re-order GPUs by ascending HIP/Vulkan index so that the
-                    # visibility env vars and tensor_split fractions match
-                    # the device order llama.cpp actually sees.
-                    sorted_gpus = sorted(system.gpus, key=lambda g: int(g.hip_index))  # type: ignore[arg-type]
-                    vis_str = ",".join(
-                        str(g.hip_index) for g in sorted_gpus
-                    )
-                    env_overrides["HIP_VISIBLE_DEVICES"] = vis_str
-                    env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis_str
-                    total_share = sum(_split_share(g) for g in sorted_gpus)
-                    if total_share <= 0:
-                        total_share = sum(g.total_vram_mb for g in sorted_gpus)
-                        tensor_split = ",".join(
-                            f"{g.total_vram_mb / total_share:.3f}"
-                            for g in sorted_gpus
-                        )
-                    else:
-                        tensor_split = ",".join(
-                            f"{_split_share(g) / total_share:.3f}"
-                            for g in sorted_gpus
-                        )
-                    # main_gpu = position of the largest GPU in the sorted list
-                    main_gpu = sorted_gpus.index(largest_gpu)
-                else:
-                    # HIP indices unknown — use position-based (may be wrong on
-                    # Windows AMD; user should ensure registry order == HIP order
-                    # or install the Vulkan SDK so vulkaninfo can resolve it).
-                    total_share = sum(_split_share(g) for g in system.gpus)
-                    if total_share <= 0:
-                        tensor_split = ",".join(
-                            f"{s / total_mb:.3f}" for s in sizes_mb
-                        )
-                    else:
-                        tensor_split = ",".join(
-                            f"{_split_share(g) / total_share:.3f}"
-                            for g in system.gpus
-                        )
-                    main_gpu = largest_pos
+            if hip_known:
+                # Order by ascending device index so the visibility env vars and
+                # the tensor_split fractions line up with what llama.cpp sees.
+                idx_order = sorted(
+                    range(len(ordered)),
+                    key=lambda i: int(ordered[i].hip_index),  # type: ignore[arg-type]
+                )
+                vis_str = ",".join(str(ordered[i].hip_index) for i in idx_order)
+                env_overrides["HIP_VISIBLE_DEVICES"] = vis_str
+                env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis_str
+                tensor_split = ",".join(f"{alloc[i] / denom:.3f}" for i in idx_order)
+                # main_gpu is the index (within the visible/sorted list) of the
+                # primary card — where llama.cpp keeps the small shared tensors.
+                main_gpu = idx_order.index(ordered.index(primary_gpu))
+            else:
+                # Indices unknown — position-based split in the system.gpus
+                # order (may be wrong on Windows AMD; keep the llama binary /
+                # vulkaninfo reachable so hip_index resolves).
+                pos_alloc = {id(g): a for g, a in zip(ordered, alloc)}
+                tensor_split = ",".join(
+                    f"{pos_alloc.get(id(g), 0.0) / denom:.3f}" for g in system.gpus
+                )
+                main_gpu = primary_pos
 
     # ---- (4d) NUMA — immer aktivieren bei genügend Kernen für bessere Performance
     numa = None

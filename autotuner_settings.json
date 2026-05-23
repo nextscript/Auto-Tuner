@@ -15,7 +15,7 @@
       "draft": false
     },
     "Qwen3.6-27B-UD-Q3_K_XL": {
-      "vision": false
+      "vision": true
     },
     "Mistral-Medium-3.5-128B-UD-IQ3_XXS": {
       "vision": false
@@ -37,7 +37,7 @@
       "vision": true
     },
     "Qwen3.6-27B-MTP-IQ4_XS": {
-      "vision": false,
+      "vision": true,
       "draft": true
     },
     "Qwen3.6-35B-A3B-UD-MTP-Q6_K": {
