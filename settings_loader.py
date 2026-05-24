@@ -30,6 +30,13 @@ class ModelProfile:
     server_binary: Optional[str] = None
     draft_max: int = 16
     draft_p_min: float = 0.75
+    # n-gram (ngram-mod) self-speculative decoding — model-agnostic, needs no
+    # draft model. Defaults mirror llama.cpp docs/speculative.md (n-match 24,
+    # n-min 48, n-max 64). Tunable per profile for repetitive code/text or
+    # reasoning workloads; MoE models benefit from longer drafts.
+    ngram_n_match: int = 24
+    ngram_n_min: int = 48
+    ngram_n_max: int = 64
     # RoPE-Scaling (YaRN): aktiviert wenn ctx > native_ctx und genügend Speicher
     rope_scale_enabled: bool = False  # YAML-Konfiguration: rope_scale: true
     rope_scale_max_ctx: int = 0  # maximales Context mit RoPE-Scaling (0=auto 1M)
@@ -97,6 +104,9 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
                 ),
                 draft_max=int(data.get("draft_max", 16)),
                 draft_p_min=float(data.get("draft_p_min", 0.75)),
+                ngram_n_match=int(data.get("ngram_n_match", 24)),
+                ngram_n_min=int(data.get("ngram_n_min", 48)),
+                ngram_n_max=int(data.get("ngram_n_max", 64)),
                 rope_scale_enabled=rope_scale_enabled,
                 rope_scale_max_ctx=rope_scale_max_ctx
                 if rope_scale_max_ctx > 0

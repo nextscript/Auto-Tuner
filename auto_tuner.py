@@ -195,11 +195,12 @@ def _ask_interactive_features(
     model: ModelEntry,
     draft_model: Optional[ModelEntry],
     settings_path: Path,
-) -> tuple[bool, bool, bool, Optional[ModelEntry]]:
+    force_ngram: bool = False,
+) -> tuple[bool, bool, bool, bool, Optional[ModelEntry]]:
     """Interaktive Fragen-Kette nach Modellauswahl.
 
     Returns:
-        (use_vision, use_draft, use_thinking, effective_draft)
+        (use_vision, use_draft, use_thinking, use_ngram, effective_draft)
     """
     # ── Vision ───────────────────────────────────────────────────────
     use_vision = False
@@ -233,7 +234,18 @@ def _ask_interactive_features(
             default_yes=True,
         )
 
-    return use_vision, use_draft, use_thinking, effective_draft
+    # ── n-gram (ngram-mod) ──────────────────────────────────────────
+    # Model-agnostic self-speculative decoding — always offered. --ngram
+    # forces it on without prompting; otherwise ask, defaulting to off.
+    if force_ngram:
+        use_ngram = True
+    else:
+        use_ngram = _confirm(
+            "n-gram (ngram-mod) self-speculative decoding aktivieren?",
+            default_yes=False,
+        )
+
+    return use_vision, use_draft, use_thinking, use_ngram, effective_draft
 
 
 def _pick_model(
@@ -244,7 +256,7 @@ def _pick_model(
         query_parts = []
         flags = []
         for p in parts:
-            if p.startswith("--") or p.lower() in ("novision", "nodraft", "nothinking"):
+            if p.startswith("--") or p.lower() in ("novision", "nodraft", "nothinking", "ngram"):
                 flags.append(p.lower().lstrip("-"))
             else:
                 query_parts.append(p)
@@ -273,7 +285,7 @@ def _pick_model(
         model_idx_str = None
         flags = []
         for p in parts:
-            if p.startswith("--") or p.lower() in ("novision", "nodraft", "nothinking"):
+            if p.startswith("--") or p.lower() in ("novision", "nodraft", "nothinking", "ngram"):
                 flags.append(p.lower().lstrip("-"))
             elif model_idx_str is None and p.isdigit():
                 model_idx_str = p
@@ -708,6 +720,13 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--nothinking", action="store_true", help="Disable thinking/reasoning output"
     )
     p.add_argument(
+        "--ngram",
+        action="store_true",
+        help="Enable n-gram (ngram-mod) self-speculative decoding. Needs no "
+        "draft model and works on any model; good for code/text iteration, "
+        "reasoning models and summarisation.",
+    )
+    p.add_argument(
         "--force-mlock",
         action="store_true",
         help="Force --mlock / --no-mmap even for full-GPU-offload models "
@@ -896,6 +915,8 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 args.nodraft = True
             elif flag == "nothinking":
                 args.nothinking = True
+            elif flag == "ngram":
+                args.ngram = True
 
         if args.novision and model.mmproj is not None:
             print(
@@ -970,8 +991,10 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 print(f"[AutoTuner] Draft sibling unreadable ({exc}); skipping.")
 
         # ── Interactive feature chain ────────────────────────────────────
-        (use_vision, use_draft, use_thinking, effective_draft) = (
-            _ask_interactive_features(model, draft_model, args.settings_path)
+        (use_vision, use_draft, use_thinking, use_ngram, effective_draft) = (
+            _ask_interactive_features(
+                model, draft_model, args.settings_path, force_ngram=args.ngram
+            )
         )
         if not use_draft:
             effective_draft = None
@@ -1069,6 +1092,11 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             port=args.port,
             extra_args=extra,
             use_thinking=use_thinking,
+            # --nodraft disables all draft-based speculative decoding, including
+            # embedded MTP (which has no external file and so isn't covered by
+            # effective_draft=None alone). n-gram is independent (--ngram).
+            enable_speculative=not args.nodraft,
+            enable_ngram=use_ngram,
         )
 
         if args.dry_run:

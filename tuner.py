@@ -1628,6 +1628,7 @@ def build_command(
     extra_args: Optional[List[str]] = None,
     use_thinking: bool = False,
     enable_speculative: bool = True,
+    enable_ngram: bool = False,
 ) -> List[str]:
     """Build the llama-server command line for ``model`` and ``config``.
 
@@ -1646,6 +1647,12 @@ def build_command(
     * ``enable_speculative=False`` overrides both paths and emits no
       speculative flags at all — for the case where the user explicitly
       unchecked Draft on an MTP-named model.
+    * ``enable_ngram=True`` adds ``ngram-mod`` self-speculative decoding
+      (Path C). It is model-agnostic — no draft model required — so it can
+      run standalone on any GGUF, or be combined with Path A/B. ``--spec-type``
+      is a comma-separated list, and llama.cpp explicitly allows mixing a
+      draft-model path with a draftless one, so e.g. ``draft-mtp,ngram-mod``
+      is valid; the draftless path takes precedence when both fire.
     """
     cmd: List[str] = [
         server_binary,
@@ -1693,11 +1700,17 @@ def build_command(
     # (llamacpp:kv_cache_usage_ratio). Negligible overhead.
     cmd.append("--metrics")
 
-    # Speculative decoding — three states:
-    #   - sibling drafter passed in        → Path A (-md + --draft-max)
-    #   - integrated MTP filename          → Path B (--spec-draft-n-max)
-    #   - enable_speculative=False         → emit nothing, even if the
-    #                                        filename suggests MTP
+    # Speculative decoding — composable paths combined into one --spec-type:
+    #   - sibling drafter passed in        → Path A (-md, auto-detected type)
+    #   - integrated MTP                    → Path B (--spec-type draft-mtp)
+    #   - n-gram (enable_ngram)             → Path C (--spec-type ngram-mod)
+    #   - enable_speculative=False          → suppresses Path A and B; Path C
+    #                                         (ngram) is independent and still
+    #                                         honours its own enable_ngram flag.
+    #
+    # --spec-type accepts a comma-separated list and llama.cpp allows mixing a
+    # draft-model path (draft-mtp) with a draftless one (ngram-mod), so we
+    # assemble the active types and emit a single token (e.g. "draft-mtp,ngram-mod").
     #
     # Vision / draft compatibility:
     #   - External draft (Path A, -md) conflicts with --mmproj in llama.cpp:
@@ -1706,6 +1719,7 @@ def build_command(
     #   - Integrated MTP (Path B) embeds the drafter inside the main GGUF —
     #     no second model-load conflict. Vision and embedded MTP can coexist;
     #     Qwen3.6-MTP models in fact require the mmproj to work correctly.
+    #   - n-gram (Path C) loads no model at all → always compatible.
     draft_val = getattr(profile, "draft_max", 0) or 2
     draft_p_min = getattr(profile, "draft_p_min", 0.75) or 0.75
     vision_loaded = model.mmproj is not None
@@ -1720,24 +1734,29 @@ def build_command(
     # since mainline b9180 (PR #22673, merged 2026-05-16). The MTP draft head
     # lives inside the same GGUF as the main model; llama.cpp loads it as part
     # of the same graph so there is no second-model-load conflict.
-    # NOTE: Very long contexts (≥200k) combined with actual image input can
-    # trigger CUDA OOM on high-VRAM cards; on Vulkan/AMD at typical contexts
-    # (≤128k) the combination is stable. The Qwen3.6 multimodal community
-    # actively uses --spec-type draft-mtp + --mmproj together.
     use_integrated = (
         enable_speculative
         and _has_integrated_mtp(model)
         and draft_model is None
     )
 
+    # Assemble the --spec-type list (embedded-draft + draftless types) and emit
+    # it BEFORE the per-path parameter flags. -md (Path A) is auto-detected by
+    # mainline, so it contributes no type token — only its parameter flags.
+    spec_types: List[str] = []
+    if use_integrated:
+        spec_types.append("draft-mtp")
+    if enable_ngram:
+        spec_types.append("ngram-mod")
+    if spec_types:
+        cmd += ["--spec-type", ",".join(spec_types)]
+
     if use_external:
         # Path A — sibling drafter file.
-        # NOTE: -md MUST come BEFORE --spec-draft-n-max because llama-server
-        # parses arguments left-to-right.
-        # In mainline llama.cpp (b9180+), --draft-max was REMOVED; the correct
-        # flag is --spec-draft-n-max. --spec-type is NOT emitted here — mainline
-        # auto-detects the draft path from -md; passing --spec-type mtp alongside
-        # -md was ik_llama.cpp-specific behavior.
+        # -md MUST come before --spec-draft-n-max (llama-server parses
+        # left-to-right). No --spec-type token: mainline auto-detects the
+        # draft path from -md. If ngram is also enabled it was added to
+        # --spec-type above and runs as the draftless path alongside -md.
         assert draft_model is not None  # guaranteed by use_external condition
         cmd += ["-md", str(draft_model.path)]
         cmd += ["--spec-draft-ngl", "99"]
@@ -1745,29 +1764,27 @@ def build_command(
         cmd += ["--spec-draft-p-min", str(draft_p_min)]
     elif use_integrated:
         # Path B — integrated MTP drafter inside the main GGUF.
-        # `--spec-draft-ngl 99` keeps the MTP head on GPU; without it
-        # the drafter layers fall back to CPU and the speedup vanishes.
-        # In mainline b9180+ (PR #22673, merged 2026-05-16) the spec-type
-        # was renamed from the old "mtp" alias to the canonical "draft-mtp".
-        #
-        # Vision (--mmproj) and integrated MTP can coexist — the draft head
-        # lives inside the same GGUF so there is no second model-load conflict.
-        # Multiple community guides actively combine --spec-type draft-mtp with
-        # --mmproj for Qwen3.6 multimodal use. At very large contexts (≥200k)
-        # with simultaneous image encoding there can be CUDA OOM; on Vulkan/AMD
-        # at typical contexts this is stable.
-        #
-        # `--spec-draft-p-min` is always emitted explicitly (same as Path A).
-        # The mainline server default is 0.75; omitting the flag would make the
-        # YAML value silently ignored. With p_min=0.0 the MTP hook fires on
-        # every decode step regardless of confidence, adding constant D2H-transfer
-        # overhead and causing write-speed to be slower than baseline on Vulkan/ROCm.
-        # The settings_loader default is now also 0.75 so profiles without an
-        # explicit setting still get the correct behaviour.
-        cmd += ["--spec-type", "draft-mtp"]
+        # `--spec-draft-ngl 99` keeps the MTP head on GPU; without it the
+        # drafter layers fall back to CPU and the speedup vanishes.
+        # `--spec-draft-p-min` is emitted explicitly: with p_min=0.0 the MTP
+        # hook fires on every decode step regardless of confidence, adding
+        # constant D2H-transfer overhead that can make write-speed slower than
+        # baseline on Vulkan/ROCm. The mainline default is 0.75.
         cmd += ["--spec-draft-n-max", str(draft_val)]
         cmd += ["--spec-draft-ngl", "99"]
         cmd += ["--spec-draft-p-min", str(draft_p_min)]
+
+    if enable_ngram:
+        # Path C — ngram-mod self-speculative decoding (no draft model).
+        # Builds a rolling-hash lookup table from the live context (~16 MB,
+        # constant memory). Parameters per llama.cpp docs/speculative.md:
+        #   n-match = lookup length, n-min/n-max = draft length bounds.
+        ngram_match = getattr(profile, "ngram_n_match", 24) or 24
+        ngram_min = getattr(profile, "ngram_n_min", 48) or 48
+        ngram_max = getattr(profile, "ngram_n_max", 64) or 64
+        cmd += ["--spec-ngram-mod-n-match", str(ngram_match)]
+        cmd += ["--spec-ngram-mod-n-min", str(ngram_min)]
+        cmd += ["--spec-ngram-mod-n-max", str(ngram_max)]
 
     if config.flash_attn:
         cmd += ["-fa", "on"]

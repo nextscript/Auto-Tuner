@@ -78,13 +78,29 @@ def read_gguf_metadata(path: Path) -> Dict[str, Any]:
     """Read GGUF header KV pairs and scan tensor info for MTP detection.
 
     In addition to the standard KV pairs this function reads the tensor
-    info section (names only — no data) and stores a synthetic flag:
+    info section (names only — no data) and stores a synthetic *tri-state*
+    flag describing what the tensor scan concluded:
 
-      ``__mtp_tensors__: True``  — set when any tensor has a block index
-      that exceeds the model's declared ``<arch>.block_count``.  This
-      catches community GGUFs produced by "inject MTP" scripts that graft
-      the extra draft block into the file without writing the official
-      ``<arch>.nextn_predict_layers`` key.
+      ``__mtp_scan__: "found"``        — an MTP/draft-head tensor was seen,
+        identified either by a block index ``>= <arch>.block_count`` or by
+        a tensor name containing ``nextn`` / ``mtp`` (the canonical llama.cpp
+        nextn naming, e.g. ``blk.N.nextn.eh_proj.weight``).
+
+      ``__mtp_scan__: "absent"``       — the scan ran to completion over the
+        whole model, ``block_count`` was known, the file was *not* a shard,
+        and no MTP tensors were found.  Only in this high-confidence state
+        may a positive ``<arch>.nextn_predict_layers`` key be treated as a
+        false positive (the UD/unsloth case where the metadata value is kept
+        but the MTP weights are stripped during quantisation).
+
+      ``__mtp_scan__: "inconclusive"`` — the scan could not reliably cover
+        the whole model: the file is one shard of a split GGUF (the nextn
+        block lives in the *last* shard, not shard 1), ``block_count`` was
+        unreadable, or the tensor-info parse hit EOF / a struct error.  In
+        this state the scan must NOT veto the metadata key — doing so was the
+        root cause of "sometimes detected, sometimes not" on sharded MoE MTP
+        models (GLM-4.6, DeepSeek-V3) and on conversions whose nextn block is
+        numbered differently from ``block_count``.
 
     Synthetic keys start with ``__`` and can never collide with real GGUF
     keys (the GGUF spec forbids leading underscores in key names).
@@ -128,7 +144,23 @@ def read_gguf_metadata(path: Path) -> Dict[str, Any]:
                     except (TypeError, ValueError):
                         pass
 
+            # Is this one shard of a split GGUF?  The nextn/MTP block is the
+            # LAST transformer block (blk.{block_count}.*) and therefore almost
+            # always lives in the final shard — never in shard 1, which is what
+            # we read here.  So a negative scan on a shard tells us nothing.
+            split_count = 0
+            for sk in ("split.count", "general.split_count"):
+                sv = md.get(sk)
+                if sv is not None:
+                    try:
+                        split_count = int(sv)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            is_sharded = split_count > 1
+
             has_mtp_tensors = False
+            scan_complete = False
             try:
                 for _ in range(n_tensors):
                     tname_len = struct.unpack("<Q", f.read(8))[0]
@@ -136,23 +168,43 @@ def read_gguf_metadata(path: Path) -> Dict[str, Any]:
                     n_dims = struct.unpack("<I", f.read(4))[0]
                     # skip: dims (u64 * n_dims) + type (u32) + offset (u64)
                     f.read(8 * n_dims + 4 + 8)
-                    if not has_mtp_tensors and block_count > 0:
-                        m = _BLK_IDX_RE.match(tname)
-                        if m:
-                            try:
-                                if int(m.group(1)) >= block_count:
-                                    has_mtp_tensors = True
-                            except (TypeError, ValueError):
-                                pass
+                    if not has_mtp_tensors:
+                        # (a) Name-based: the canonical llama.cpp nextn tensors
+                        #     are named "blk.{N}.nextn.*" (eh_proj, embed_tokens,
+                        #     enorm, hnorm, shared_head_*). This catch is
+                        #     independent of block_count, so it works even when
+                        #     block_count is unreadable or the block is numbered
+                        #     unexpectedly. Some forks emit "mtp" in the name.
+                        tl = tname.lower()
+                        if "nextn" in tl or "mtp" in tl:
+                            has_mtp_tensors = True
+                        # (b) Index-based: a block index at/after block_count is
+                        #     an extra draft head grafted past the main stack.
+                        elif block_count > 0:
+                            m = _BLK_IDX_RE.match(tname)
+                            if m:
+                                try:
+                                    if int(m.group(1)) >= block_count:
+                                        has_mtp_tensors = True
+                                except (TypeError, ValueError):
+                                    pass
+                else:
+                    # Loop ran to completion without break/exception → the whole
+                    # tensor-info section of THIS file was parsed successfully.
+                    scan_complete = True
             except (OSError, struct.error, EOFError):
                 pass  # non-fatal; KV data already collected
 
+            # Record a tri-state confidence value. Only a *complete* scan over
+            # a *non-sharded* file with a known block_count can authoritatively
+            # assert absence; anything else is inconclusive and must not veto
+            # the metadata key downstream.
             if has_mtp_tensors:
-                md["__mtp_tensors__"] = True
+                md["__mtp_scan__"] = "found"
+            elif scan_complete and not is_sharded and block_count > 0:
+                md["__mtp_scan__"] = "absent"
             else:
-                # Explicitly record False so metadata_has_embedded_mtp can
-                # distinguish "scan ran but found nothing" from "no scan at all".
-                md["__mtp_tensors__"] = False
+                md["__mtp_scan__"] = "inconclusive"
 
             return md
     except (OSError, struct.error, EOFError, ValueError, UnicodeDecodeError):
@@ -167,71 +219,61 @@ def metadata_has_embedded_mtp(md: Dict[str, Any]) -> bool:
     1. ``<arch>.nextn_predict_layers > 0`` — the official GGUF key written
        by ``convert_hf_to_gguf.py --mtp`` (llama.cpp gguf-py constants
        ``Keys.LLM.NEXTN_PREDICT_LAYERS``) and present in all standard
-       MTP GGUFs from the mainstream converter since ~b8000.  A value > 0
-       is definitive proof of embedded draft heads.
+       MTP GGUFs from the mainstream converter.  A value > 0 is normally
+       definitive proof of embedded draft heads.
 
-    2. ``__mtp_tensors__ = True`` — synthetic key injected by
-       :func:`read_gguf_metadata` when the tensor-info scan finds block-
-       indexed tensors beyond the declared ``block_count``.  Covers
-       community GGUFs produced by tensor-inject scripts that graft MTP
-       weights into an existing GGUF without updating the metadata key.
+    2. ``__mtp_scan__ == "found"`` — the tensor-info scan in
+       :func:`read_gguf_metadata` saw an MTP tensor (nextn-named or block
+       index beyond ``block_count``).  Covers community / inject-style
+       GGUFs that graft MTP weights without writing the metadata key.
 
     3. Generic KV scan for any ``*.nextn_predict_layers > 0`` — forward-
-       compat: catches future architectures before they appear in
-       ``general.architecture``-prefixed key lookup above.
+       compat for new architecture prefixes.
+
+    Cross-check (false-positive guard)
+    ----------------------------------
+    The only known false positive is UD/unsloth quantisation that keeps a
+    base-architecture ``nextn_predict_layers`` value in metadata while
+    stripping the MTP weights.  We suppress the key in checks 1 and 3
+    **only** when ``__mtp_scan__ == "absent"`` — i.e. a complete scan over a
+    non-sharded file with a known ``block_count`` confirmed the tensors are
+    gone.  An ``"inconclusive"`` scan (split GGUF read from shard 1, missing
+    ``block_count``, or a parse error) NEVER vetoes the key — that overly
+    aggressive veto was the cause of intermittent detection on sharded MoE
+    MTP models whose nextn block sits in the last shard.
     """
     if not md:
         return False
 
+    scan = md.get("__mtp_scan__")  # "found" / "absent" / "inconclusive" / None
+    scan_absent = scan == "absent"
+
     # 1. Official key: <arch>.nextn_predict_layers
-    #
-    # Cross-check with the tensor scan when available:
-    # read_gguf_metadata always writes __mtp_tensors__ = True/False.
-    # If that key is present and False, the GGUF was scanned and has NO
-    # extra-block tensors → the metadata key alone is unreliable (e.g.
-    # UD/unsloth quantisations that keep the base-architecture metadata
-    # value but strip the actual MTP weights during conversion).
-    # If __mtp_tensors__ is absent the metadata came from an external
-    # source that skipped the tensor scan — fall back to trusting the key.
     arch = str(md.get("general.architecture", "") or "")
-    if arch:
-        v = md.get(f"{arch}.nextn_predict_layers")
+    arch_nextn_key = f"{arch}.nextn_predict_layers" if arch else None
+    if arch_nextn_key is not None:
+        v = md.get(arch_nextn_key)
         if v is not None:
             try:
-                if int(v) > 0:
-                    if "__mtp_tensors__" not in md:
-                        # No tensor scan ran — trust the metadata key.
-                        return True
-                    # Tensor scan ran: only return True when it confirmed
-                    # the extra-block tensors actually exist.
-                    if md["__mtp_tensors__"]:
-                        return True
-                    # else: scan ran, found nothing → false-positive, skip.
+                if int(v) > 0 and not scan_absent:
+                    # Trust the key unless a high-confidence scan proved the
+                    # weights are absent (UD/unsloth stripped quant).
+                    return True
             except (TypeError, ValueError):
                 pass
 
-    # 2. Synthetic tensor-scan flag (set by read_gguf_metadata)
-    if md.get("__mtp_tensors__"):
+    # 2. Tensor scan positively identified an MTP tensor.
+    if scan == "found":
         return True
 
-    # 3. Generic KV scan — forward-compat for new arch prefixes.
-    # Skip the arch-specific key that check 1 already evaluated and
-    # suppressed (tensor scan ran and found no MTP tensors).  Without this
-    # guard, check 3 would re-fire on the same key and produce the false-
-    # positive that check 1 intentionally prevented (observed with Qwen3.6
-    # UD quantisations where qwen2.nextn_predict_layers=1 is present in
-    # base-architecture metadata but no blk.28.* tensors exist in the GGUF).
-    arch_nextn_key = f"{arch}.nextn_predict_layers" if arch else None
-    tensor_scan_ran     = "__mtp_tensors__" in md
-    tensor_scan_negative = tensor_scan_ran and not md["__mtp_tensors__"]
-
+    # 3. Generic KV scan — forward-compat for new arch prefixes. Skip the
+    #    arch-specific key only when check 1 deliberately suppressed it
+    #    (scan == "absent"), so we don't re-introduce that false positive.
     for key, val in md.items():
         if key.startswith("__"):
             continue  # skip synthetic keys
         if "nextn_predict" in key.lower():
-            # Suppress the arch-specific key when tensor scan ran and
-            # found nothing — its value was already rejected in check 1.
-            if tensor_scan_negative and key == arch_nextn_key:
+            if scan_absent and key == arch_nextn_key:
                 continue
             try:
                 if int(val) > 0:
@@ -686,10 +728,13 @@ class ModelEntry:
 
         **Primary** — :func:`metadata_has_embedded_mtp` checks:
           1. ``<arch>.nextn_predict_layers > 0`` (official GGUF key set by
-             ``convert_hf_to_gguf.py --mtp`` and all standard converters).
-          2. ``__mtp_tensors__`` synthetic flag from the tensor-info scan
-             in :func:`read_gguf_metadata` (catches inject-style community
-             GGUFs that add MTP blocks without updating the metadata key).
+             ``convert_hf_to_gguf.py --mtp`` and all standard converters),
+             trusted unless a complete non-sharded tensor scan proved the
+             weights were stripped (``__mtp_scan__ == "absent"``).
+          2. ``__mtp_scan__ == "found"`` from the tensor-info scan in
+             :func:`read_gguf_metadata` — catches nextn-named tensors and
+             inject-style community GGUFs that add MTP blocks without
+             updating the metadata key, independent of ``block_count``.
           3. Generic scan for any ``*.nextn_predict_layers > 0``.
 
         **Fallback** — filename regex ``(?:^|[-_.])\\ mtp(?:[-_.]|$)``

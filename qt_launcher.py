@@ -1304,12 +1304,23 @@ class MainWindow(QMainWindow):
         # the TheTom/AtomicBot forks; harmless no-op on stock builds
         # because the mapping is identity for unknown labels).
         self._chk_turbo_kv = QCheckBox("Turbo KV-quant (TurboQuant forks)")
+        # n-gram (ngram-mod) self-speculative decoding. Unlike Draft, this
+        # needs no draft model and works on ANY GGUF (builds a rolling-hash
+        # lookup table from the live context, ~16 MB). It is therefore always
+        # available — never greyed out — and independent of the Draft toggle.
+        self._chk_ngram = QCheckBox("n-gram speculative (ngram-mod)")
+        self._chk_ngram.setToolTip(
+            "Self-speculative decoding from the context. No draft model needed,\n"
+            "works on any model. Best for code/text iteration, reasoning models\n"
+            "that echo their scratchpad, and summarisation."
+        )
         self._chk_thinking = QCheckBox("Thinking / Reasoning")
 
         for chk in (
             self._chk_vision,
             self._chk_draft,
             self._chk_turbo_kv,
+            self._chk_ngram,
             self._chk_thinking,
         ):
             chk.setEnabled(False)
@@ -1321,9 +1332,10 @@ class MainWindow(QMainWindow):
         self._chk_vision.toggled.connect(self._on_vision_toggled)
         self._chk_draft.toggled.connect(self._on_draft_toggled)
         self._chk_turbo_kv.toggled.connect(self._on_turbo_toggled)
+        self._chk_ngram.toggled.connect(self._on_ngram_toggled)
         self._chk_thinking.toggled.connect(self._on_thinking_toggled)
 
-        opts.setMaximumHeight(140)
+        opts.setMaximumHeight(168)
 
         right = QWidget()
         rl2 = QVBoxLayout(right)
@@ -2144,6 +2156,18 @@ class MainWindow(QMainWindow):
         # Don't touch the checked state on model switch — Turbo is a
         # session-global preference.
 
+        # ── n-gram (ngram-mod) ──────────────────────────────────────
+        # Always enabled: ngram-mod needs no draft model and works on any
+        # GGUF, so it must never be greyed out (the whole point — "ngram
+        # should always be available"). Default off (opt-in, since it can
+        # slightly regress throughput on non-repetitive generation), but the
+        # per-model choice is remembered like vision/draft/thinking.
+        ngram_state = ov["ngram"] if "ngram" in ov else False
+        self._chk_ngram.blockSignals(True)
+        self._chk_ngram.setEnabled(True)
+        self._chk_ngram.setChecked(ngram_state)
+        self._chk_ngram.blockSignals(False)
+
     def _auto_select_fork(self, profile: ModelProfile) -> None:
         """Auto-select fork from combo based on profile requirement.
 
@@ -2249,6 +2273,12 @@ class MainWindow(QMainWindow):
         self._record_override("thinking", checked)
         self._refresh_config_preview()
 
+    def _on_ngram_toggled(self, checked: bool) -> None:
+        # n-gram is independent of the model (no draft file needed), so it has
+        # no effect on the vision/draft interlock — just persist and re-preview.
+        self._record_override("ngram", checked)
+        self._refresh_config_preview()
+
     def _refresh_config_preview(self) -> None:
         """Checkbox changed → recompute context/memory with new options."""
         if self._current_entry is not None and self._system is not None:
@@ -2333,6 +2363,7 @@ class MainWindow(QMainWindow):
         use_vision = self._chk_vision.isChecked() and self._chk_vision.isEnabled()
         use_draft = self._chk_draft.isChecked() and self._chk_draft.isEnabled()
         turbo_kv = self._chk_turbo_kv.isChecked() and self._chk_turbo_kv.isEnabled()
+        use_ngram = self._chk_ngram.isChecked() and self._chk_ngram.isEnabled()
 
         W = 64
         bar = "─" * W
@@ -2352,6 +2383,8 @@ class MainWindow(QMainWindow):
         if self._current_draft:
             drf = "✓" if use_draft else "✗"
             lines.append(f"Draft   : {self._current_draft.name}  [{drf}]")
+        if use_ngram:
+            lines.append("n-gram  : ngram-mod (self-speculative)  [✓]")
         if profile.server_binary:
             lines.append(f"Requires: {profile.server_binary}")
         lines.append(bar)
@@ -2714,6 +2747,7 @@ class MainWindow(QMainWindow):
         use_draft = self._chk_draft.isChecked() and self._chk_draft.isEnabled()
         use_thinking = self._chk_thinking.isChecked() and self._chk_thinking.isEnabled()
         turbo_kv = self._chk_turbo_kv.isChecked() and self._chk_turbo_kv.isEnabled()
+        use_ngram = self._chk_ngram.isChecked() and self._chk_ngram.isEnabled()
 
         # Build a copy of entry so we can control mmproj inclusion
         entry = copy.copy(self._current_entry)
@@ -2769,13 +2803,18 @@ class MainWindow(QMainWindow):
             port=port,
             extra_args=["-a", alias],
             use_thinking=use_thinking,
+            # The Draft checkbox governs BOTH external draft (-md) and embedded
+            # MTP. For an MTP model draft_model is None, so unchecking Draft must
+            # also flip enable_speculative off to actually suppress the MTP path.
+            enable_speculative=use_draft,
+            enable_ngram=use_ngram,
         )
 
         self._log("\n" + "─" * 60)
         self._log(f"Starting: {' '.join(cmd)}")
         self._log(
             f"Options : vision={use_vision} draft={use_draft} thinking={use_thinking} "
-            f"mode={self._current_mode()}"
+            f"ngram={use_ngram} mode={self._current_mode()}"
         )
         if cfg.env_overrides:
             for k, v in cfg.env_overrides.items():

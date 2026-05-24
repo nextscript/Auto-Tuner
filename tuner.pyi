@@ -128,4 +128,5 @@ def build_command(
     extra_args: Optional[List[str]] = ...,
     use_thinking: bool = ...,
     enable_speculative: bool = ...,
+    enable_ngram: bool = ...,
 ) -> List[str]: ...

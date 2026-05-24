@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from hardware import GPUInfo, SystemInfo, detect_system, format_system  # noqa: E402
-from scanner import group_entries, scan_models  # noqa: E402
+from scanner import group_entries, scan_models, metadata_has_embedded_mtp  # noqa: E402
 from settings_loader import load_profiles, match_profile  # noqa: E402
 from tuner import build_command, compute_config, extract_params_billion  # noqa: E402
 
@@ -309,6 +309,148 @@ def test_build_command_passes_extra_args(tmp_path):
     cmd = build_command(model, cfg, profile, extra_args=["--metrics", "--log-disable"])
     assert "--metrics" in cmd
     assert "--log-disable" in cmd
+
+
+# ---------------------------------------------------------------------------
+# MTP detection (scanner.metadata_has_embedded_mtp) — tri-state scan logic
+
+
+def _mtp_meta(**kw):
+    return dict(kw)
+
+
+def test_mtp_single_file_key_and_tensor():
+    """Standard single-file MTP GGUF: metadata key + scan found → detected."""
+    md = _mtp_meta(
+        **{
+            "general.architecture": "qwen3moe",
+            "qwen3moe.nextn_predict_layers": 1,
+            "__mtp_scan__": "found",
+        }
+    )
+    assert metadata_has_embedded_mtp(md) is True
+
+
+def test_mtp_sharded_inconclusive_trusts_key():
+    """Sharded MTP model read from shard 1: the nextn block lives in the LAST
+    shard, so the scan is 'inconclusive'. The metadata key must still be
+    trusted — this was the 'sometimes detected, sometimes not' bug."""
+    md = _mtp_meta(
+        **{
+            "general.architecture": "deepseek2",
+            "deepseek2.nextn_predict_layers": 1,
+            "__mtp_scan__": "inconclusive",
+        }
+    )
+    assert metadata_has_embedded_mtp(md) is True
+
+
+def test_mtp_ud_quant_absent_suppresses_false_positive():
+    """UD/unsloth quant keeps the metadata key but strips the MTP weights. A
+    complete non-sharded scan reports 'absent' → key is correctly vetoed."""
+    md = _mtp_meta(
+        **{
+            "general.architecture": "qwen2",
+            "qwen2.nextn_predict_layers": 1,
+            "__mtp_scan__": "absent",
+        }
+    )
+    assert metadata_has_embedded_mtp(md) is False
+
+
+def test_mtp_name_based_without_key():
+    """No metadata key at all, but the tensor scan saw a nextn-named tensor
+    (scan='found'). Detection must succeed without 'MTP' in the filename."""
+    md = _mtp_meta(
+        **{"general.architecture": "bailingmoe2", "__mtp_scan__": "found"}
+    )
+    assert metadata_has_embedded_mtp(md) is True
+
+
+def test_mtp_external_metadata_no_scan_trusts_key():
+    """Metadata from a source that ran no tensor scan (no __mtp_scan__ key):
+    the metadata key is trusted."""
+    md = _mtp_meta(
+        **{"general.architecture": "qwen3moe", "qwen3moe.nextn_predict_layers": 2}
+    )
+    assert metadata_has_embedded_mtp(md) is True
+
+
+def test_mtp_negative_clean_model():
+    md = _mtp_meta(**{"general.architecture": "llama", "__mtp_scan__": "absent"})
+    assert metadata_has_embedded_mtp(md) is False
+    assert metadata_has_embedded_mtp({}) is False
+
+
+# ---------------------------------------------------------------------------
+# n-gram (ngram-mod) speculative decoding flags
+
+
+def _spec_tokens(cmd):
+    """Return the --spec-type value, or '' if none was emitted."""
+    if "--spec-type" in cmd:
+        return cmd[cmd.index("--spec-type") + 1]
+    return ""
+
+
+def test_ngram_disabled_by_default(tmp_path):
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Llama-3-8B", size_gb=8.0)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    cmd = build_command(model, cfg, profile)
+    assert "--spec-type" not in cmd
+    assert "--spec-ngram-mod-n-match" not in cmd
+
+
+def test_ngram_standalone_on_any_model(tmp_path):
+    """ngram-mod needs no draft model — it must work on a plain model."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Llama-3-8B", size_gb=8.0)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    cmd = build_command(model, cfg, profile, enable_ngram=True)
+    assert _spec_tokens(cmd) == "ngram-mod"
+    assert "--spec-ngram-mod-n-match" in cmd
+    assert "--spec-ngram-mod-n-min" in cmd
+    assert "--spec-ngram-mod-n-max" in cmd
+
+
+def test_ngram_combines_with_embedded_mtp(tmp_path):
+    """MTP + ngram → one comma-separated --spec-type list (draft-mtp,ngram-mod)."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.6-MoE-A3B", size_gb=8.0)
+    model.metadata = {
+        "general.architecture": "qwen3moe",
+        "qwen3moe.nextn_predict_layers": 1,
+        "qwen3moe.block_count": 48,
+        "__mtp_scan__": "found",
+    }
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    cmd = build_command(model, cfg, profile, enable_ngram=True)
+    types = _spec_tokens(cmd).split(",")
+    assert "draft-mtp" in types
+    assert "ngram-mod" in types
+
+
+def test_ngram_survives_speculative_disabled(tmp_path):
+    """Unchecking Draft (enable_speculative=False) suppresses MTP but ngram
+    is independent and must still be emitted."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.6-MoE-A3B", size_gb=8.0)
+    model.metadata = {
+        "general.architecture": "qwen3moe",
+        "qwen3moe.nextn_predict_layers": 1,
+        "qwen3moe.block_count": 48,
+        "__mtp_scan__": "found",
+    }
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    cmd = build_command(
+        model, cfg, profile, enable_speculative=False, enable_ngram=True
+    )
+    assert _spec_tokens(cmd) == "ngram-mod"
 
 
 # ---------------------------------------------------------------------------
