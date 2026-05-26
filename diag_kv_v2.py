@@ -25,7 +25,7 @@ from scanner import read_gguf_metadata  # noqa: E402
 INTEREST = ("attention", "head", "kv", "embed", "rope", ".n_", ".num_")
 
 
-def main(argv):
+def main(argv) -> None:
     if len(argv) < 2:
         print(__doc__)
         sys.exit(1)

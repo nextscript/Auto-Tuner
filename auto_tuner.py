@@ -323,7 +323,7 @@ def _candidate_search_roots() -> List[Path]:
     roots: List[Path] = []
     seen: set = set()
 
-    def add(p):
+    def add(p) -> None:
         try:
             rp = Path(p).expanduser().resolve()
             _debug_print(f"Checking path: {rp}")
@@ -413,7 +413,7 @@ def _resolve_server_binary(user_value: str) -> str:
     anchors: List[Path] = []
     seen: set = set()
 
-    def add_anchor(a: Path):
+    def add_anchor(a: Path) -> None:
         try:
             ra = a.resolve()
         except (OSError, RuntimeError):

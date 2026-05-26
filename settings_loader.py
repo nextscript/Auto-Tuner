@@ -30,13 +30,33 @@ class ModelProfile:
     server_binary: Optional[str] = None
     draft_max: int = 16
     draft_p_min: float = 0.75
-    # n-gram (ngram-mod) self-speculative decoding — model-agnostic, needs no
-    # draft model. Defaults mirror llama.cpp docs/speculative.md (n-match 24,
-    # n-min 48, n-max 64). Tunable per profile for repetitive code/text or
-    # reasoning workloads; MoE models benefit from longer drafts.
+    # Draftless self-speculative decoding method. As of llama.cpp b9334 the
+    # --spec-type vocabulary grew into a family:
+    #   ngram-mod      — rolling-hash pool (the original; default here)
+    #   ngram-map-k    — key-only n-gram map
+    #   ngram-map-k4v  — key+value n-gram map; the method ggerganov's MTP
+    #                    clean-up (PR #23269) wired into --spec-default and
+    #                    explicitly designed to COEXIST with draft-mtp
+    #   ngram-simple / ngram-cache — older draftless variants
+    # Default stays "ngram-mod" so existing profiles behave exactly as before.
+    # IMPORTANT: only "ngram-mod" conflicts with integrated MTP (draft-mtp,
+    # ngram-mod -> mid-gen crashes, llama.cpp #23154, still open at b9334). The
+    # ngram-map-* methods are allowed alongside draft-mtp by the tuner. So to
+    # actually combine MTP + ngram on an MTP model, set this to ngram-map-k4v.
+    ngram_method: str = "ngram-mod"
+    # ngram-mod tuning — model-agnostic, needs no draft model. Defaults mirror
+    # llama.cpp docs/speculative.md (n-match 24, n-min 48, n-max 64). Tunable
+    # per profile for repetitive code/text or reasoning workloads; MoE models
+    # benefit from longer drafts.
     ngram_n_match: int = 24
     ngram_n_min: int = 48
     ngram_n_max: int = 64
+    # ngram-map-k4v tuning (only used when ngram_method == "ngram-map-k4v").
+    # Names/defaults follow PR #23269's example: --spec-ngram-map-k4v-size-n 16,
+    # -size-m 24, -min-hits 1.
+    ngram_k4v_size_n: int = 16
+    ngram_k4v_size_m: int = 24
+    ngram_k4v_min_hits: int = 1
     # RoPE-Scaling (YaRN): aktiviert wenn ctx > native_ctx und genügend Speicher
     rope_scale_enabled: bool = False  # YAML-Konfiguration: rope_scale: true
     rope_scale_max_ctx: int = 0  # maximales Context mit RoPE-Scaling (0=auto 1M)
@@ -47,6 +67,30 @@ class ModelProfile:
     # default ("balanced"). Recognised values: "safe" / "balanced" /
     # "throughput". Unknown values are ignored.
     performance_target: str = ""
+
+
+# The draftless --spec-type methods llama.cpp accepts as of b9334. Used to
+# validate the profile-level ngram_method so a typo in YAML fails loudly at
+# load time instead of producing an "unknown speculative type" abort when
+# llama-server starts.
+_VALID_NGRAM_METHODS = (
+    "ngram-mod",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-simple",
+    "ngram-cache",
+)
+
+
+def _validate_ngram_method(value: str, yml_name: str) -> str:
+    v = value.lower().strip()
+    if v not in _VALID_NGRAM_METHODS:
+        print(
+            f"[AutoTuner] {yml_name}: unknown ngram_method '{value}', "
+            f"falling back to 'ngram-mod'. Valid: {', '.join(_VALID_NGRAM_METHODS)}"
+        )
+        return "ngram-mod"
+    return v
 
 
 def load_profiles(settings_dir: Path) -> List[ModelProfile]:
@@ -104,9 +148,16 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
                 ),
                 draft_max=int(data.get("draft_max", 16)),
                 draft_p_min=float(data.get("draft_p_min", 0.75)),
+                ngram_method=_validate_ngram_method(
+                    str(data.get("ngram_method", "ngram-mod") or "ngram-mod"),
+                    yml.name,
+                ),
                 ngram_n_match=int(data.get("ngram_n_match", 24)),
                 ngram_n_min=int(data.get("ngram_n_min", 48)),
                 ngram_n_max=int(data.get("ngram_n_max", 64)),
+                ngram_k4v_size_n=int(data.get("ngram_k4v_size_n", 16)),
+                ngram_k4v_size_m=int(data.get("ngram_k4v_size_m", 24)),
+                ngram_k4v_min_hits=int(data.get("ngram_k4v_min_hits", 1)),
                 rope_scale_enabled=rope_scale_enabled,
                 rope_scale_max_ctx=rope_scale_max_ctx
                 if rope_scale_max_ctx > 0

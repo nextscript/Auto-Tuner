@@ -540,10 +540,10 @@ git clone https://github.com/ggerganov/llama.cpp llama.cpp
 cd ~/llama.cpp
 rm -rf build
 cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j $(nproc)```
+cmake --build build --config Release -j $(nproc)
 ```
 
-## Server-Features (Stand b9297)
+## Server-Features (Stand b9334)
 
 Die folgenden `llama-server` Features werden unterstützt (aus `tools/server/README.md`):
 
@@ -558,16 +558,92 @@ Die folgenden `llama-server` Features werden unterstützt (aus `tools/server/REA
 | `--chat-template-kwargs ...` | ✅ Dropdown produziert das automatisch |
 | `--jinja` | ✅ Wird sichtbar angehakt |
 | `--mlock` / `--no-mmap` | ✅ Windows-Guard; manuell überschreibbar |
-| `-md` externer Drafter | ✅ Ohne `--spec-type` — die Anwesenheit von `-md` aktiviert den Draft-Pfad in Mainline automatisch (verifiziert b9297) |
+| `-md` externer Drafter | ✅ Ohne `--spec-type` — die Anwesenheit von `-md` aktiviert den Draft-Pfad in Mainline automatisch (verifiziert b9334) |
 | `--spec-type draft-mtp` | ✅ Integriertes MTP (Qwen3.6-MTP u.a.) — `draft-mtp` ist der Mainline-Name seit Merge von PR #22673 (16. Mai 2026) |
+| `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (Default). Auf MTP-Modellen unterdrückt, weil `draft-mtp,ngram-mod` mitten in der Generierung crasht (#23154, bei b9334 weiterhin offen) |
+| `--spec-type ngram-map-k4v` (draftless) | ✅ **Neu** — die MTP-**kompatible** ngram-Methode aus ggerganovs MTP-Cleanup (PR #23269). Per `ngram_method: ngram-map-k4v` läuft sie zusammen mit `draft-mtp` → so kombiniert man „MTP + ngram" |
+| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Wählbar via `ngram_method`; nur das Typ-Token wird emittiert, Sub-Parameter überlässt der Tuner den llama.cpp-Defaults |
 | `--spec-draft-n-max` | ✅ Via `draft_max` im YAML-Profil |
-| `--spec-draft-p-min` | ✅ Via `draft_p_min` im YAML-Profil — Default 0.75; wird in **beiden** Spec-Paths (extern + integriert) emittiert |
+| `--spec-draft-p-min` | ✅ Via `draft_p_min` im YAML-Profil — Mainline-Default ist seit PR #23269 jetzt **0.0**; der AutoTuner emittiert weiterhin explizit **0.75** in **beiden** Spec-Paths (extern + integriert), damit MTP nur bei sicheren Schritten feuert |
+| `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ **Neu** — via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` im YAML (Defaults 16/24/1 aus PR #23269) |
 | `--spec-draft-ngl` | ✅ Immer 99 (MTP-Head auf GPU halten) |
 | `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` aktiv; `-ot` für gezielte Expert-Platzierung vorbereitet |
 | `--tensor-split` / `--main-gpu` | ✅ Priority-weighted, mit Single-GPU-Pinning |
 | `--rope-scaling yarn` | ✅ Bereits vorhanden |
 | `--numa` | ✅ Bereits vorhanden |
 | `--no-context-shift` | ✅ Wird nicht mehr dupliziert (Dedup via seen-Set) |
+
+### Spekulatives Dekodieren (MTP + n-gram)
+
+Der AutoTuner kombiniert bis zu drei spekulative Pfade in **einer**
+`--spec-type`-Liste:
+
+- **Path A — externer Sibling-Drafter** (`-md`): ein kleines `*-draft-*` /
+  `*-assistant-*` Geschwistermodell. Wird übersprungen, wenn Vision
+  (`--mmproj`) aktiv ist (drei große Graphen gleichzeitig im VRAM sind auf
+  16-GB-Karten zu riskant).
+- **Path B — integriertes MTP** (`--spec-type draft-mtp`): der trainierte
+  MTP-Kopf steckt im Haupt-GGUF (Qwen3.6-MTP usw.). Koexistiert seit b9180 mit
+  Vision.
+- **Path C — draftless n-gram** (`--spec-type <ngram_method>`): braucht kein
+  Draft-Modell. Methode wählbar pro Profil über `ngram_method`.
+
+Seit b9334 ist die draftless-Familie gewachsen: `ngram-mod` (Default),
+`ngram-map-k`, `ngram-map-k4v`, `ngram-simple`, `ngram-cache`.
+
+**MTP + n-gram zusammen.** Nur `ngram-mod` kollidiert mit `draft-mtp`
+(`draft-mtp,ngram-mod` → zufällige Mid-Generation-Crashes, llama.cpp #23154,
+bei b9334 offen). Darum unterdrückt der Tuner `ngram-mod` neben MTP. Die
+`ngram-map-*`-Methoden wurden von ggerganovs MTP-Cleanup (PR #23269) gezielt
+für die Koexistenz mit `draft-mtp` gebaut — `ngram-map-k4v` steht dort sogar
+im `--spec-default`. Um „MTP + n-gram" auf einem MTP-Modell zu aktivieren,
+genügt also ein Eintrag im Profil:
+
+```yaml
+# settings/qwen3_5-3_6.yaml  (Qwen3.6-MTP)
+ngram_method: ngram-map-k4v     # läuft neben draft-mtp statt es zu unterdrücken
+# optional feinjustieren (Defaults aus PR #23269):
+ngram_k4v_size_n: 16
+ngram_k4v_size_m: 24
+ngram_k4v_min_hits: 1
+```
+
+Für ein MTP-Modell mit `ngram_method: ngram-map-k4v` ergibt das:
+
+```
+--spec-type draft-mtp,ngram-map-k4v
+--spec-draft-n-max 2 --spec-draft-ngl 99 --spec-draft-p-min 0.75
+--spec-ngram-map-k4v-size-n 16 --spec-ngram-map-k4v-size-m 24 --spec-ngram-map-k4v-min-hits 1
+```
+
+Ein unbekannter `ngram_method`-Wert im YAML fällt beim Laden mit einer Warnung
+auf `ngram-mod` zurück (statt erst beim Server-Start zu crashen).
+
+> ⚠️ **Realitäts-Check:** Auf bandbreitenlimitierten MoE-A3B-Modellen schlägt
+> spekulatives Dekodieren laut aktuellen Benchmarks oft *nicht* die Baseline
+> (Expert-Saturation). `ngram_method` ist deshalb bewusst Opt-in — vorher/
+> nachher tok/s messen.
+
+### Intel iGPU / NPU — warum sie (noch) nicht genutzt werden
+
+Auf einem Arrow-Lake-System (Core Ultra 285K) erscheinen die integrierte
+Intel-GPU und die NPU bewusst nur als *ignored* in der GPU-Liste, nicht im
+Inferenz-Pool. b9334 bringt zwar einen **OpenVINO**-Backend (Intel CPU/GPU/NPU)
+und **SYCL** (Intel GPU), aber:
+
+1. OpenVINO ist ein **eigenständiges Whole-Model-Backend**, das den
+   GGML-Graph komplett ersetzt — es lässt sich **nicht** mit dem Vulkan-/
+   ROCm-AMD-Pool in einem Prozess mischen (Entweder/Oder).
+2. Offizielle Windows-Binaries gibt es nur als CPU / CUDA / Vulkan / SYCL /
+   HIP — **kein** Windows-OpenVINO-Build (nur Ubuntu).
+3. Die Desktop-iGPU (~4 Xe-Cores) und die ~13-TOPS-NPU teilen sich die
+   DDR5-Bandbreite mit der CPU, die bereits die MoE-Experten rechnet, und im
+   Layer-Split taktet das langsamste Gerät die Pipeline — neben zwei starken
+   AMD-Karten wäre das ein Netto-Verlust.
+
+Sinnvoll wäre die iGPU/NPU nur als **separate, eigenständige**
+`llama-server`-Instanz (SYCL auf Windows, OpenVINO auf Linux) für ein kleines
+Hintergrundmodell — nicht im Haupt-Inferenzpfad. Diese Trennung ist Absicht.
 
 ### Monitoring (`/health` + `/metrics`)
 

@@ -1647,24 +1647,26 @@ def build_command(
     * ``enable_speculative=False`` overrides both paths and emits no
       speculative flags at all — for the case where the user explicitly
       unchecked Draft on an MTP-named model.
-    * ``enable_ngram=True`` adds ``ngram-mod`` self-speculative decoding
-      (Path C). It is model-agnostic — no draft model required — so it can
-      run standalone on any GGUF, or be combined with an *external* sibling
-      drafter (Path A, ``-md``). ``--spec-type`` is a comma-separated list and
-      llama.cpp allows mixing a draft-model path with a draftless one.
+    * ``enable_ngram=True`` adds a draftless self-speculative method (Path C),
+      selected by ``profile.ngram_method`` (default ``ngram-mod``). As of
+      b9334 the choices are ``ngram-mod`` / ``ngram-map-k`` / ``ngram-map-k4v``
+      / ``ngram-simple`` / ``ngram-cache``. It is model-agnostic — no draft
+      model required — so it can run standalone on any GGUF, or be combined with
+      an *external* sibling drafter (Path A, ``-md``). ``--spec-type`` is a
+      comma-separated list and llama.cpp allows mixing a draft-model path with a
+      draftless one.
 
-      EXCEPTION — integrated MTP (Path B): ``ngram-mod`` is **not** combined
-      with ``draft-mtp``. The pair ``draft-mtp,ngram-mod`` triggers random
-      mid-generation crashes (CUDA/Vulkan device error, or the model stalling
-      mid-thought) on MTP models such as Qwen3.6-27B-MTP — see llama.cpp issue
-      #23154 (open as of b9305; "issue not reproduced when ngram-mod is
-      removed"). Both speculators feed the same decode graph and corrupt each
-      other's draft state. On an MTP model ``draft-mtp`` therefore wins: it is
-      the trained, model-native draft head (higher acceptance than a generic
-      hash lookup anyway), so suppressing the redundant ``ngram-mod`` loses no
-      real capability. ``ngram-mod`` stays fully active for every other case:
-      standalone on dense / MoE-without-MTP models, and alongside an external
-      drafter (Path A), whose separate context does not exhibit the conflict.
+      INTEGRATED MTP (Path B) coexistence: only ``ngram-mod`` conflicts with
+      ``draft-mtp``. The pair ``draft-mtp,ngram-mod`` triggers random
+      mid-generation crashes on MTP models such as Qwen3.6-27B-MTP — see
+      llama.cpp issue #23154 (open as of b9334; "issue not reproduced when
+      ngram-mod is removed"). So on an MTP model with ``ngram_method ==
+      ngram-mod`` the redundant ngram-mod is suppressed and ``draft-mtp`` wins.
+      The ``ngram-map-*`` family is different: ggerganov's MTP clean-up
+      (PR #23269) wired ``ngram-map-k4v`` into ``--spec-default`` and runs it
+      together with ``draft-mtp`` by design, so setting
+      ``ngram_method: ngram-map-k4v`` is the supported way to combine
+      "MTP + ngram" on an MTP model.
     """
     cmd: List[str] = [
         server_binary,
@@ -1700,8 +1702,8 @@ def build_command(
     # ones that run. If they overcommit we want a visible, debuggable OOM
     # — not a silent ctx/ngl downscale that desyncs the running config
     # from what the launcher reported.
-    # NOTE: `--fit` is a recent flag. It is present in current mainline
-    # (b9297). If a server binary predates it, this will abort with
+    # NOTE: `--fit` (env LLAMA_ARG_FIT, default 'on') is confirmed present in
+    # b9334. If a server binary predates it, this will abort with
     # "unknown argument"; in that case drop the two tokens below.
     cmd += ["--fit", "off"]
 
@@ -1715,14 +1717,14 @@ def build_command(
     # Speculative decoding — composable paths combined into one --spec-type:
     #   - sibling drafter passed in        → Path A (-md, auto-detected type)
     #   - integrated MTP                    → Path B (--spec-type draft-mtp)
-    #   - n-gram (enable_ngram)             → Path C (--spec-type ngram-mod)
+    #   - n-gram (enable_ngram)             → Path C (--spec-type <ngram_method>)
     #   - enable_speculative=False          → suppresses Path A and B; Path C
     #                                         (ngram) is independent and still
     #                                         honours its own enable_ngram flag.
     #
     # --spec-type accepts a comma-separated list and llama.cpp allows mixing a
-    # draft-model path (draft-mtp) with a draftless one (ngram-mod), so we
-    # assemble the active types and emit a single token (e.g. "draft-mtp,ngram-mod").
+    # draft-model path (draft-mtp) with a draftless one, so we assemble the
+    # active types and emit a single token (e.g. "draft-mtp,ngram-map-k4v").
     #
     # Vision / draft compatibility:
     #   - External draft (Path A, -md) conflicts with --mmproj in llama.cpp:
@@ -1752,22 +1754,38 @@ def build_command(
         and draft_model is None
     )
 
-    # ngram-mod is mutually exclusive with integrated MTP (draft-mtp).
-    # Combining them in one --spec-type list (draft-mtp,ngram-mod) causes
-    # random mid-generation crashes on MTP models (e.g. Qwen3.6-27B-MTP):
-    # CUDA/Vulkan device error, or the model stalling mid-thought. This is
-    # llama.cpp issue #23154, still OPEN as of b9305 — the reporter confirms
-    # "issue not reproduced when ngram-mod is removed". Both speculators write
-    # into the same decode graph and corrupt each other's draft state.
+    # ---- Draftless ("ngram") method selection (b9334) ------------------
+    # As of b9334 the draftless --spec-type vocabulary is a family:
+    #   ngram-mod, ngram-map-k, ngram-map-k4v, ngram-simple, ngram-cache.
+    # The profile picks one (default "ngram-mod" -> unchanged behaviour). It is
+    # validated at load time in settings_loader, so it is always a known token.
+    ngram_method = (
+        getattr(profile, "ngram_method", "ngram-mod") or "ngram-mod"
+    ).lower()
+
+    # Only ngram-mod conflicts with integrated MTP. Combining draft-mtp,ngram-mod
+    # in one --spec-type list causes random mid-generation crashes on MTP models
+    # (e.g. Qwen3.6-27B-MTP): CUDA/Vulkan device error, or the model stalling
+    # mid-thought. That is llama.cpp issue #23154, still OPEN as of b9334 — the
+    # reporter confirms "issue not reproduced when ngram-mod is removed". Both
+    # speculators write into the same decode graph and corrupt each other's
+    # draft state.
     #
-    # Resolution: on an MTP model, draft-mtp wins. It is the trained,
-    # model-native draft head (and has a higher acceptance rate than a generic
-    # ngram hash lookup), so dropping the redundant ngram-mod loses no real
-    # capability — it only removes the unstable duplication. ngram-mod remains
-    # fully active wherever it is safe: standalone (dense / MoE-without-MTP)
-    # and alongside an external sibling drafter (Path A, -md), which lives in a
-    # separate context and does not exhibit this conflict.
-    use_ngram_mod = enable_ngram and not use_integrated
+    # The ngram-map-* family is different: ggerganov's MTP clean-up (PR #23269)
+    # wired ngram-map-k4v into --spec-default and demonstrates draft-mtp +
+    # ngram-map-k4v running together, so those methods ARE allowed alongside
+    # integrated MTP. That is exactly how to combine "MTP + ngram" on an MTP
+    # model — set ngram_method: ngram-map-k4v in the profile.
+    #
+    # Resolution when the conflicting pair would occur: on an MTP model with
+    # ngram_method == ngram-mod, draft-mtp wins (it is the trained, model-native
+    # draft head with higher acceptance than a generic hash lookup), and the
+    # redundant ngram-mod is suppressed. Every other case keeps ngram active:
+    # standalone (dense / MoE-without-MTP), alongside an external sibling drafter
+    # (Path A, -md, separate context — no conflict), or any ngram-map-* method
+    # next to integrated MTP.
+    ngram_conflicts_with_mtp = ngram_method == "ngram-mod"
+    use_ngram = enable_ngram and not (use_integrated and ngram_conflicts_with_mtp)
 
     # Assemble the --spec-type list (embedded-draft + draftless types) and emit
     # it BEFORE the per-path parameter flags. -md (Path A) is auto-detected by
@@ -1775,8 +1793,8 @@ def build_command(
     spec_types: List[str] = []
     if use_integrated:
         spec_types.append("draft-mtp")
-    if use_ngram_mod:
-        spec_types.append("ngram-mod")
+    if use_ngram:
+        spec_types.append(ngram_method)
     if spec_types:
         cmd += ["--spec-type", ",".join(spec_types)]
 
@@ -1795,27 +1813,45 @@ def build_command(
         # Path B — integrated MTP drafter inside the main GGUF.
         # `--spec-draft-ngl 99` keeps the MTP head on GPU; without it the
         # drafter layers fall back to CPU and the speedup vanishes.
-        # `--spec-draft-p-min` is emitted explicitly: with p_min=0.0 the MTP
-        # hook fires on every decode step regardless of confidence, adding
-        # constant D2H-transfer overhead that can make write-speed slower than
-        # baseline on Vulkan/ROCm. The mainline default is 0.75.
+        # `--spec-draft-p-min` is emitted explicitly: as of b9334 (PR #23269
+        # made the argument functional again) the mainline DEFAULT is 0.0,
+        # meaning the MTP hook fires on every decode step regardless of
+        # confidence, adding constant D2H-transfer overhead that can make
+        # write-speed slower than baseline on Vulkan/ROCm. We pass the
+        # profile's value (default 0.75) so drafting only triggers on
+        # confident steps — do not rely on the upstream default here.
         cmd += ["--spec-draft-n-max", str(draft_val)]
         cmd += ["--spec-draft-ngl", "99"]
         cmd += ["--spec-draft-p-min", str(draft_p_min)]
 
-    if use_ngram_mod:
-        # Path C — ngram-mod self-speculative decoding (no draft model).
-        # Builds a rolling-hash lookup table from the live context (~16 MB,
-        # constant memory). Parameters per llama.cpp docs/speculative.md:
-        #   n-match = lookup length, n-min/n-max = draft length bounds.
-        # Gated by use_ngram_mod (not enable_ngram) so these flags are omitted
-        # when integrated MTP is active — see the #23154 note above.
-        ngram_match = getattr(profile, "ngram_n_match", 24) or 24
-        ngram_min = getattr(profile, "ngram_n_min", 48) or 48
-        ngram_max = getattr(profile, "ngram_n_max", 64) or 64
-        cmd += ["--spec-ngram-mod-n-match", str(ngram_match)]
-        cmd += ["--spec-ngram-mod-n-min", str(ngram_min)]
-        cmd += ["--spec-ngram-mod-n-max", str(ngram_max)]
+    if use_ngram:
+        # Path C — draftless self-speculative decoding (no draft model).
+        # Emit per-method parameter flags. Gated by use_ngram (not enable_ngram)
+        # so nothing is emitted when an ngram-mod request was suppressed next to
+        # integrated MTP — see the #23154 note above.
+        if ngram_method == "ngram-mod":
+            # Rolling-hash lookup table built from the live context (~16 MB,
+            # constant memory). Params per llama.cpp docs/speculative.md.
+            ngram_match = getattr(profile, "ngram_n_match", 24) or 24
+            ngram_min = getattr(profile, "ngram_n_min", 48) or 48
+            ngram_max = getattr(profile, "ngram_n_max", 64) or 64
+            cmd += ["--spec-ngram-mod-n-match", str(ngram_match)]
+            cmd += ["--spec-ngram-mod-n-min", str(ngram_min)]
+            cmd += ["--spec-ngram-mod-n-max", str(ngram_max)]
+        elif ngram_method == "ngram-map-k4v":
+            # Key+value n-gram map — the method ggerganov's MTP clean-up
+            # (PR #23269) pairs with draft-mtp. Flag names/defaults from that
+            # PR's example (size-n 16, size-m 24, min-hits 1).
+            size_n = getattr(profile, "ngram_k4v_size_n", 16) or 16
+            size_m = getattr(profile, "ngram_k4v_size_m", 24) or 24
+            min_hits = getattr(profile, "ngram_k4v_min_hits", 1) or 1
+            cmd += ["--spec-ngram-map-k4v-size-n", str(size_n)]
+            cmd += ["--spec-ngram-map-k4v-size-m", str(size_m)]
+            cmd += ["--spec-ngram-map-k4v-min-hits", str(min_hits)]
+        # ngram-map-k / ngram-simple / ngram-cache: emit only the --spec-type
+        # token (added above) and let llama.cpp apply its own well-tuned
+        # defaults — we deliberately don't guess sub-parameter flag names for
+        # methods the AutoTuner hasn't explicitly calibrated.
 
     if config.flash_attn:
         cmd += ["-fa", "on"]

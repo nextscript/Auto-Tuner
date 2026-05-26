@@ -1,7 +1,7 @@
 import os
 from gguf import GGUFReader
 
-def scan_models(start_path, output_md):
+def scan_models(start_path, output_md) -> None:
     print(f"Starte Scan in: {os.path.abspath(start_path)}...")
     
     with open(output_md, 'w', encoding='utf-8') as md:
