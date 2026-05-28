@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "H:\\LAB\\ai-local\\b9354_llama.cpp",
+  "fork_path": "H:\\LAB\\ai-local\\b9381_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -66,7 +66,7 @@
     }
   },
   "mode": "coding",
-  "window_geometry": "AdnQywADAAAAAABqAAAAYwAABSIAAATkAAAAagAAAIIAAAUiAAAE5AAAAAAAAAAADXAAAABqAAAAggAABSIAAATk",
+  "window_geometry": "AdnQywADAAAAAARHAAAAdAAACP8AAAT1AAAERwAAAJMAAAj/AAAE9QAAAAAAAAAADXAAAARHAAAAkwAACP8AAAT1",
   "window_state": "AAAA/wAAAAD9AAAAAAAABLkAAAQuAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
   "fork_container_path": "H:\\LAB\\ai-local",
   "font_size": 10,

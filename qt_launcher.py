@@ -15,6 +15,7 @@ import copy
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -159,6 +160,47 @@ class _TerminalProcess:
                     pass
 
         threading.Thread(target=_wait, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Running-server registry entry
+#
+# AutoTuner can keep several llama-server instances alive at once — each on
+# its own port, each in its own console window. This is what makes the
+# "pi coding agent + subagent-spawn" workflow possible: an orchestrator
+# model and one or more subagent / draft models all serving concurrently.
+# The GUI tracks every live instance in `MainWindow._servers`; this record
+# bundles the process wrapper with the per-instance /health latch.
+
+
+class _RunningServer:
+    """One live llama-server instance tracked by the GUI."""
+
+    def __init__(
+        self, proc: "_TerminalProcess", host: str, port: int, label: str
+    ) -> None:
+        self.proc = proc
+        self.host = host
+        self.port = port
+        self.label = label
+        self.base_url = f"http://{host}:{port}"
+        # /health handshake latch: flips True once GET /health returns 200
+        # (model finished loading). Tracked per instance, not globally.
+        self.ready = False
+
+    def is_running(self) -> bool:
+        return self.proc.is_running()
+
+    def returncode(self) -> Optional[int]:
+        return self.proc.returncode()
+
+    @property
+    def pid(self) -> object:
+        return self.proc.proc.pid if self.proc.proc else "?"
+
+    def combo_label(self) -> str:
+        state = "ready" if self.ready else "loading"
+        return f":{self.port}  {self.label}  [{state}]  PID {self.pid}"
 
 
 # ---------------------------------------------------------------------------
@@ -1056,11 +1098,12 @@ class MainWindow(QMainWindow):
         self.models_path = models_path
         self.settings_path = settings_path
 
-        self._server: Optional[_TerminalProcess] = None
-        # /health handshake state: base URL of the running server and a
-        # latch that flips once GET /health returns 200 (model loaded).
-        self._server_base_url: Optional[str] = None
-        self._server_ready: bool = False
+        # Registry of all live llama-server instances. AutoTuner supports
+        # several at once — one per port, each in its own console window —
+        # so an agent can run an orchestrator model plus spawned subagents
+        # concurrently. The /health latch now lives per-instance on each
+        # _RunningServer rather than as a single global flag.
+        self._servers: List[_RunningServer] = []
         self._all_entries: List[ModelEntry] = []
         self._system: Optional[SystemInfo] = None
         self._profiles: List[ModelProfile] = []
@@ -1388,11 +1431,28 @@ class MainWindow(QMainWindow):
         self._btn_launch.clicked.connect(self._launch_server)
         bl.addWidget(self._btn_launch)
 
+        # Running-instance management. AutoTuner keeps several servers alive
+        # at once; the combo lists every live instance and the two Stop
+        # buttons act on the selected one / on all of them.
+        bl.addWidget(QLabel(" Running:"))
+        self._server_combo = QComboBox()
+        self._server_combo.setMinimumWidth(240)
+        self._server_combo.setToolTip("Live llama-server instances")
+        bl.addWidget(self._server_combo)
+
         self._btn_stop = QPushButton("■  Stop")
         self._btn_stop.setFixedHeight(32)
         self._btn_stop.setEnabled(False)
-        self._btn_stop.clicked.connect(self._stop_server)
+        self._btn_stop.setToolTip("Stop the selected instance")
+        self._btn_stop.clicked.connect(self._stop_selected_server)
         bl.addWidget(self._btn_stop)
+
+        self._btn_stop_all = QPushButton("■  Stop all")
+        self._btn_stop_all.setFixedHeight(32)
+        self._btn_stop_all.setEnabled(False)
+        self._btn_stop_all.setToolTip("Stop every running instance")
+        self._btn_stop_all.clicked.connect(self._stop_all_servers)
+        bl.addWidget(self._btn_stop_all)
 
         self._btn_quit = QPushButton("Quit")
         self._btn_quit.setFixedHeight(32)
@@ -2722,13 +2782,32 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Server control
     # ------------------------------------------------------------------
-    def _launch_server(self) -> None:
-        if self._server is not None and self._server.is_running():
-            QMessageBox.information(
-                self, "Already running", "Stop the running server first."
-            )
-            return
+    def _port_in_use(self, host: str, port: int) -> bool:
+        """True if a tracked instance already owns this port, or the OS
+        reports it bound (another process — e.g. a server we didn't start)."""
+        for srv in self._servers:
+            if srv.port == port and srv.is_running():
+                return True
+        probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((probe_host, port))
+                return False
+            except OSError:
+                return True
 
+    def _next_free_port(self, host: str, start: int) -> int:
+        """First free port at or above `start` (caps the search so a fully
+        occupied range can't spin forever)."""
+        port = max(1, start)
+        for _ in range(200):
+            if not self._port_in_use(host, port):
+                return port
+            port += 1
+        return start
+
+    def _launch_server(self) -> None:
         if self._current_entry is None:
             QMessageBox.warning(
                 self, "No model selected", "Click a model in the list first."
@@ -2786,9 +2865,20 @@ class MainWindow(QMainWindow):
 
         host = self._host_edit.text().strip() or "127.0.0.1"
         try:
-            port = int(self._port_edit.text().strip())
+            requested_port = int(self._port_edit.text().strip())
         except ValueError:
-            port = 1234
+            requested_port = 1234
+
+        # Auto-advance off any port that's already taken (by one of our own
+        # instances or by an unrelated process) so a second/third Launch never
+        # collides with a running server. The chosen port is what we bake into
+        # the command, log, and track — and we bump the field to the next free
+        # port so the next Launch defaults to a fresh endpoint.
+        port = self._next_free_port(host, requested_port)
+        if port != requested_port:
+            self._log(
+                f"[AutoTuner] Port {requested_port} busy — using {port} instead."
+            )
 
         server_binary = self._resolve_binary(profile, use_draft, entry.name)
         # Clean alias so RooCode/clients show a readable name, not the file path
@@ -2820,90 +2910,164 @@ class MainWindow(QMainWindow):
             for k, v in cfg.env_overrides.items():
                 self._log(f"Env     : {k}={v}")
 
-        self._server = _TerminalProcess(cmd, env_overrides=cfg.env_overrides)
+        proc = _TerminalProcess(cmd, env_overrides=cfg.env_overrides)
         try:
-            self._server.start()
+            proc.start()
         except FileNotFoundError:
             self._log(f"[Error] Binary not found: {cmd[0]}")
             self._log("  → Check fork selection or set LLAMA_CPP_DIR / LLAMA_SERVER")
-            self._server = None
             return
 
-        pid = self._server.proc.pid if self._server.proc else "?"
-        self._log(f"[AutoTuner] Server started — PID: {pid}")
+        srv = _RunningServer(proc, host, port, alias)
+        self._servers.append(srv)
+
+        self._log(f"[AutoTuner] Server started — PID: {srv.pid}")
         self._log("[AutoTuner] Server output → separate terminal window")
-        self._log(f"[AutoTuner] Web UI → http://{host}:{port}")
+        self._log(f"[AutoTuner] Web UI → {srv.base_url}")
 
-        # Arm the /health handshake. The status flips from "Loading model"
-        # to "Ready" once _poll_server sees GET /health → 200. For big MoE
-        # models this load can take a while (or fail mid graph-build), so
-        # we no longer claim "Running" the instant the PID exists.
-        self._server_base_url = f"http://{host}:{port}"
-        self._server_ready = False
+        # Suggest the next free port so the following Launch lands on a fresh
+        # endpoint without the user touching the field — exactly what spawning
+        # several subagent models in a row needs.
+        self._port_edit.setText(str(self._next_free_port(host, port + 1)))
 
-        self._btn_launch.setEnabled(False)
-        self._btn_stop.setEnabled(True)
+        # Launch stays enabled — more instances are allowed. Refresh the
+        # running-servers combo + stop buttons + status line. The per-instance
+        # /health latch flips from "loading" to "ready" in _poll_server.
+        self._refresh_server_combo(select_port=port)
+        self._update_server_controls()
         self._status.showMessage(
-            f"Loading model — PID {pid} — http://{host}:{port}"
+            f"Loading {alias} — PID {srv.pid} — {srv.base_url}  "
+            f"({len(self._servers)} running)"
         )
 
-    def _stop_server(self) -> None:
-        if self._server is None:
+    # ------------------------------------------------------------------
+    # Running-instance helpers
+    # ------------------------------------------------------------------
+    def _selected_server(self) -> Optional[_RunningServer]:
+        """The _RunningServer currently chosen in the combo, if any."""
+        idx = self._server_combo.currentIndex()
+        if idx < 0:
+            return None
+        port = self._server_combo.itemData(idx)
+        for srv in self._servers:
+            if srv.port == port:
+                return srv
+        return None
+
+    def _refresh_server_combo(self, select_port: Optional[int] = None) -> None:
+        """Rebuild the running-servers combo from the registry.
+
+        Preserves the current selection across rebuilds (the poll timer
+        rebuilds it on every tick to refresh the loading/ready label), or
+        selects `select_port` when a specific instance should be focused.
+        """
+        keep = select_port
+        if keep is None:
+            cur = self._server_combo.currentData()
+            if cur is not None:
+                keep = cur
+
+        self._server_combo.blockSignals(True)
+        self._server_combo.clear()
+        for srv in self._servers:
+            self._server_combo.addItem(srv.combo_label(), srv.port)
+        if keep is not None:
+            i = self._server_combo.findData(keep)
+            if i >= 0:
+                self._server_combo.setCurrentIndex(i)
+        self._server_combo.blockSignals(False)
+
+    def _update_server_controls(self) -> None:
+        any_running = len(self._servers) > 0
+        self._btn_stop.setEnabled(any_running)
+        self._btn_stop_all.setEnabled(any_running)
+        self._server_combo.setEnabled(any_running)
+
+    def _stop_one(self, srv: _RunningServer) -> None:
+        """Stop a single instance and drop it from the registry."""
+        self._log(f"[AutoTuner] Stopping :{srv.port} ({srv.label})…")
+        try:
+            self._servers.remove(srv)
+        except ValueError:
+            pass
+        srv.proc.stop()  # sends signal + waits in daemon thread
+        self._refresh_server_combo()
+        self._update_server_controls()
+
+    def _stop_selected_server(self) -> None:
+        srv = self._selected_server()
+        if srv is None:
             return
-        self._log("[AutoTuner] Stopping server…")
-        srv = self._server
-        self._server = None
-        self._server_base_url = None
-        self._server_ready = False
-        srv.stop()  # sends signal + waits in daemon thread
-        self._btn_launch.setEnabled(True)
-        self._btn_stop.setEnabled(False)
-        self._status.showMessage("Server stopped.")
-        self._log("[AutoTuner] Stop signal sent.")
+        self._stop_one(srv)
+        n = len(self._servers)
+        self._status.showMessage(
+            "All servers stopped." if n == 0 else f"Server stopped. ({n} running)"
+        )
+
+    def _stop_all_servers(self) -> None:
+        if not self._servers:
+            return
+        self._log("[AutoTuner] Stopping all servers…")
+        for srv in list(self._servers):
+            srv.proc.stop()
+        self._servers.clear()
+        self._refresh_server_combo()
+        self._update_server_controls()
+        self._status.showMessage("All servers stopped.")
 
     # ------------------------------------------------------------------
-    # Server crash detection
+    # Server crash detection + readiness polling (all instances)
     # ------------------------------------------------------------------
     def _poll_server(self) -> None:
-        if self._server is None:
-            return
-        if not self._server.is_running():
-            code = self._server.returncode()
-            self._server = None
-            self._server_base_url = None
-            self._server_ready = False
-            self._btn_launch.setEnabled(True)
-            self._btn_stop.setEnabled(False)
-            self._log(f"[AutoTuner] Server exited (code {code}).")
-            self._status.showMessage(f"Server exited (code {code}).")
+        if not self._servers:
             return
 
-        # Process is alive. Until the model has finished loading, probe the
-        # HTTP /health endpoint: it returns 503 while loading and 200 once
-        # the model is ready to serve. We only poll during the load window
-        # — after the first 200 we latch and stop probing (the liveness
-        # check above continues to catch crashes/exits).
-        if self._server_ready or not self._server_base_url:
-            return
-        try:
-            import urllib.request
+        import urllib.request
 
-            with urllib.request.urlopen(
-                f"{self._server_base_url}/health", timeout=0.3
-            ) as resp:
-                ready = resp.status == 200
-        except Exception:
-            # 503 (HTTPError), connection refused, or any transient error
-            # all mean "not ready yet" — keep showing the loading state.
-            ready = False
+        changed = False  # combo label / registry membership changed this tick
 
-        if ready:
-            self._server_ready = True
-            pid = self._server.proc.pid if self._server.proc else "?"
-            self._log("[AutoTuner] Server ready (/health → 200).")
-            self._status.showMessage(
-                f"Ready — PID {pid} — {self._server_base_url}"
-            )
+        for srv in list(self._servers):
+            # ── Liveness: catch crashes / clean exits ──────────────────
+            if not srv.is_running():
+                code = srv.returncode()
+                self._servers.remove(srv)
+                self._log(
+                    f"[AutoTuner] :{srv.port} ({srv.label}) exited (code {code})."
+                )
+                changed = True
+                continue
+
+            # ── Readiness: probe /health until the first 200, then latch.
+            # 503 while loading, 200 once the model is ready. Big MoE models
+            # can take a while to load (or fail mid graph-build), so we don't
+            # claim "ready" the instant the PID exists.
+            if srv.ready:
+                continue
+            try:
+                with urllib.request.urlopen(
+                    f"{srv.base_url}/health", timeout=0.3
+                ) as resp:
+                    is_ready = resp.status == 200
+            except Exception:
+                # 503 (HTTPError), connection refused, or any transient error
+                # all mean "not ready yet" — keep showing the loading state.
+                is_ready = False
+            if is_ready:
+                srv.ready = True
+                changed = True
+                self._log(f"[AutoTuner] :{srv.port} ready (/health → 200).")
+
+        if changed:
+            self._refresh_server_combo()
+            self._update_server_controls()
+            n = len(self._servers)
+            ready = sum(1 for s in self._servers if s.ready)
+            if n == 0:
+                self._status.showMessage("No servers running.")
+            else:
+                self._status.showMessage(
+                    f"{n} server(s) running — {ready} ready."
+                )
 
     # ------------------------------------------------------------------
     # Log helper
@@ -2957,18 +3121,19 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
 
-        if self._server is not None and self._server.is_running():
+        running = [s for s in self._servers if s.is_running()]
+        if running:
             reply = QMessageBox.question(
                 self,
-                "Server still running",
-                "Stop the server and quit?",
+                "Servers still running",
+                f"Stop {len(running)} running server(s) and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
                 if a0 is not None:
                     a0.ignore()
                 return
-            self._stop_server()
+            self._stop_all_servers()
 
         if a0 is not None:
             a0.accept()

@@ -2,96 +2,87 @@
 
 Interactive launcher for `llama-server` that **detects your hardware**,
 **scans your local GGUF collection**, and **auto-tunes** context length,
-KV-cache quantization, GPU offload, threading, and batch size to fit in
-the RAM/VRAM you actually have free — without manual edits.
+KV-cache quantization, GPU offload, threading, and batch size to fit the
+RAM/VRAM you actually have free — without manual edits.
 
-# GUI-Design
+Tested against llama.cpp **b9381** (Vulkan/ROCm, Windows + Linux).
 
 ![GUI](image.png)
 
-# Terminal-Design
+## Features
+
+- **Two front-ends, one engine** — an interactive terminal menu
+  (`auto_tuner.py`) and a Qt GUI (`qt_launcher.py`) that share the same
+  detection and tuning logic.
+- **Run several models at once** — launch multiple `llama-server`
+  instances concurrently, each on its own port (see
+  [Running multiple models](#running-multiple-models-at-once)).
+- **Hardware auto-detection** — AMD (ROCm/Vulkan), NVIDIA, Intel, and
+  Apple Silicon (unified memory). Multi-GPU uses a priority-weighted
+  `--tensor-split`: a model that fits the largest card is pinned to it
+  (the second GPU stays free for gaming/OBS); only larger models spread
+  across both. Device visibility is pinned via `HIP_VISIBLE_DEVICES`
+  *and* `GGML_VK_VISIBLE_DEVICES` so it works on ROCm and Vulkan builds.
+- **Free-memory aware** — context length and KV quant are picked to use
+  the RAM/VRAM that's free *right now*, not a hard-coded cap.
+- **Per-family YAML profiles** in `settings/` — override sampling, max
+  context, chat template, and llama-server flags per model family,
+  without touching Python.
+- **Companion-file auto-pairing** — sibling files don't clutter the menu;
+  they attach to their main model:
+  - `mmproj-*.gguf` → vision (longest-prefix match wins)
+  - `*-assistant-*.gguf` / `*-draft-*.gguf` → speculative decoding
+    (smallest matching sibling wins)
+- **Capability badges** in the model list, read straight from the GGUF
+  chat template (no name guessing):
+  - 👁 vision · ⚡ draft · 🧠 thinking · 🛠 tool-use
+- **Reads GGUF metadata** — pulls exact `n_layers` and `context_length`
+  from the file, so partial GPU offload (`-ngl`) is precise.
+- **Sticky GUI choices** — per-model vision/draft/thinking toggles,
+  performance target, fork selection, window geometry, and font size all
+  persist in `autotuner_settings.json` across restarts.
+
+## Installation
+
+```bash
+git clone https://github.com/<you>/llama-cpp-auto-tuner
+cd llama-cpp-auto-tuner
+pip install -r requirements.txt
+```
+
+You also need a working `llama-server` binary. The tuner auto-discovers
+binaries in common local layouts (see
+[Server binary discovery](#server-binary-discovery)), or pass one via
+`--server`.
+
+## Usage
+
+### Terminal
+
+Point it at a folder of `*.gguf` models (it recurses):
+
+```bash
+python auto_tuner.py --models-path /path/to/models
+```
+
+Or set the folder once via the environment:
+
+```bash
+export AUTOTUNER_MODELS=/path/to/models     # Linux / macOS
+setx  AUTOTUNER_MODELS  D:\models           # Windows
+python auto_tuner.py
+```
+
+Pick a model from the menu; once it's running, point any OpenAI-API
+client at `http://127.0.0.1:1234` — the built-in llama.cpp Web UI, VS Code
+extensions (Continue / Cline / RooCode), Open WebUI, etc.
+
+A representative config summary printed before launch:
 
 ```
 ────────────────────────────────────────────────────────────────
-  AutoTuner for llama.cpp  —  interactive launcher
-────────────────────────────────────────────────────────────────
-
-============================================================
-  DEBUG / VERBOSE MODE SELECTION
-============================================================
-  1. Debugging OFF (standard)
-  2. Debugging ON (alle Kategorien)
-------------------------------------------------------------
-  Kategorie-Debugging (einzelne Bereiche):
-  3. Hardware-Erkennung (GPU/RAM/CPU)
-  4. Model-Scanning & Profil-Matching
-  5. Server-Pfad-Suche (llama.cpp)
-  6. Konfigurations-Berechnung (KV-Cache, Kontext)
-------------------------------------------------------------
-Wahl [1-6] (default 1):
-[AutoTuner] Debugging deaktiviert.
-============================================================
-
-
-========================================
-  QUANTIZATION MODE SELECTION
-========================================
-  1. Standard-Quant (llama.cpp)
-  2. Turbo-Quant (tq_llama.cpp)
-----------------------------------------
-Select mode [1/2] (default 1):
-[AutoTuner] Standard-Quant mode selected.
-========================================
-
-OS:   Windows 11
-CPU:  Intel(R) Core(TM) Ultra 9 285K (24C/24T)
-RAM:  47.4 GB total, 18.1 GB free
-GPU1: [amd] AMD Radeon AI PRO R9700 (32.0 GB total, 31.0 GB free)
-GPU2: [amd] AMD Radeon RX 9070 XT (15.9 GB total, 14.0 GB free)
-      (ignored: [intel] Intel(R) Graphics, 2.0 GB — too small or auxiliary)
-
-[AutoTuner] Scanning models in: C:\LAB\ai-local\models
-[AutoTuner] Loaded 17 profile(s) from C:\GitHub\Auto Tuner\settings
-
-Available models:
-────────────────────────────────────────────────────────────────
-  Symbols: 👁 vision · ⚡ draft · 🧠 thinking · 🛠 tool-use
-  ...
-
-  [Alibaba/Qwen3.6]
-    7.  👁 🧠 🛠   Qwen3.6-27B-UD-Q3_K_XL                              13.5 GB  (256k native)
-    8.  👁 🧠 🛠   Qwen3.6-35B-A3B-UD-IQ3_S                            12.7 GB  (256k native)
-  ...
-
-  [Google]
-  ...
-    16.  👁 ⚡ 🧠   gemma-4-26B-A4B-it-UD-IQ4_XS                        14.0 GB  (128k native)
-    17.  👁         gemma-4-E2B-it-BF16                                 8.7 GB  (128k native)
-  ...
-
-  [IBM]
-    21.   🛠         granite-4.1-30b-IQ4_XS                             14.4 GB  (128k native)
-    22.   🛠         granite-4.1-3b-UD-Q8_K_XL                           4.0 GB  (128k native)
-  ...
-
-  [Mistral AI]
-    36.  👁 🛠       Mistral-Medium-3.5-128B-UD-IQ3_XXS                 45.9 GB  (256k native)
-
-  [NVIDIA]
-    37.  👁 🧠 🛠   NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-…    18.2 GB  (1024k native)
-
-  [PrismML]
-    38.              Bonsai-8B                                           1.1 GB  (64k native)
-  ...
-
-Select a model [1-40, q to quit]: 16
-Vision aktivieren? (mmproj-gemma-4-26B-A4B-it-BF16.gguf) [Y/n] y
-Draft-Modell aktivieren? (gemma-4-26B-A4B-it-assistant-Q8_0) [Y/n] n
-Thinking/Reasoning aktivieren? (<|think|> / <|reserved_special_token>) [Y/n] y
-────────────────────────────────────────────────────────────────
 Model:    gemma-4-26B-A4B-it-UD-IQ4_XS
 Profile:  Gemma 4 (Google)  (gemma-4.yaml)
-Notes:    Gemma ist empfindlich gegenüber repeat_penalty > 1.0. E2B/E4B = multimodal (Text+Bild+Audio), 26B-A4B + 31B = Text+Bild. Thinking-Modus aktivierbar durch <|think|> am Anfang des System-Prompts. Tipp: Manche Community-Tests zeigen, dass Gemma 4 für Coding sogar mit temp=1.5 besser performt - bei Bedarf mit `-- --temp 1.5` überschreiben.
 Vision:   mmproj-gemma-4-26B-A4B-it-BF16.gguf
 ────────────────────────────────────────────────────────────────
   Placement       : GPU full offload (ngl=all of 60)
@@ -104,111 +95,9 @@ Vision:   mmproj-gemma-4-26B-A4B-it-BF16.gguf
 
   Memory estimate:
     model on GPU  ~  12.3 GB    (free VRAM:   15.1 GB)
-    model on CPU  ~   0.0 GB    (free RAM:    18.1 GB)
     KV cache      ~  17.4 GB
 ────────────────────────────────────────────────────────────────
-[AutoTuner] Found server binary: C:\LAB\ai-local\llama.cpp\build\bin\Release\llama-server.exe
-Launch llama-server now? [Y/n]
 ```
-
-## Features
-
-- **Interactive terminal menu** — pick from whatever GGUFs are in your
-  models folder, no editing required.
-- **Hardware auto-detection** — works on **AMD (ROCm)**, **NVIDIA**,
-  **Intel**, and **Apple Silicon** (unified memory). Multi-GPU is
-  supported via automatic, **priority-weighted** `--tensor-split`: a
-  model that fits the largest card is pinned to it (the second GPU stays
-  free for gaming/OBS); only larger models spread across both. Device
-  visibility is pinned via `HIP_VISIBLE_DEVICES` *and*
-  `GGML_VK_VISIBLE_DEVICES` so it works on both ROCm and Vulkan builds.
-- **Free-memory aware** — context length and KV quant are picked to
-  use the RAM/VRAM that's actually free *right now*, not a hard-coded
-  cap. The original v1 cap of 16k context is gone.
-- **Per-family YAML profiles** in `settings/` — override sampling,
-  max context, chat template, and llama-server flags per model family.
-  Easy for contributors to extend without touching Python.
-- **Companion-file auto-pairing** — sibling files don't pollute the
-  model menu, they're attached to their main model:
-  - `mmproj-*.gguf` → vision (longest-prefix wins)
-  - `*-assistant-*.gguf` / `*-draft-*.gguf` → speculative decoding
-      (smallest matching sibling wins)
-- **Capability badges in the model list** — symbols make it obvious
-  what each model can do at a glance:
-  - 👁 vision (mmproj projector paired)
-  - ⚡ draft  (assistant sibling for speculative decoding)
-  - 🧠 thinking (chat template emits `<think>` / `reasoning_content`)
-  - 🛠 tool-use (chat template advertises `tool_calls` / `function_call`)
-
-  Detection reads the GGUF chat template directly — no name-based
-  guessing — so `Qwen3-Coder` (no thinking) and `Qwen3-Embedding`
-  (neither thinking nor tools) are correctly excluded.
-- **Reads GGUF metadata** — pulls `n_layers` and `context_length`
-  straight from the file so partial GPU offload (`-ngl`) is exact.
-- **Sticky GUI choices** — the Qt launcher remembers per-model
-  vision/draft/thinking toggles in `autotuner_settings.json`. Switch
-  to another model and back, restart the app, change the performance
-  target — your manual choices stay put. They only revert when you
-  click them again.
-- **Fork-folder memory** — if you point the GUI at a parent folder
-  that holds several `*_llama.cpp` builds (e.g. `C:\LAB\ai-local`),
-  the next launch re-expands the same set of builds in the dropdown.
-  No more re-navigating one folder up after every restart.
-- **Window geometry & state** — QMainWindow `saveGeometry()` (base64
-  in JSON) und `saveState()` (Toolbars, Dock-Positionen) werden
-  persistiert. Fenstergröße, -position, Maximize-State und
-  Toolbar-Status bleiben über Neustarts erhalten.
-- **Globale Schriftgröße** — peristente Schriftgröße (Clamp 7..22),
-  wird beim App-Start sofort angewendet (kein Flash von Default).
-- **Reasoning-Effort** — pro-Modell wählbar: `auto` / `off` /
-  `minimal` / `low` / `medium` / `high` / `extra_high`. Think-Budget
-  (Spin-Box, -1 = aus, 0 = sofort stop, N = Token-Budget) im
-  Expert-Panel.
-
-### Vision control
-
-You can disable vision (mmproj) support in two ways:
-
-1. **Command-line flag**:
-
-   ```bash
-   python auto_tuner.py --model "Qwen3.6" --novision
-   ```
-
-## Installation
-
-```bash
-git clone https://github.com/<you>/llama-cpp-auto-tuner
-cd llama-cpp-auto-tuner
-pip install -r requirements.txt
-```
-
-You also need a working `llama-server` binary. The tuner automatically discovers binaries in common local setups (like `C:\LAB\ai-local\`), or you can specify one via `--server`.
-
-## Usage
-
-Point it at a folder of `*.gguf` models — it will recurse:
-
-```bash
-python auto_tuner.py --models-path /path/to/models
-```
-
-Or set the environment variable once:
-
-```bash
-export AUTOTUNER_MODELS=/path/to/models     # Linux / macOS
-setx  AUTOTUNER_MODELS  D:\models           # Windows
-python auto_tuner.py
-```
-
-Pick a model from the menu. Once it's running, point your client at:
-
-```
-http://127.0.0.1:1234
-```
-
-Works with the built-in **llama.cpp Web UI**, **VS Code** extensions
-like Continue / Cline, **Open WebUI**, or any OpenAI-API client.
 
 ### Qt GUI
 
@@ -216,120 +105,106 @@ like Continue / Cline, **Open WebUI**, or any OpenAI-API client.
 python qt_launcher.py
 ```
 
-Same engine as the terminal launcher, plus a few quality-of-life bits
-that only make sense with persistent state:
+Same engine plus quality-of-life features that rely on persistent state:
 
-- **Sticky per-model options.** Toggle vision / draft / thinking once;
-  the choice survives switching to another model and back, swapping
-  performance targets, and restarting the app. Stored in
-  `autotuner_settings.json` under `model_overrides`.
-- **Fork picker remembers the parent folder.** Hit *📂 Fork* and
-  pick a directory that holds multiple `*_llama.cpp` builds — every
-  build appears in the dropdown next time too, not just the last one
-  you used. The active build within that container is also restored.
-- **Live config preview.** The right pane recomputes
-  context / KV / placement whenever you tick a checkbox or change the
-  performance target — no need to launch first.
-- **Honest load status (`/health` handshake).** After launch the status
-  bar shows *Loading model* and only flips to *Ready* once the server's
-  `GET /health` returns 200. Big MoE models can take a while to load (or
-  fail mid graph-build) — the GUI no longer claims "Running" the instant
-  the PID exists. A crash during load is surfaced as *Server exited*.
-- **Window geometry persistence.** Fenstergöße, -position,
-  Maximize-State und Toolbar-Status werden gespeichert und beim
-  nächsten Start wiederhergestellt (`_restore_window_geometry`).
-- **Font persistence.** Globale QApplication-Schriftgröße wird
-  persistiert und beim Start sofort angewendet (`_change_font`).
-  Kein Flash von der Default-Schriftgröße mehr.
-- **Reasoning-Panel (Expert-Panel).** Neue Sektion mit:
-  - Dropdown "Effort": `auto` / `off` / `minimal` / `low` /
-      `medium` / `high` / `extra_high`
-  - SpinBox "Think budget": `-1` = aus, `0` = sofort stop, `N` =
-      Token-Budget
-  Die Werte werden als `--reasoning`, `--think-budget` und
-  `--chat-template-kwargs` in `cfg.extra_cli_flags` übersetzt.
+- **Sticky per-model options** — toggle vision/draft/thinking once; the
+  choice survives model switches, target changes, and app restarts.
+- **Fork picker remembers the parent folder** — point *📂 Fork* at a
+  directory holding several `*_llama.cpp` builds and they all reappear in
+  the dropdown next time.
+- **Live config preview** — the right pane recomputes context / KV /
+  placement whenever you toggle an option.
+- **Honest load status** — after launch the status bar shows *Loading*
+  and only flips to *Ready* once the server's `GET /health` returns 200.
+  A crash during load surfaces as *exited*.
+- **Reasoning panel** — effort dropdown (`auto`/`off`/`minimal`/`low`/
+  `medium`/`high`/`extra_high`) and a think-budget spin-box, translated
+  into `--reasoning`, `--think-budget`, and `--chat-template-kwargs`.
 
-### Useful flags
+### Running multiple models at once
+
+AutoTuner can keep several `llama-server` instances alive concurrently —
+one per port, each in its own console window. This is what enables
+multi-agent setups (e.g. a coding agent that spawns subagents locally):
+an orchestrator model plus one or more subagent/draft models all serving
+at the same time.
+
+**In the GUI:** just click **▶ Launch** again for the next model. Each
+launch automatically picks the next free port (skipping ports already
+used by a tracked instance or any other process) and advances the *Port*
+field, so back-to-back launches never collide. Every live instance shows
+up in the **Running** dropdown as `:port  model  [loading/ready]  PID`.
+Stop a single one with **■ Stop**, or all of them with **■ Stop all**.
+The status bar reports `N server(s) running — M ready`.
+
+**From the command line** use `--detach`: it starts the server in its own
+session/console and returns immediately instead of waiting, so a script
+or agent can bring up several models in a row (give each a different
+`--port`):
+
+```bash
+python auto_tuner.py --model Orchestrator --port 1234 --detach
+python auto_tuner.py --model Subagent     --port 1235 --detach
+```
+
+Each detached server keeps running in its own window after the command
+returns. `--detach` implies `--yes` (non-interactive).
+
+### Command-line flags
 
 | Flag | Description |
 |---|---|
 | `--models-path PATH` | Folder to scan (default `./models`, env `AUTOTUNER_MODELS`) |
 | `--settings-path PATH` | Folder with YAML profiles (default `./settings`) |
-| `--server PATH` | Path to `llama-server` (default looks on `$PATH`, env `LLAMA_SERVER`) |
+| `--server PATH` | Path to `llama-server` (default `$PATH`, env `LLAMA_SERVER`) |
 | `--host HOST` | Bind address (default `127.0.0.1`) |
 | `--port N` | Server port (default `1234`) |
 | `--ctx N` | Override the auto-tuned context length |
 | `--model SUBSTR` | Skip the menu, pick a model by name substring |
+| `--detach` | Spawn detached and return immediately (for multi-model / agent use); implies `--yes` |
 | `--dry-run` | Print the command, don't start the server |
-| `--yes / -y` | Skip the launch confirmation prompt |
-| `--force-mlock` | Force `--mlock` / `--no-mmap` (prevents VRAM/RAM paging) |
+| `--yes` / `-y` | Skip the launch confirmation prompt |
+| `--novision` | Disable vision (mmproj) even if available |
+| `--nodraft` | Disable speculative decoding / draft model |
+| `--ngram` | Enable draftless n-gram self-speculation |
+| `--force-mlock` | Force `--mlock` / `--no-mmap` even on full GPU offload |
 | `--performance-target {safe,balanced,throughput}` | VRAM utilisation preset (see below) |
-| `-- <args...>` | Anything after `--` is forwarded to `llama-server` |
+| `--gui` | Open the Qt log-viewer window after the server starts |
+| `-- <args...>` | Anything after `--` is forwarded verbatim to `llama-server` |
 
-### Performance targets (`--performance-target`)
+## Tuning controls
 
-A single switch that controls how aggressively the AutoTuner reserves
-VRAM. It changes both the safety bands and the KV-cache budget that
-gets reserved up front during MoE layer placement, so picking the right
-tier can move several expert layers between GPU and CPU.
+### Performance targets
+
+A single switch controlling how aggressively VRAM is reserved. It changes
+both the safety bands and the KV budget reserved during MoE layer
+placement, so the tier can move several expert layers between GPU and CPU.
 
 | Tier | KV reservation | VRAM safety | When to use |
 |---|---|---|---|
-| `safe` | 128 k tokens | 0.30 GB | Long-context sessions (>64 k), maximum stability |
-| `balanced` *(default)* | 64 k tokens | 0.25 GB | General use — moderate optimisation that helps everyone |
-| `throughput` | 32 k tokens | 0.15 GB | Short-context inference (chat, reasoning ≤32 k); pushes more expert layers onto the GPU for higher tokens/s |
+| `safe` | 128k tokens | 0.30 GB | Long-context (>64k), maximum stability |
+| `balanced` *(default)* | 64k tokens | 0.25 GB | General use |
+| `throughput` | 32k tokens | 0.15 GB | Short-context chat/reasoning (≤32k); more expert layers on GPU for higher tok/s |
 
-**Resolution priority** (highest wins): explicit CLI flag → GUI dropdown
-→ `performance_target:` in the model's YAML profile → `balanced` default.
-Unknown values are silently ignored, so a typo in a YAML never breaks
-anything.
-
-A profile can declare its preferred tier in YAML:
-
-```yaml
-# settings/qwen3_5-3_6.yaml
-performance_target: throughput   # MoE — wants every spare GB on the GPU
-```
-
-The user choice (CLI / GUI) always wins over the profile recommendation.
+**Resolution priority** (highest wins): CLI flag → GUI dropdown →
+`performance_target:` in the model's YAML → `balanced`. Unknown values are
+ignored, so a typo never breaks anything.
 
 ### Memory locking (`--mlock` / `--no-mmap`)
 
-The auto-tuner automatically decides whether to enable `--mlock` and `--no-mmap`
-based on available system resources. These flags pin model data in physical
-memory (RAM/VRAM) and prevent the OS from paging it to disk, which is critical
-for stable inference performance.
-
-**Automatic behavior:**
+These pin model data in physical memory and stop the OS paging it to
+disk. The tuner enables them automatically when there's enough headroom:
 
 | Scenario | Condition | Result |
 |---|---|---|
-| **Full GPU offload** | `total_vram > 8 GB` AND `free_vram > model_size + 2 GB` | `--mlock --no-mmap` enabled |
-| **Partial / CPU offload** | `total_ram > 32 GB` AND `free_ram > model_ram_on_cpu + 8 GB` | `--mlock --no-mmap` enabled |
-| **Insufficient memory** | Safety reserve not met | Disabled (fallback to default mmap) |
+| Full GPU offload | `total_vram > 8 GB` and `free_vram > model + 2 GB` | enabled |
+| Partial / CPU offload | `total_ram > 32 GB` and `free_ram > model_on_cpu + 8 GB` | enabled |
+| Insufficient memory | safety reserve not met | disabled (default mmap) |
 
-**Force memory locking:**
-
-Use `--force-mlock` to override the automatic decision and always enable
-memory locking when the OS permits it:
-
-```bash
-python auto_tuner.py --force-mlock
-```
-
-This is useful when you know your system has enough memory but the tuner's
-conservative thresholds would otherwise skip it.
-
-**Debug output:**
-
-The tuner prints the mlock decision before every launch:
-
-```
-  [mlock] decision: model=Qwen3.6-35B-A3B-UD-Q6_K
-         full_offload=True  vram=18.5GB  ram=0.0GB
-         sys: total_vram=24.0GB  free_vram=5.2GB  total_ram=32.0GB  free_ram=12.1GB
-         force_mlock=False  -> mlock=True  no_mmap=True
-```
+Use `--force-mlock` to override the conservative thresholds. On **Windows**
+both flags are disabled by default unless forced, because `VirtualLock`
+needs the `SeLockMemoryPrivilege` that isn't granted automatically (even to
+Administrators). The decision is printed before every launch.
 
 ### Environment variables
 
@@ -337,80 +212,45 @@ The tuner prints the mlock decision before every launch:
 |---|---|---|
 | `AUTOTUNER_MODELS` | `./models` | Where to scan for `*.gguf` files |
 | `LLAMA_SERVER` | `llama-server` | Path or name of the server binary |
-| `LLAMA_CPP_DIR` | (auto-detected) | Your llama.cpp checkout. If set, the auto-tuner will look for `build/bin/[Release/]llama-server[.exe]` inside it. |
+| `LLAMA_CPP_DIR` | (auto-detected) | llama.cpp checkout; the tuner looks for `build/bin/[Release/]llama-server[.exe]` inside it |
 
-### Server binary auto-discovery
+> Note: since b9371, llama.cpp renamed several of its own env vars to the
+> `LLAMA_ARG_` prefix (e.g. `LLAMA_LOG_*` → `LLAMA_ARG_LOG_*`,
+> `LLAMA_OFFLINE` → `LLAMA_ARG_OFFLINE`). The **CLI flags are unchanged**,
+> and AutoTuner only sets the GGML visibility vars, so this has no effect —
+> but use the `LLAMA_ARG_` prefix if you add llama log/offline overrides.
 
-The tuner automatically searches for binaries in common local layouts.
-If you have a workspace like this, it "Just Works" without any flags:
+## Binaries and profiles
+
+### Server binary discovery
+
+The tuner searches common local layouts, so a workspace like this "just
+works" without flags:
 
 ```
-H:\GitHub\
-└── Auto Tuner\         ← clone of this repo
-H:\LAB\
-└── ai-local\
-    ├── llama.cpp\      ← standard build
-    ├── tq_llama.cpp\   ← Turbo-Quant build
-    ├── ik_llama.cpp\   ← Gemma 4 externer Drafter (Fork noch nötig)
-    └── 1b_llama.cpp\   ← BitNet fork (Ternary-Bonsai)
-I:\
-└── models\             ← your models
+…\ai-local\
+  ├── llama.cpp\       ← standard build
+  ├── tq_llama.cpp\    ← Turbo-Quant build
+  ├── ik_llama.cpp\    ← Gemma 4 external drafter (fork still required)
+  └── 1b_llama.cpp\    ← BitNet fork (Ternary Bonsai)
 ```
 
-It looks for `llama-server` inside these directories (including `build/bin/...` subpaths).
+It looks for `llama-server` inside these directories (including
+`build/bin/...` subpaths). Binary selection per model:
 
-#### Quantization Modes
+- **Gemma 4 with external draft** → `ik_llama.cpp` (the external sibling
+  drafter still needs the fork)
+- **Gemma 4 without draft** / **integrated MTP** (e.g. Qwen3.6-MTP) →
+  standard `llama.cpp` (MTP is native in mainline b9190+)
+- **Ternary Bonsai** → `1b_llama.cpp`
+- **Turbo-Quant mode** → `tq_llama.cpp`
 
-When you start the tuner, you can choose between:
+### Adding a profile for a new model
 
-1. **Standard-Quant**: Uses standard `llama.cpp` binaries.
-2. **Turbo-Quant**: Uses the `tq_llama.cpp` binary for faster inference.
-
-#### Turbo-Quant Labels & KV-Quant-Options
-
-`kv_quant_factor()` unterstützt jetzt folgende Turbo-Quant-Labels:
-`turbo2`, `turbo3`, `turbo4`, `iq4_nl`, `tq3_0`, `turbo3_tcq`.
-
-`_TURBO_QUANT_MAP` korrigiert die echten Labels:
-
-| Label   | Turbo-Quant | Faktor (vs F16) |
-|---------|-------------|-----------------|
-| `q8_0`  | `turbo4`    | ~3.8x           |
-| `q5_0`  | `turbo3`    | ~4.3x           |
-| `q4_0`  | `turbo3`    | ~4.3x           |
-
-(Vorher mappte es fälschlich auf `q4_1`/`q5_1`, was Mainline-Labels
-sind, NICHT TurboQuant.)
-
-`_pick_kv_quant` rechnet das Budget jetzt mit Turbo-Faktoren — beim
-Umschalten zeigt sich die echte Token-Zahl-Erhöhung (gemessen: 48k →
-63k bei Qwen3.6-35B-A3B).
-
-Die KV-Dropdowns in der GUI zeigen die volle Auswahl: `iq4_nl`,
-`q4_1`, `q5_1`, `turbo2`, `turbo3`, `turbo4`.
-
-#### Specialized Binary Logic
-
-The tuner intelligently selects the best binary based on your model and settings:
-
-- **Gemma 4 (with external draft)** $\rightarrow$ uses `ik_llama.cpp` (external sibling drafter still requires the fork).
-- **Gemma 4 (without draft)** $\rightarrow$ uses standard `llama.cpp`.
-- **Integriertes MTP (z.B. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (b9190+ nativ; PR #22673 seit 16. Mai 2026 in Mainline; kein Fork nötig).
-- **Ternary-Bonsai** $\rightarrow$ uses `1b_llama.cpp`.
-- **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
-
-Example — run Devstral, override context, and pass an extra flag
-(`--metrics` is now added automatically, so this just shows pass-through):
-
-```bash
-python auto_tuner.py --model Devstral --ctx 131072 -y -- --verbose
-```
-
-## Adding profiles for new models
-
-Drop a new YAML file into `settings/`. The filename doesn't matter;
-the `patterns:` list does. The longest pattern that appears as a
-substring of the model filename wins.
+Drop a YAML file into `settings/`. The filename doesn't matter; the
+`patterns:` list does — the longest pattern that is a substring of the
+model filename wins. Empty `patterns:` makes a profile the fallback
+(see `settings/_default.yaml`).
 
 ```yaml
 # settings/my-model.yaml
@@ -429,290 +269,179 @@ sampling:
   min_p: 0.05
   repeat_penalty: 1.05
 
-# Optional:
+# Optional
 chat_template: chatml
+performance_target: balanced
 extra_args:
   - --no-context-shift
 notes: >
-  Anything you want to remind yourself about this model.
+  Anything you want to remember about this model.
 ```
-
-Profiles with empty `patterns:` become the fallback when nothing else
-matches. See `settings/_default.yaml`.
 
 ## How the auto-tuning works
 
-1. **Detect**: total / free RAM, every GPU's total / free VRAM, total
-   CPU cores.
-2. **Place the model**: full GPU offload if it fits, else partial
-   offload using the GGUF's exact `n_layers`, else CPU only.
-3. **Compute the KV budget**: free VRAM (after the model) plus free
-   RAM (minus a safety reserve).
-4. **Pick KV quant + context**: try q8 → q5 → q4, pick the highest
-   quality that fits the profile's `max_context`. Round context down
-   to a multiple of 1024.
-5. **Threads / batch**: scale with placement (full GPU offload needs
-   fewer CPU threads than CPU-only inference; long context wants
-   smaller batches to keep prompt-prefill memory bounded).
-6. **Multi-GPU**: a model that fits the largest card alone is pinned to
-   it (other GPUs hidden via the visibility env vars, so they stay free
-   for gaming/OBS); larger models spread across all GPUs with a
-   **priority-weighted** `--tensor-split` (priority × free VRAM), and the
-   highest-scoring card becomes `--main-gpu`.
-7. **Hand authority to the AutoTuner**: `--fit off` is always emitted so
-   llama.cpp's own auto-fit pass never silently re-tunes the values the
-   AutoTuner computed and logged. An overcommit fails loudly (OOM) instead
-   of being quietly downscaled.
+1. **Detect** total/free RAM, every GPU's total/free VRAM, CPU cores.
+2. **Place the model**: full GPU offload if it fits, else partial offload
+   using the GGUF's exact `n_layers`, else CPU only.
+3. **Compute the KV budget**: free VRAM after the model, plus free RAM
+   minus a safety reserve. For MoE models the budget is **VRAM-only**
+   (including free RAM crashes Vulkan with `GGML_ASSERT(addr)`).
+4. **Pick KV quant + context**: try q8 → q5 → q4, highest quality that
+   fits the profile's `max_context`; context rounded down to a 1024
+   multiple. KV is reserved for a realistic working context (~32k), not
+   the profile maximum, to avoid overcommitment.
+5. **Threads / batch** scale with placement and context length.
+6. **MoE** layers spill to CPU automatically via `--n-cpu-moe`; no
+   separate YAML variants needed.
+7. **Hand authority to AutoTuner**: `--fit off` is always emitted so
+   llama.cpp's own auto-fit pass never silently re-tunes the computed
+   values — an overcommit fails loudly (OOM) instead of being downscaled.
 
-## Project layout
+## Speculative decoding (MTP + n-gram)
 
-```
-auto_tuner/
-├── auto_tuner.py        # main entry: terminal menu + glue
-├── qt_launcher.py       # Qt GUI (model picker + sticky options + fork picker)
-├── hardware.py          # CPU + multi-vendor GPU detection
-├── scanner.py           # GGUF scanner: mmproj/draft pairing, capability detection
-├── settings_loader.py   # YAML profile loader and matcher
-├── tuner.py             # config calculation + llama-server command builder
-├── launcher.py          # subprocess + Ctrl+C handling (Windows + Unix)
-├── app_settings.py      # persistent GUI prefs (autotuner_settings.json)
-...
-├── settings/
-│   ├── _default.yaml
-│   ...
-│   ├── ministral.yaml
-│   ├── bonsai.yaml
-│   ...
-├── requirements.txt
-└── README.md
-```
+AutoTuner combines up to three speculative paths in one `--spec-type` list:
 
-## Building llama.cpp and forks
+- **Path A — external sibling drafter** (`-md`): a small `*-draft-*` /
+  `*-assistant-*` model. Skipped when vision (`--mmproj`) is active (three
+  large graphs at once is risky on 16 GB cards).
+- **Path B — integrated MTP** (`--spec-type draft-mtp`): the trained MTP
+  head inside the main GGUF (Qwen3.6-MTP, etc.). Coexists with vision.
+- **Path C — draftless n-gram** (`--spec-type <ngram_method>`): no draft
+  model needed; method chosen per profile via `ngram_method`
+  (`ngram-mod` default, plus `ngram-map-k`, `ngram-map-k4v`,
+  `ngram-simple`, `ngram-cache`).
 
-Recommended build settings for this system:
-
-- Ninja generator
-- native CPU optimizations
-- static build
-- Release mode
-- 20 parallel build jobs
-
-```
-## Building llama.cpp and forks - Example
-
-# Example-System:
-# - Intel Core Ultra 9 285K
-# - AMD Radeon RX 9070 XT 16GB
-# - AMD Radeon R9700 AI Pro 32GB
-# - G.Skill Trident Z 48GB DDR5-8400MHz (2x24GB)
-
-# Main-Fork b9208+ (SPIRV-Headers required since b9194) - Windows
-cd H:\LAB\ai-local
-git clone https://github.com/KhronosGroup/SPIRV-Headers.git
-cmake -S .\SPIRV-Headers -B .\SPIRV-Headers\build `
-  -G "Visual Studio 18 2026" `
-  -A x64 `
-  -DCMAKE_INSTALL_PREFIX="H:/LAB/ai-local/SPIRV-Headers/install"
-cmake --build .\SPIRV-Headers\build --config Release
-cmake --install .\SPIRV-Headers\build --config Release
-git clone https://github.com/ggml-org/llama.cpp.git
-Push-Location .\llama.cpp\tools\ui
-npm ci
-npm run build
-Pop-Location
-cmake -S .\llama.cpp -B .\llama.cpp\build `
-  -G "Visual Studio 18 2026" `
-  -A x64 `
-  -DGGML_VULKAN=ON `
-  -DGGML_NATIVE=ON `
-  -DBUILD_SHARED_LIBS=OFF `
-  -DLLAMA_BUILD_SERVER=ON `
-  -DLLAMA_BUILD_UI=ON `
-  -DLLAMA_USE_PREBUILT_UI=OFF `
-  -DLLAMA_CURL=OFF `
-  -DGGML_CCACHE=OFF `
-  -DGGML_VULKAN_CHECK_RESULTS=OFF `
-  -DCMAKE_PREFIX_PATH="H:/LAB/ai-local/SPIRV-Headers/install"
-cmake --build .\llama.cpp\build --config Release --parallel 24
-
-# Main-Fork - Ubuntu
-git clone https://github.com/ggerganov/llama.cpp llama.cpp
-cd ~/llama.cpp
-rm -rf build
-cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j $(nproc)
-```
-
-## Server-Features (Stand b9371)
-
-Die folgenden `llama-server` Features werden unterstützt (aus `tools/server/README.md`):
-
-| Flag | Unterstützung |
-|------|---------------|
-| `-fa [on\|off\|auto]` | ✅ Form `-fa on` wird emittiert |
-| `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ Alle im Dropdown |
-| `--fit off` | ✅ **Neu** — immer emittiert, damit llama.cpps eigener Auto-Fit-Pass (Default `on`) die berechneten Werte nicht still nachjustiert (AutoTuner ist die Autorität) |
-| `--metrics` | ✅ **Neu** — Prometheus-Endpoint `GET /metrics` auf demselben host:port (siehe „Monitoring") |
-| `--reasoning on/off/auto` | ✅ Via Dropdown |
-| `--think-budget N` | ✅ Via SpinBox |
-| `--chat-template-kwargs ...` | ✅ Dropdown produziert das automatisch |
-| `--jinja` | ✅ Wird sichtbar angehakt |
-| `--mlock` / `--no-mmap` | ✅ Windows-Guard; manuell überschreibbar |
-| `-md` externer Drafter | ✅ Ohne `--spec-type` — die Anwesenheit von `-md` aktiviert den Draft-Pfad in Mainline automatisch (verifiziert b9371) |
-| `--spec-type draft-mtp` | ✅ Integriertes MTP (Qwen3.6-MTP u.a.) — `draft-mtp` ist der Mainline-Name seit Merge von PR #22673 (16. Mai 2026) |
-| `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (Default). Auf MTP-Modellen unterdrückt, weil `draft-mtp,ngram-mod` mitten in der Generierung crasht (#23154, im Review-Bereich b9334→b9371 nicht behoben) |
-| `--spec-type ngram-map-k4v` (draftless) | ✅ **Neu** — die MTP-**kompatible** ngram-Methode aus ggerganovs MTP-Cleanup (PR #23269). Per `ngram_method: ngram-map-k4v` läuft sie zusammen mit `draft-mtp` → so kombiniert man „MTP + ngram" |
-| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Wählbar via `ngram_method`; nur das Typ-Token wird emittiert, Sub-Parameter überlässt der Tuner den llama.cpp-Defaults |
-| `--spec-draft-n-max` | ✅ Via `draft_max` im YAML-Profil |
-| `--spec-draft-p-min` | ✅ Via `draft_p_min` im YAML-Profil — Mainline-Default ist seit PR #23269 jetzt **0.0**; der AutoTuner emittiert weiterhin explizit **0.75** in **beiden** Spec-Paths (extern + integriert), damit MTP nur bei sicheren Schritten feuert |
-| `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ **Neu** — via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` im YAML (Defaults 16/24/1 aus PR #23269) |
-| `--spec-draft-ngl` | ✅ Immer 99 (MTP-Head auf GPU halten) |
-| `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` aktiv; `-ot` für gezielte Expert-Platzierung vorbereitet |
-| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted, mit Single-GPU-Pinning |
-| `--rope-scaling yarn` | ✅ Bereits vorhanden |
-| `--numa` | ✅ Bereits vorhanden |
-| `--no-context-shift` | ✅ Wird nicht mehr dupliziert (Dedup via seen-Set) |
-
-### Review b9334 → b9371 (37 Commits)
-
-Vollständige Durchsicht aller 37 Commits zwischen b9334 und b9371. **Ergebnis:
-keine funktionalen AutoTuner-Anpassungen nötig** — alle genutzten Server-Flags
-(`--fit off`, `--metrics`, `--spec-type`, `--spec-draft-*`, `-fa on`,
-`--n-cpu-moe`, YaRN, KV-Cache-Typen) sind unverändert. Relevante Punkte:
-
-- **Env-Rename (#23778):** llama.cpp hat mehrere Environment-Variablen auf den
-  einheitlichen `LLAMA_ARG_`-Präfix gezogen: `LLAMA_LOG_FILE/COLORS/VERBOSITY/PREFIX/TIMESTAMPS`
-  → `LLAMA_ARG_LOG_*`, `LLAMA_OFFLINE` → `LLAMA_ARG_OFFLINE`,
-  `LLAMA_CHAT_TEMPLATE_KWARGS` → `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. **Die CLI-Flags
-  selbst bleiben gleich.** Der AutoTuner setzt als Env-Overrides nur
-  `HIP_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES` (GGML-Vars, nicht betroffen);
-  `LLAMA_ARG_FIT` trägt den Präfix bereits → kein Einfluss.
-  ⚠️ *Falls künftig llama-Log-/Offline-Env-Overrides ergänzt werden, ab b9371 den
-  `LLAMA_ARG_`-Präfix verwenden.*
-- **Vulkan-Performance:** mehrere transparente Backend-Optimierungen (MUL_MAT_VEC
-  4 K/Iteration für F16/F32 #22887, conv2d + coopmat1 #22620, REPEAT f16→f16 #23298).
-  Profitiert allein durch den Rebuild, keine Flag-Änderung. Der AMD-UMA-Transfer-Queue-Fix
-  (#22455) betrifft nur integrierte GPUs/APUs, nicht die dedizierten R9700 / RX 9070 XT.
-- **Neue Modell-/Konvertierungs-Unterstützung (convert-seitig, nicht Server-Laufzeit):**
-  `Gemma4ForCausalLM`-Konvertierung (#23682), MiniCPM5-Tokenizer (#23384),
-  talkie-1930-13b (#22596), Mistral3-NVFP4-Weight-Scales (#23629). Profil-Pflege
-  nur bei Adoption — Arch wird im Tuner dynamisch aus den Metadaten gelesen.
-- **Server-Code:** nur kosmetisch (SSL-Log-Message #23393, cpp-httplib 0.46.0 #23650).
-
-### Spekulatives Dekodieren (MTP + n-gram)
-
-Der AutoTuner kombiniert bis zu drei spekulative Pfade in **einer**
-`--spec-type`-Liste:
-
-- **Path A — externer Sibling-Drafter** (`-md`): ein kleines `*-draft-*` /
-  `*-assistant-*` Geschwistermodell. Wird übersprungen, wenn Vision
-  (`--mmproj`) aktiv ist (drei große Graphen gleichzeitig im VRAM sind auf
-  16-GB-Karten zu riskant).
-- **Path B — integriertes MTP** (`--spec-type draft-mtp`): der trainierte
-  MTP-Kopf steckt im Haupt-GGUF (Qwen3.6-MTP usw.). Koexistiert seit b9180 mit
-  Vision.
-- **Path C — draftless n-gram** (`--spec-type <ngram_method>`): braucht kein
-  Draft-Modell. Methode wählbar pro Profil über `ngram_method`.
-
-Seit b9334 ist die draftless-Familie gewachsen: `ngram-mod` (Default),
-`ngram-map-k`, `ngram-map-k4v`, `ngram-simple`, `ngram-cache`.
-
-**MTP + n-gram zusammen.** Nur `ngram-mod` kollidiert mit `draft-mtp`
-(`draft-mtp,ngram-mod` → zufällige Mid-Generation-Crashes, llama.cpp #23154,
-im Review-Bereich b9334→b9371 nicht behoben). Darum unterdrückt der Tuner `ngram-mod` neben MTP. Die
-`ngram-map-*`-Methoden wurden von ggerganovs MTP-Cleanup (PR #23269) gezielt
-für die Koexistenz mit `draft-mtp` gebaut — `ngram-map-k4v` steht dort sogar
-im `--spec-default`. Um „MTP + n-gram" auf einem MTP-Modell zu aktivieren,
-genügt also ein Eintrag im Profil:
+**MTP + n-gram together:** only `ngram-mod` conflicts with `draft-mtp`
+(combining them causes random mid-generation crashes, llama.cpp #23154),
+so the tuner suppresses `ngram-mod` next to MTP. The `ngram-map-*` methods
+were built for coexistence (PR #23269); set `ngram_method: ngram-map-k4v`
+in an MTP profile to run both:
 
 ```yaml
 # settings/qwen3_5-3_6.yaml  (Qwen3.6-MTP)
-ngram_method: ngram-map-k4v     # läuft neben draft-mtp statt es zu unterdrücken
-# optional feinjustieren (Defaults aus PR #23269):
-ngram_k4v_size_n: 16
+ngram_method: ngram-map-k4v   # runs alongside draft-mtp instead of being suppressed
+ngram_k4v_size_n: 16          # optional (defaults from PR #23269)
 ngram_k4v_size_m: 24
 ngram_k4v_min_hits: 1
 ```
 
-Für ein MTP-Modell mit `ngram_method: ngram-map-k4v` ergibt das:
+An unknown `ngram_method` falls back to `ngram-mod` with a warning at load
+time rather than crashing at server start.
+
+> Reality check: on bandwidth-bound MoE-A3B models, speculative decoding
+> often does *not* beat the baseline (expert saturation). `ngram_method` is
+> opt-in for that reason — measure tok/s before and after.
+
+## Supported `llama-server` features (as of b9381)
+
+| Flag | Status |
+|---|---|
+| `-fa [on\|off\|auto]` | ✅ emits `-fa on` |
+| `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ all in the KV dropdown |
+| `--fit off` | ✅ always emitted (AutoTuner is the authority) |
+| `--metrics` | ✅ Prometheus `GET /metrics` on the same host:port |
+| `--reasoning` / `--think-budget` / `--chat-template-kwargs` | ✅ via reasoning panel |
+| `--jinja` | ✅ visible toggle |
+| `--mlock` / `--no-mmap` | ✅ auto + Windows guard; overridable |
+| `-md` external drafter | ✅ presence of `-md` auto-enables the draft path |
+| `--spec-type draft-mtp` | ✅ integrated MTP (mainline name since PR #22673) |
+| `--spec-type ngram-mod` | ✅ default; suppressed next to MTP (#23154) |
+| `--spec-type ngram-map-k4v` | ✅ MTP-compatible; runs with `draft-mtp` |
+| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ type token only; sub-params left to llama.cpp defaults |
+| `--spec-draft-n-max / -p-min / -ngl` | ✅ via `draft_max` / `draft_p_min`; `-ngl` always 99 |
+| `--spec-ngram-map-k4v-size-n / -size-m / -min-hits` | ✅ via `ngram_k4v_*` |
+| `--n-cpu-moe` | ✅ automatic MoE offload |
+| `--tensor-split` / `--main-gpu` | ✅ priority-weighted, single-GPU pinning |
+| `--rope-scaling yarn` / `--numa` / `--no-context-shift` | ✅ (the last is de-duplicated) |
+
+The b9371 → b9381 range is backend-only (WebGPU/Vulkan internals); no
+server CLI flags changed, so command generation is unaffected.
+
+## Monitoring (`/health` + `/metrics`)
+
+`--metrics` is added at launch, exposing two HTTP endpoints on the same
+`host:port` as the inference API (there is no separate metrics port):
+
+- **`GET /health`** — `503` while loading, `200` when ready. The GUI polls
+  this per instance to flip *Loading* → *Ready*.
+- **`GET /metrics`** — Prometheus text format. Key gauges/counters use the
+  `llamacpp:` prefix: `predicted_tokens_seconds`, `prompt_tokens_seconds`,
+  `kv_cache_usage_ratio`, `kv_cache_tokens`, `requests_processing`,
+  `tokens_predicted_total`, `prompt_tokens_total`.
+
+Scraping without a Prometheus client:
+
+```python
+import urllib.request
+
+def llama_metrics(base_url: str) -> dict[str, float]:
+    out = {}
+    with urllib.request.urlopen(f"{base_url}/metrics", timeout=0.5) as r:
+        for line in r.read().decode().splitlines():
+            if line and not line.startswith("#"):
+                name, _, val = line.partition(" ")
+                try:
+                    out[name] = float(val)
+                except ValueError:
+                    pass
+    return out
+
+# llama_metrics("http://127.0.0.1:1234")["llamacpp:predicted_tokens_seconds"]
+```
+
+`get_metadata.py` (drop it in the models folder, `pip install gguf`) dumps
+the metadata of every model for debugging.
+
+## Building llama.cpp
+
+Recommended: Ninja or VS generator, native CPU optimizations, static
+Release build, parallel jobs to taste. Example for the reference system
+(Core Ultra 9 285K, RX 9070 XT 16 GB + R9700 AI Pro 32 GB):
+
+```powershell
+# Windows — Vulkan main build (SPIRV-Headers required since b9194)
+cd ai-local
+git clone https://github.com/KhronosGroup/SPIRV-Headers.git
+cmake -S .\SPIRV-Headers -B .\SPIRV-Headers\build -G "Visual Studio 18 2026" -A x64 `
+  -DCMAKE_INSTALL_PREFIX="ai-local/SPIRV-Headers/install"
+cmake --build .\SPIRV-Headers\build --config Release
+cmake --install .\SPIRV-Headers\build --config Release
+
+git clone https://github.com/ggml-org/llama.cpp.git
+Push-Location .\llama.cpp\tools\ui; npm ci; npm run build; Pop-Location
+cmake -S .\llama.cpp -B .\llama.cpp\build -G "Visual Studio 18 2026" -A x64 `
+  -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=OFF `
+  -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF `
+  -DLLAMA_CURL=OFF -DGGML_CCACHE=OFF -DGGML_VULKAN_CHECK_RESULTS=OFF `
+  -DCMAKE_PREFIX_PATH="ai-local/SPIRV-Headers/install"
+cmake --build .\llama.cpp\build --config Release --parallel 24
+```
+
+```bash
+# Linux — ROCm/HIP main build
+git clone https://github.com/ggml-org/llama.cpp llama.cpp && cd llama.cpp
+cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j $(nproc)
+```
+
+## Project layout
 
 ```
---spec-type draft-mtp,ngram-map-k4v
---spec-draft-n-max 2 --spec-draft-ngl 99 --spec-draft-p-min 0.75
---spec-ngram-map-k4v-size-n 16 --spec-ngram-map-k4v-size-m 24 --spec-ngram-map-k4v-min-hits 1
+auto_tuner.py        # terminal entry: menu + glue (+ --detach)
+qt_launcher.py       # Qt GUI: picker, sticky options, multi-instance control
+hardware.py          # CPU + multi-vendor GPU detection
+scanner.py           # GGUF scanner: mmproj/draft pairing, capability detection
+settings_loader.py   # YAML profile loader and matcher
+tuner.py             # config calculation + llama-server command builder
+launcher.py          # subprocess + Ctrl+C handling (Windows + Unix)
+server_process.py    # ServerProcess wrapper (log capture, graceful stop)
+app_settings.py      # persistent GUI prefs (autotuner_settings.json)
+performance_target.py# VRAM/KV presets
+get_metadata.py      # GGUF metadata dump (debugging)
+settings/            # per-family YAML profiles
+requirements.txt
+README.md
 ```
-
-Ein unbekannter `ngram_method`-Wert im YAML fällt beim Laden mit einer Warnung
-auf `ngram-mod` zurück (statt erst beim Server-Start zu crashen).
-
-> ⚠️ **Realitäts-Check:** Auf bandbreitenlimitierten MoE-A3B-Modellen schlägt
-> spekulatives Dekodieren laut aktuellen Benchmarks oft *nicht* die Baseline
-> (Expert-Saturation). `ngram_method` ist deshalb bewusst Opt-in — vorher/
-> nachher tok/s messen.
-
-### Intel iGPU / NPU — warum sie (noch) nicht genutzt werden
-
-Auf einem Arrow-Lake-System (Core Ultra 285K) erscheinen die integrierte
-Intel-GPU und die NPU bewusst nur als *ignored* in der GPU-Liste, nicht im
-Inferenz-Pool. b9334 bringt zwar einen **OpenVINO**-Backend (Intel CPU/GPU/NPU)
-und **SYCL** (Intel GPU), aber:
-
-1. OpenVINO ist ein **eigenständiges Whole-Model-Backend**, das den
-   GGML-Graph komplett ersetzt — es lässt sich **nicht** mit dem Vulkan-/
-   ROCm-AMD-Pool in einem Prozess mischen (Entweder/Oder).
-2. Offizielle Windows-Binaries gibt es nur als CPU / CUDA / Vulkan / HIP —
-   **kein** Windows-OpenVINO-Build (nur Ubuntu). Seit b9371 (#23705) werden
-   zudem **keine offiziellen SYCL-Releases** mehr gebaut, SYCL wäre also ein
-   Eigen-Build.
-3. Die Desktop-iGPU (~4 Xe-Cores) und die ~13-TOPS-NPU teilen sich die
-   DDR5-Bandbreite mit der CPU, die bereits die MoE-Experten rechnet, und im
-   Layer-Split taktet das langsamste Gerät die Pipeline — neben zwei starken
-   AMD-Karten wäre das ein Netto-Verlust.
-
-Sinnvoll wäre die iGPU/NPU nur als **separate, eigenständige**
-`llama-server`-Instanz (SYCL auf Windows, OpenVINO auf Linux) für ein kleines
-Hintergrundmodell — nicht im Haupt-Inferenzpfad. Diese Trennung ist Absicht.
-
-### Monitoring (`/health` + `/metrics`)
-
-Beim Start hängt der AutoTuner `--metrics` an, sodass `llama-server` zwei
-HTTP-Endpoints auf demselben `host:port` wie die Inferenz-API bereitstellt
-(es gibt **keinen** separaten Metrics-Port):
-
-- **`GET /health`** — `503` während des Ladens, `200` wenn das Modell
-  bereit ist. Die Qt-GUI pollt diesen Endpoint und schaltet den Status
-  von *Loading model* auf *Ready* (siehe oben).
-- **`GET /metrics`** — Prometheus-Textformat. Die wichtigsten Kennzahlen
-  (Single-Model-Modus, Prefix `llamacpp:`):
-
-  | Metrik | Typ | Bedeutung |
-  |---|---|---|
-  | `llamacpp:predicted_tokens_seconds` | gauge | Generierungs-Durchsatz (tok/s) |
-  | `llamacpp:prompt_tokens_seconds` | gauge | Prompt-/Prefill-Durchsatz (tok/s) |
-  | `llamacpp:kv_cache_usage_ratio` | gauge | KV-Cache-Füllstand (1.0 = 100 %) |
-  | `llamacpp:kv_cache_tokens` | gauge | Tokens im KV-Cache |
-  | `llamacpp:requests_processing` | gauge | Aktive Requests |
-  | `llamacpp:tokens_predicted_total` | counter | Generierte Tokens kumuliert |
-  | `llamacpp:prompt_tokens_total` | counter | Prompt-Tokens kumuliert |
-
-  Scrapen ohne Prometheus-Client (z. B. für den System Tricorder):
-
-  ```python
-  import urllib.request
-  def llama_metrics(base_url: str) -> dict[str, float]:
-      out = {}
-      with urllib.request.urlopen(f"{base_url}/metrics", timeout=0.5) as r:
-          for line in r.read().decode().splitlines():
-              if line and not line.startswith("#"):
-                  name, _, val = line.partition(" ")
-                  try: out[name] = float(val)
-                  except ValueError: pass
-      return out
-  # llama_metrics("http://127.0.0.1:1234")["llamacpp:predicted_tokens_seconds"]
-
-  - **get_metadata.py** — In den Ordner mit den Modellen packen (pip install gguf) und alle Metadaten aller Modelle auslesen und speichern. Für Debugging!
-
-  ```
 
 ## License
 
