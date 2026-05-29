@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 from typing import List, Optional, cast, Tuple
 
-from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QCloseEvent, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -1072,6 +1072,12 @@ class MainWindow(QMainWindow):
         #     "vram_gb": float,      # estimated GPU footprint
         #   }
         self._servers: List[dict] = []
+        # Monotonic counter so each server gets a stable identifier for the
+        # switcher dropdown (ports can be reused after a stop, so port alone
+        # is not a durable key).
+        self._next_server_id: int = 1
+        # GPU name the most recent launch was pinned to (for the registry).
+        self._last_pinned_gpu: Optional[str] = None
         # Base port for the first server; subsequent ones get base+1, base+2…
         self._base_port: int = 1234
         # /health handshake state: base URL of the running server and a
@@ -1422,9 +1428,22 @@ class MainWindow(QMainWindow):
         main_split.addWidget(top_split)
         main_split.addWidget(self._log_panel)
         main_split.setSizes([560, 240])
+        self._main_split = main_split
 
-        # Prevent the top half from collapsing; only the log panel should be hideable.
-        top_split.setMinimumHeight(400)
+        # Allow the log panel to be completely collapsed (min size 0)
+        # and prevent the top half from collapsing; only the log panel should
+        # be hideable. The previous version pinned top_split to a 400px
+        # *minimum* which fought the splitter and stopped the bottom panel
+        # from ever reaching size 0 — the panel could only be shrunk, never
+        # fully retracted. We instead set collapse policy per index: the top
+        # half cannot collapse, the log panel can.
+        self._log_panel.setMinimumSize(QSize(0, 0))
+        top_split.setMinimumHeight(0)
+        main_split.setCollapsible(0, False)  # top half: never collapse
+        main_split.setCollapsible(1, True)   # log panel: fully retractable
+        # A slightly wider handle makes the bottom edge easy to grab and drag
+        # all the way down to nothing.
+        main_split.setHandleWidth(6)
 
         # Keep references so the inner pane arrangement can be persisted /
         # restored independently of the outer window geometry (QMainWindow
@@ -1461,6 +1480,28 @@ class MainWindow(QMainWindow):
 
         bl.addStretch()
 
+        # ── Multi-server switcher ──────────────────────────────────────
+        # Lets the user target a SPECIFIC running server (to stop just that
+        # one) instead of only ever the most-recent. Repopulated whenever the
+        # server registry changes (launch / stop / crash poll).
+        bl.addWidget(QLabel(" Server:"))
+        self._server_combo = QComboBox()
+        self._server_combo.setMinimumWidth(220)
+        self._server_combo.setToolTip(
+            "Select a running server. ‘Stop’ terminates the selected one."
+        )
+        bl.addWidget(self._server_combo)
+
+        self._btn_toggle_log = QPushButton("▾ Log")
+        self._btn_toggle_log.setFixedHeight(32)
+        self._btn_toggle_log.setCheckable(True)
+        self._btn_toggle_log.setChecked(True)
+        self._btn_toggle_log.setToolTip(
+            "Show / fully retract the bottom info panel."
+        )
+        self._btn_toggle_log.clicked.connect(self._toggle_log_panel)
+        bl.addWidget(self._btn_toggle_log)
+
         self._btn_launch = QPushButton("▶  Launch")
         self._btn_launch.setFixedHeight(32)
         self._btn_launch.setEnabled(False)
@@ -1474,9 +1515,16 @@ class MainWindow(QMainWindow):
         self._btn_stop = QPushButton("■  Stop")
         self._btn_stop.setFixedHeight(32)
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setToolTip("Stop the most recently launched server.")
+        self._btn_stop.setToolTip("Stop the server selected in the dropdown.")
         self._btn_stop.clicked.connect(self._stop_server)
         bl.addWidget(self._btn_stop)
+
+        self._btn_stop_all = QPushButton("■ Stop all")
+        self._btn_stop_all.setFixedHeight(32)
+        self._btn_stop_all.setEnabled(False)
+        self._btn_stop_all.setToolTip("Stop every running llama-server.")
+        self._btn_stop_all.clicked.connect(self._stop_all_clicked)
+        bl.addWidget(self._btn_stop_all)
 
         self._btn_quit = QPushButton("Quit")
         self._btn_quit.setFixedHeight(32)
@@ -3119,6 +3167,7 @@ class MainWindow(QMainWindow):
         # After remapping, the chosen card is the only visible device (idx 0).
         cfg.main_gpu = 0
         cfg.tensor_split = None
+        self._last_pinned_gpu = name
         self._log(f"[Balance] Pinned to {name} (device {vis}).")
 
     # ------------------------------------------------------------------
@@ -3293,33 +3342,39 @@ class MainWindow(QMainWindow):
         # working unchanged; the registry holds every live instance.
         record = {
             "proc": proc,
+            "id": self._next_server_id,
             "port": port,
             "base_url": base_url,
             "ready": False,
             "model": entry.name,
-            "gpu": None,
+            "gpu": getattr(self, "_last_pinned_gpu", None),
             "vram_gb": float(cfg.estimated_model_vram_gb) + float(cfg.kv_vram_gb),
         }
+        self._next_server_id += 1
         self._servers.append(record)
         self._server = proc
         self._server_base_url = base_url
         self._server_ready = False
+        self._last_pinned_gpu = None
 
         # Stop is enabled whenever ≥1 server runs; Launch stays enabled so the
         # user can fire up another model on the next port.
         self._btn_launch.setEnabled(True)
         self._btn_stop.setEnabled(True)
+        self._btn_stop_all.setEnabled(True)
+        self._refresh_server_combo()
         self._status.showMessage(
             f"Loading model — PID {pid} — {base_url}  "
             f"({len(self._servers)} server(s) running)"
         )
 
     def _stop_server(self) -> None:
-        """Stop the most-recently-launched server.
+        """Stop the server currently selected in the switcher dropdown.
 
-        Removes it from the registry so its port is reclaimed (the counter
-        "resets" — the next launch reuses the freed port). Disables Stop only
-        once the last server is gone.
+        Falls back to the most-recently-launched server when the dropdown
+        has no valid selection. Removes it from the registry so its port is
+        reclaimed. Disables the Stop buttons only once the last server is
+        gone.
         """
         self._prune_dead_servers()
         if not self._servers:
@@ -3327,14 +3382,28 @@ class MainWindow(QMainWindow):
             self._server_base_url = None
             self._server_ready = False
             self._btn_stop.setEnabled(False)
+            self._btn_stop_all.setEnabled(False)
             self._btn_launch.setEnabled(True)
+            self._refresh_server_combo()
             return
 
-        record = self._servers.pop()  # most recent
+        # Resolve the selected server by its stable id (stored in the combo's
+        # item data). Fall back to the most recent if nothing is selected.
+        target_id = self._server_combo.currentData()
+        record = None
+        if target_id is not None:
+            for r in self._servers:
+                if r.get("id") == target_id:
+                    record = r
+                    break
+        if record is None:
+            record = self._servers[-1]
+        self._servers.remove(record)
+
         srv = record.get("proc")
         self._log(
-            f"[AutoTuner] Stopping server on port {record.get('port')} "
-            f"({record.get('model')})…"
+            f"[AutoTuner] Stopping server #{record.get('id')} on port "
+            f"{record.get('port')} ({record.get('model')})…"
         )
         if srv is not None:
             srv.stop()  # sends signal + waits in daemon thread
@@ -3346,6 +3415,7 @@ class MainWindow(QMainWindow):
             self._server_base_url = top.get("base_url")
             self._server_ready = bool(top.get("ready"))
             self._btn_stop.setEnabled(True)
+            self._btn_stop_all.setEnabled(True)
             self._status.showMessage(
                 f"Server stopped — {len(self._servers)} still running."
             )
@@ -3354,12 +3424,77 @@ class MainWindow(QMainWindow):
             self._server_base_url = None
             self._server_ready = False
             self._btn_stop.setEnabled(False)
+            self._btn_stop_all.setEnabled(False)
             self._status.showMessage("Server stopped.")
         self._btn_launch.setEnabled(True)
+        self._refresh_server_combo()
         self._log("[AutoTuner] Stop signal sent.")
 
+    def _stop_all_clicked(self) -> None:
+        """User pressed “Stop all”: terminate every running server."""
+        self._prune_dead_servers()
+        n = len(self._servers)
+        if n == 0:
+            self._refresh_server_combo()
+            return
+        self._log(f"[AutoTuner] Stopping all {n} server(s)…")
+        self._stop_all_servers()
+        self._btn_stop.setEnabled(False)
+        self._btn_stop_all.setEnabled(False)
+        self._btn_launch.setEnabled(True)
+        self._refresh_server_combo()
+        self._status.showMessage(f"Stopped all {n} server(s).")
+
+    def _refresh_server_combo(self) -> None:
+        """Repopulate the switcher dropdown from the live registry.
+
+        Preserves the current selection (by server id) when possible.
+        """
+        combo = getattr(self, "_server_combo", None)
+        if combo is None:
+            return
+        prev_id = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        for r in self._servers:
+            gpu = r.get("gpu")
+            ready = "✓" if r.get("ready") else "…"
+            label = (
+                f"#{r.get('id')}  :{r.get('port')}  {ready}  "
+                f"{_clean_model_name(str(r.get('model', '?')))}"
+            )
+            if gpu:
+                label += f"  [{gpu}]"
+            combo.addItem(label, r.get("id"))
+        # Restore prior selection, else default to the most recent.
+        if prev_id is not None:
+            idx = combo.findData(prev_id)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+            elif combo.count() > 0:
+                combo.setCurrentIndex(combo.count() - 1)
+        elif combo.count() > 0:
+            combo.setCurrentIndex(combo.count() - 1)
+        combo.blockSignals(False)
+
+    def _toggle_log_panel(self) -> None:
+        """Fully retract or restore the bottom info panel in one click."""
+        split = getattr(self, "_main_split", None)
+        if split is None:
+            return
+        if self._btn_toggle_log.isChecked():
+            # Restore: give the log panel a sensible share again.
+            total = sum(split.sizes()) or 800
+            split.setSizes([int(total * 0.7), int(total * 0.3)])
+            self._btn_toggle_log.setText("▾ Log")
+        else:
+            # Fully collapse the log panel (size 0).
+            total = sum(split.sizes()) or 800
+            split.setSizes([total, 0])
+            self._btn_toggle_log.setText("▸ Log")
+
     def _stop_all_servers(self) -> None:
-        """Stop every running server (used on quit)."""
+        """Stop every running server (used on quit and by ‘Stop all’)."""
         for record in self._servers:
             srv = record.get("proc")
             if srv is not None:
@@ -3371,6 +3506,7 @@ class MainWindow(QMainWindow):
         self._server = None
         self._server_base_url = None
         self._server_ready = False
+        self._refresh_server_combo()
 
     # ------------------------------------------------------------------
     # Server crash detection
@@ -3401,6 +3537,7 @@ class MainWindow(QMainWindow):
                 self._server_base_url = top.get("base_url")
                 self._server_ready = bool(top.get("ready"))
                 self._btn_stop.setEnabled(True)
+                self._btn_stop_all.setEnabled(True)
                 self._status.showMessage(
                     f"{len(self._servers)} server(s) running."
                 )
@@ -3409,8 +3546,10 @@ class MainWindow(QMainWindow):
                 self._server_base_url = None
                 self._server_ready = False
                 self._btn_stop.setEnabled(False)
+                self._btn_stop_all.setEnabled(False)
                 self._status.showMessage("Server exited.")
             self._btn_launch.setEnabled(True)
+            self._refresh_server_combo()
 
         # Health-probe any not-yet-ready server so its status flips to Ready.
         for record in self._servers:
@@ -3436,6 +3575,7 @@ class MainWindow(QMainWindow):
                     f"[AutoTuner] Server ready (/health → 200) — "
                     f"port {record.get('port')}."
                 )
+                self._refresh_server_combo()  # flip the …→✓ marker in the list
                 if record is self._servers[-1]:
                     self._server_ready = True
                     self._status.showMessage(
