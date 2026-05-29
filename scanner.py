@@ -654,6 +654,12 @@ class ModelEntry:
     group: str  # parent folder relative to scan root (e.g. "Alibaba/Qwen3.6")
     size_bytes: int
     mmproj: Optional[Path] = None
+    # All mmproj projectors found in the model's own directory that match
+    # this model's base name, sorted best-first (the same ranking used to
+    # pick `mmproj`). Lets the GUI offer a manual dropdown when a model
+    # ships several precisions (bf16 / f16 / f32). `mmproj` is just
+    # `mmproj_candidates[0]` when any matched.
+    mmproj_candidates: List[Path] = field(default_factory=list)
     draft: Optional[Path] = None  # paired assistant/draft model (if any)
     metadata: Dict[str, Any] = field(default_factory=dict)
     part_paths: List[Path] = field(default_factory=list)
@@ -790,19 +796,60 @@ def _find_mmproj(model: Path, candidates: List[Path]) -> Optional[Path]:
     A candidate matches if its normalized base is a prefix of the model's
     normalized name (same directory only). The longest matching prefix wins.
     """
+    ranked = _find_mmproj_candidates(model, candidates)
+    return ranked[0] if ranked else None
+
+
+# Precision tokens we use ONLY as a tie-breaker when two projectors match
+# the same model with an equally-long name prefix (e.g. a model ships
+# mmproj-…-bf16, mmproj-…-f16 and mmproj-…-f32 side by side). Without an
+# explicit user choice we prefer the higher-precision file, because the
+# projector is small and quality matters more than the few hundred MB
+# saved — this also flips Basti's complaint where bf16 was always picked
+# first purely by sort order. The GUI dropdown lets the user override.
+_MMPROJ_PRECISION_RANK = {
+    "f32": 3,
+    "fp32": 3,
+    "f16": 2,
+    "fp16": 2,
+    "bf16": 1,
+}
+
+
+def _mmproj_precision_score(name: str) -> int:
+    low = name.lower()
+    for tok, score in _MMPROJ_PRECISION_RANK.items():
+        if re.search(rf"(?<![a-z0-9]){tok}(?![a-z0-9])", low):
+            return score
+    return 0
+
+
+def _find_mmproj_candidates(model: Path, candidates: List[Path]) -> List[Path]:
+    """Return ALL mmproj projectors that match ``model``, best-first.
+
+    Same matching rule as :func:`_find_mmproj` (normalized base of the
+    projector is a prefix of the model's normalized name, same directory
+    only). The list is sorted by: (1) longest matching prefix first — the
+    most-specific projector — then (2) higher precision first (f32 > f16 >
+    bf16) as a tie-breaker, then (3) filename for a stable order. The GUI
+    exposes this list as a manual dropdown so the user can switch between
+    precisions instead of being stuck with whatever sorted first.
+    """
     model_norm = _normalize_model(model.name)
-    best: Optional[Path] = None
-    best_len = 0
+    scored: List[Tuple[int, int, str, Path]] = []
     for c in candidates:
         if c.parent != model.parent:
             continue
         c_norm = _normalize_mmproj(c.name)
         if not c_norm:
             continue
-        if model_norm.startswith(c_norm) and len(c_norm) > best_len:
-            best = c
-            best_len = len(c_norm)
-    return best
+        if model_norm.startswith(c_norm):
+            scored.append(
+                (len(c_norm), _mmproj_precision_score(c.name), c.name.lower(), c)
+            )
+    # Sort: longest prefix first, then highest precision, then name.
+    scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    return [t[3] for t in scored]
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1004,7 @@ def scan_models(
                 group=_group_for(m),
                 size_bytes=size,
                 mmproj=_find_mmproj(m, mmprojs),
+                mmproj_candidates=_find_mmproj_candidates(m, mmprojs),
                 draft=_find_draft(m, drafts),
                 metadata=md,
                 part_paths=[m],
@@ -990,6 +1038,7 @@ def scan_models(
                 group=_group_for(part1),
                 size_bytes=total_size,
                 mmproj=_find_mmproj(pairing_path, mmprojs),
+                mmproj_candidates=_find_mmproj_candidates(pairing_path, mmprojs),
                 draft=_find_draft(pairing_path, drafts),
                 metadata=md,
                 part_paths=ordered_parts,

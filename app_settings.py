@@ -15,6 +15,10 @@ Public API:
     set_window_geometry(str)
     get_window_state()     -> Optional[str]   # base64 of QByteArray (toolbars/docks)
     set_window_state(str)
+    get_splitter_state(name) -> Optional[str]  # base64 of a QSplitter's saveState()
+    set_splitter_state(name, str)
+    get_mmproj_selection(model_name) -> Optional[str]  # chosen projector filename
+    set_mmproj_selection(model_name, filename)
     get_font_size()        -> Optional[int]
     set_font_size(int)
     get_reasoning_effort(model_name) -> Optional[str]
@@ -161,9 +165,11 @@ def clear_fork_container_path() -> None:
 # Schema:
 #   "model_overrides": {
 #       "Qwen3.5-30B-A3B-UD-Q4_K_XL": {
-#           "vision":   true,
-#           "draft":    false,
-#           "thinking": true
+#           "vision":       true,
+#           "draft":        false,
+#           "thinking":     true,
+#           "ngram":        false,
+#           "prompt_cache": true
 #       },
 #       ...
 #   }
@@ -171,7 +177,7 @@ def clear_fork_container_path() -> None:
 # Absent keys mean "use the model's default capability detection" so
 # turning a feature back on is just a matter of clearing the override.
 
-_OVERRIDE_KEYS = ("vision", "draft", "thinking")
+_OVERRIDE_KEYS = ("vision", "draft", "thinking", "ngram", "prompt_cache")
 
 
 def get_model_overrides(model_name: str) -> Dict[str, bool]:
@@ -192,8 +198,9 @@ def get_model_overrides(model_name: str) -> Dict[str, bool]:
 def set_model_override(model_name: str, key: str, value: bool) -> None:
     """Persist a single (model, option) → bool override.
 
-    `key` must be one of "vision", "draft", "thinking"; anything else
-    is silently ignored to keep the JSON file uncluttered.
+    `key` must be one of "vision", "draft", "thinking", "ngram",
+    "prompt_cache"; anything else is silently ignored to keep the JSON
+    file uncluttered.
     """
     if not model_name or key not in _OVERRIDE_KEYS:
         return
@@ -322,6 +329,97 @@ def set_window_state(b64_value: str) -> None:
     """Persist the base64-encoded saveState() output."""
     if isinstance(b64_value, str):
         _update("window_state", b64_value)
+
+
+# ---------------------------------------------------------------------------
+# Inner splitter layout
+#
+# QMainWindow.saveState() only round-trips toolbars and dock widgets — it
+# does NOT capture the position of plain QSplitter handles that live inside
+# the central widget. The AutoTuner GUI arranges its panes with two named
+# QSplitters (top horizontal: model-list | config, and the vertical split
+# between that row and the log panel). To remember the *inner* arrangement
+# (not just the outer window size), each splitter's own saveState() blob is
+# stored here under a stable object name.
+#
+# Schema:
+#   "splitter_states": { "top_split": "<b64>", "main_split": "<b64>", ... }
+
+
+def get_splitter_state(name: str) -> Optional[str]:
+    """Return the persisted QSplitter.saveState() blob (base64) for *name*."""
+    if not name:
+        return None
+    bucket = load_settings().get("splitter_states")
+    if not isinstance(bucket, dict):
+        return None
+    val = bucket.get(name)
+    if not isinstance(val, str) or not val:
+        return None
+    try:
+        base64.b64decode(val, validate=True)
+    except (ValueError, TypeError):
+        return None
+    return val
+
+
+def set_splitter_state(name: str, b64_value: str) -> None:
+    """Persist the base64-encoded saveState() of the QSplitter *name*."""
+    if not name or not isinstance(b64_value, str):
+        return
+    s = load_settings()
+    bucket = s.get("splitter_states")
+    if not isinstance(bucket, dict):
+        bucket = {}
+    bucket[name] = b64_value
+    s["splitter_states"] = bucket
+    save_settings(s)
+
+
+# ---------------------------------------------------------------------------
+# Per-model mmproj (vision projector) selection
+#
+# A model can ship several projector precisions side by side (bf16 / f16 /
+# f32). The scanner auto-picks one, but the user may prefer a different
+# precision. We remember the chosen projector *filename* per model so the
+# choice sticks across restarts. Stored as the bare filename (not full
+# path) because models move between drives; the GUI matches it back against
+# the freshly-scanned candidate list and falls back to the auto pick when
+# the remembered file is no longer present.
+#
+# Schema:
+#   "mmproj_selection": { "<model_name>": "mmproj-…-f32.gguf", ... }
+
+
+def get_mmproj_selection(model_name: str) -> Optional[str]:
+    """Return the remembered mmproj filename for *model_name*, or None."""
+    if not model_name:
+        return None
+    bucket = load_settings().get("mmproj_selection")
+    if not isinstance(bucket, dict):
+        return None
+    val = bucket.get(model_name)
+    return val if isinstance(val, str) and val else None
+
+
+def set_mmproj_selection(model_name: str, filename: Optional[str]) -> None:
+    """Persist (or clear) the chosen mmproj filename for *model_name*.
+
+    Pass ``None`` / empty to drop the override (model falls back to the
+    scanner's automatic best pick).
+    """
+    if not model_name:
+        return
+    s = load_settings()
+    bucket = s.get("mmproj_selection")
+    if not isinstance(bucket, dict):
+        bucket = {}
+    if not filename:
+        bucket.pop(model_name, None)
+    else:
+        bucket[model_name] = str(filename)
+    s["mmproj_selection"] = bucket
+    save_settings(s)
 
 
 # ---------------------------------------------------------------------------

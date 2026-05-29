@@ -1629,6 +1629,8 @@ def build_command(
     use_thinking: bool = False,
     enable_speculative: bool = True,
     enable_ngram: bool = False,
+    enable_prompt_cache: bool = True,
+    prompt_cache_ram_mib: int = -1,
 ) -> List[str]:
     """Build the llama-server command line for ``model`` and ``config``.
 
@@ -1702,9 +1704,8 @@ def build_command(
     # ones that run. If they overcommit we want a visible, debuggable OOM
     # — not a silent ctx/ngl downscale that desyncs the running config
     # from what the launcher reported.
-    # NOTE: `--fit` (env LLAMA_ARG_FIT, default 'on') is confirmed present and
-    # unchanged across b9334–b9371 (re-verified against the b9334→b9371 diff).
-    # If a server binary predates it, this will abort with
+    # NOTE: `--fit` (env LLAMA_ARG_FIT, default 'on') is confirmed present in
+    # b9334. If a server binary predates it, this will abort with
     # "unknown argument"; in that case drop the two tokens below.
     cmd += ["--fit", "off"]
 
@@ -1714,6 +1715,41 @@ def build_command(
     # tokens/s (llamacpp:predicted_tokens_seconds) and KV-cache fill
     # (llamacpp:kv_cache_usage_ratio). Negligible overhead.
     cmd.append("--metrics")
+
+    # ---- Host-memory prompt caching (-cram / --cache-ram) -------------
+    # ggerganov's PR #16391 (merged; rel #16117) added automatic prompt
+    # caching to host RAM: computed prompt prefixes are stored in regular
+    # system RAM and hot-swapped back into the llama_context when a new
+    # request shares a long prefix (system prompt, RAG scaffold, the whole
+    # previous turn of a chat). This collapses time-to-first-token on
+    # repeated/similar prompts — exactly the Claude-Code / Roo-Code pattern
+    # where every request re-sends a 20-40k-token system+tools preamble.
+    #
+    # CLI surface (confirmed b9334+, unchanged in b9409):
+    #     --cache-ram N    (-cram N)   N MiB of host RAM for the prompt cache
+    #     -cram -1                      no limit (use whatever RAM is free)
+    #     -cram 0                       DISABLE prompt caching in RAM
+    # The token-count ceiling defaults to the context size; only the byte
+    # cap is exposed here.
+    #
+    # HARD INCOMPATIBILITY: the feature is incompatible with mtmd (the
+    # multimodal/vision path). PR #16391 states server_tokens is not
+    # copyable under mtmd, so the cache logic is disabled there. If we sent
+    # a positive -cram alongside --mmproj the server either ignores it or
+    # (worse, on some builds) refuses to reuse and logs noise every request.
+    # So whenever vision is active we force -cram 0 regardless of the user
+    # toggle, and otherwise honour enable_prompt_cache.
+    vision_active = model.mmproj is not None
+    if vision_active:
+        # Vision graph loaded → caching unsupported; pin it off explicitly
+        # so the default ("on") cannot silently allocate an unused buffer.
+        cmd += ["--cache-ram", "0"]
+    elif enable_prompt_cache:
+        # -1 == "no byte limit"; any positive value is a MiB cap. We pass the
+        # profile/GUI value through verbatim (default -1 = unlimited).
+        cmd += ["--cache-ram", str(int(prompt_cache_ram_mib))]
+    else:
+        cmd += ["--cache-ram", "0"]
 
     # Speculative decoding — composable paths combined into one --spec-type:
     #   - sibling drafter passed in        → Path A (-md, auto-detected type)

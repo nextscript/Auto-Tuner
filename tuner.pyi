@@ -129,4 +129,6 @@ def build_command(
     use_thinking: bool = ...,
     enable_speculative: bool = ...,
     enable_ngram: bool = ...,
+    enable_prompt_cache: bool = ...,
+    prompt_cache_ram_mib: int = ...,
 ) -> List[str]: ...

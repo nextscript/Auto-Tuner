@@ -50,28 +50,6 @@ _DEBUG_MODE = False
 _DEBUG_CATEGORIES: set[str] = set()
 
 
-def _spawn_detached(cmd: List[str], env_overrides: Optional[dict] = None) -> int:
-    """Start llama-server detached and return its PID without waiting.
-
-    Used by ``--detach`` so a script/agent can launch several models in a
-    row (each on its own ``--port``) and have them all serve concurrently.
-    On Windows the child gets its own console window
-    (``CREATE_NEW_CONSOLE``); on Unix its own session (``start_new_session``),
-    so it keeps running after this process exits.
-    """
-    import subprocess as _sp
-
-    env = os.environ.copy()
-    if env_overrides:
-        env.update(env_overrides)
-    if os.name == "nt":
-        flags = _sp.CREATE_NEW_CONSOLE | _sp.CREATE_NEW_PROCESS_GROUP
-        proc = _sp.Popen(cmd, creationflags=flags, env=env)
-    else:
-        proc = _sp.Popen(cmd, start_new_session=True, env=env)
-    return proc.pid
-
-
 def _debug_print(*args, **kwargs) -> None:
     if _DEBUG_MODE:
         print("[DEBUG]", *args, **kwargs)
@@ -749,6 +727,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "reasoning models and summarisation.",
     )
     p.add_argument(
+        "--no-prompt-cache",
+        action="store_true",
+        dest="no_prompt_cache",
+        help="Disable host-memory prompt caching (--cache-ram 0). By default "
+        "prompt caching is auto-enabled for every non-vision model; it is "
+        "always off for vision models (incompatible with mtmd).",
+    )
+    p.add_argument(
         "--force-mlock",
         action="store_true",
         help="Force --mlock / --no-mmap even for full-GPU-offload models "
@@ -767,15 +753,6 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="Open the Qt log-viewer window after the server starts "
         "(requires PyQt6; server stdout/stderr stream into the window).",
-    )
-    p.add_argument(
-        "--detach",
-        action="store_true",
-        help="Spawn llama-server in its own session/console and return "
-        "immediately instead of waiting. Lets a script or agent start "
-        "several models back-to-back (each --port a different value) so "
-        "an orchestrator + spawned subagents can all serve concurrently. "
-        "Implies --yes.",
     )
     p.add_argument(
         "--diagnose",
@@ -802,8 +779,6 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but intentional)
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-    if getattr(args, "detach", False):
-        args.yes = True  # --detach is non-interactive by definition
     if args.llama_cpp_dir:
         os.environ["LLAMA_CPP_DIR"] = args.llama_cpp_dir
 
@@ -1130,6 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             # effective_draft=None alone). n-gram is independent (--ngram).
             enable_speculative=not args.nodraft,
             enable_ngram=use_ngram,
+            enable_prompt_cache=not getattr(args, "no_prompt_cache", False),
         )
 
         if args.dry_run:
@@ -1137,20 +1113,6 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             print("Command:")
             print("  " + " ".join(cmd))
             _print_client_settings(args.host, args.port, cfg.ctx, model)
-            return 0
-
-        # ── Detached spawn ────────────────────────────────────────────────
-        # Start the server in its own session/console and return at once, so
-        # a script or agent can launch several models in a row (one per port)
-        # and have them all serve concurrently. No menu loop, no waiting.
-        if args.detach:
-            _print_client_settings(args.host, args.port, cfg.ctx, model)
-            pid = _spawn_detached(cmd, env_overrides=cfg.env_overrides)
-            print(
-                f"\n[AutoTuner] Detached llama-server — PID {pid} — "
-                f"http://{args.host}:{args.port}"
-            )
-            print("[AutoTuner] Server keeps running in its own window/session.")
             return 0
 
         try:

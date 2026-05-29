@@ -15,7 +15,6 @@ import copy
 import os
 import re
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -160,47 +159,6 @@ class _TerminalProcess:
                     pass
 
         threading.Thread(target=_wait, daemon=True).start()
-
-
-# ---------------------------------------------------------------------------
-# Running-server registry entry
-#
-# AutoTuner can keep several llama-server instances alive at once — each on
-# its own port, each in its own console window. This is what makes the
-# "pi coding agent + subagent-spawn" workflow possible: an orchestrator
-# model and one or more subagent / draft models all serving concurrently.
-# The GUI tracks every live instance in `MainWindow._servers`; this record
-# bundles the process wrapper with the per-instance /health latch.
-
-
-class _RunningServer:
-    """One live llama-server instance tracked by the GUI."""
-
-    def __init__(
-        self, proc: "_TerminalProcess", host: str, port: int, label: str
-    ) -> None:
-        self.proc = proc
-        self.host = host
-        self.port = port
-        self.label = label
-        self.base_url = f"http://{host}:{port}"
-        # /health handshake latch: flips True once GET /health returns 200
-        # (model finished loading). Tracked per instance, not globally.
-        self.ready = False
-
-    def is_running(self) -> bool:
-        return self.proc.is_running()
-
-    def returncode(self) -> Optional[int]:
-        return self.proc.returncode()
-
-    @property
-    def pid(self) -> object:
-        return self.proc.proc.pid if self.proc.proc else "?"
-
-    def combo_label(self) -> str:
-        state = "ready" if self.ready else "loading"
-        return f":{self.port}  {self.label}  [{state}]  PID {self.pid}"
 
 
 # ---------------------------------------------------------------------------
@@ -1098,12 +1056,28 @@ class MainWindow(QMainWindow):
         self.models_path = models_path
         self.settings_path = settings_path
 
-        # Registry of all live llama-server instances. AutoTuner supports
-        # several at once — one per port, each in its own console window —
-        # so an agent can run an orchestrator model plus spawned subagents
-        # concurrently. The /health latch now lives per-instance on each
-        # _RunningServer rather than as a single global flag.
-        self._servers: List[_RunningServer] = []
+        self._server: Optional[_TerminalProcess] = None
+        # Multi-server registry. Each entry tracks one running llama-server
+        # instance so we can (a) auto-assign ports 1234, 1235, 1236… and
+        # reclaim them when a server stops, and (b) account for the VRAM a
+        # previously-launched model already holds when placing the next one.
+        # Shape per entry:
+        #   {
+        #     "proc": _TerminalProcess,
+        #     "port": int,
+        #     "base_url": str,
+        #     "ready": bool,
+        #     "model": str,          # display name
+        #     "gpu": Optional[str],  # GPU name it was steered onto (if any)
+        #     "vram_gb": float,      # estimated GPU footprint
+        #   }
+        self._servers: List[dict] = []
+        # Base port for the first server; subsequent ones get base+1, base+2…
+        self._base_port: int = 1234
+        # /health handshake state: base URL of the running server and a
+        # latch that flips once GET /health returns 200 (model loaded).
+        self._server_base_url: Optional[str] = None
+        self._server_ready: bool = False
         self._all_entries: List[ModelEntry] = []
         self._system: Optional[SystemInfo] = None
         self._profiles: List[ModelProfile] = []
@@ -1339,6 +1313,28 @@ class MainWindow(QMainWindow):
         ol = QVBoxLayout(opts)
         ol.setSpacing(4)
 
+        # ── mmproj (vision projector) selector ──────────────────────────
+        # Some models ship several projector precisions side by side
+        # (bf16 / f16 / f32). The scanner auto-picks the best match, but
+        # the user may prefer another precision. This dropdown lists every
+        # candidate found beside the model and lets the user switch; the
+        # choice is remembered per model. Hidden entirely when a model has
+        # 0 or 1 projector (nothing to choose).
+        self._mmproj_row = QWidget()
+        _mmproj_l = QHBoxLayout(self._mmproj_row)
+        _mmproj_l.setContentsMargins(0, 0, 0, 0)
+        _mmproj_l.setSpacing(4)
+        _mmproj_l.addWidget(QLabel("mmproj:"))
+        self._cb_mmproj = QComboBox()
+        self._cb_mmproj.setToolTip(
+            "Pick which vision projector to load when several precisions\n"
+            "(bf16 / f16 / f32) are present. Remembered per model."
+        )
+        self._cb_mmproj.currentIndexChanged.connect(self._on_mmproj_changed)
+        _mmproj_l.addWidget(self._cb_mmproj, 1)
+        self._mmproj_row.setVisible(False)
+        ol.addWidget(self._mmproj_row)
+
         self._chk_vision = QCheckBox("Vision (mmproj)")
         self._chk_draft = QCheckBox("Draft model (speculative decoding)")
         # NEW: Turbo KV-quant toggle. Sits between Draft and Thinking,
@@ -1357,6 +1353,19 @@ class MainWindow(QMainWindow):
             "works on any model. Best for code/text iteration, reasoning models\n"
             "that echo their scratchpad, and summarisation."
         )
+        # Host-memory prompt caching (--cache-ram / -cram). Auto-ON for every
+        # model that supports it (i.e. every NON-vision model — the feature
+        # is incompatible with mtmd). Stays user-toggleable. When a vision
+        # model is selected the box is disabled + unchecked, because
+        # llama-server cannot cache prompts while the multimodal path is live.
+        self._chk_prompt_cache = QCheckBox("Prompt caching (host RAM, -cram)")
+        self._chk_prompt_cache.setToolTip(
+            "Cache computed prompt prefixes in system RAM so repeated/similar\n"
+            "prompts (long system prompts, RAG scaffolds, Roo-Code preambles)\n"
+            "skip re-processing and hit first-token faster.\n"
+            "Auto-enabled where supported; unavailable while Vision is active\n"
+            "(llama-server cannot cache prompts under the multimodal path)."
+        )
         self._chk_thinking = QCheckBox("Thinking / Reasoning")
 
         for chk in (
@@ -1364,21 +1373,22 @@ class MainWindow(QMainWindow):
             self._chk_draft,
             self._chk_turbo_kv,
             self._chk_ngram,
+            self._chk_prompt_cache,
             self._chk_thinking,
         ):
             chk.setEnabled(False)
             ol.addWidget(chk)
 
         # Checkbox toggles → persist the override AND refresh the
-        # context / memory estimates. Three dedicated slots so each
-        # one knows which option it represents.
+        # context / memory estimates. Each slot knows which option it owns.
         self._chk_vision.toggled.connect(self._on_vision_toggled)
         self._chk_draft.toggled.connect(self._on_draft_toggled)
         self._chk_turbo_kv.toggled.connect(self._on_turbo_toggled)
         self._chk_ngram.toggled.connect(self._on_ngram_toggled)
+        self._chk_prompt_cache.toggled.connect(self._on_prompt_cache_toggled)
         self._chk_thinking.toggled.connect(self._on_thinking_toggled)
 
-        opts.setMaximumHeight(168)
+        opts.setMaximumHeight(220)
 
         right = QWidget()
         rl2 = QVBoxLayout(right)
@@ -1390,6 +1400,8 @@ class MainWindow(QMainWindow):
 
         # ── Top HSplitter ──────────────────────────────────────────────
         top_split = QSplitter(Qt.Orientation.Horizontal)
+        top_split.setObjectName("top_split")
+        top_split.setChildrenCollapsible(False)
         top_split.addWidget(left)
         top_split.addWidget(right)
         top_split.setSizes([370, 650])
@@ -1404,9 +1416,16 @@ class MainWindow(QMainWindow):
         )
 
         main_split = QSplitter(Qt.Orientation.Vertical)
+        main_split.setObjectName("main_split")
+        main_split.setChildrenCollapsible(False)
         main_split.addWidget(top_split)
         main_split.addWidget(self._log_panel)
         main_split.setSizes([560, 240])
+
+        # Keep references so the inner pane arrangement can be persisted /
+        # restored independently of the outer window geometry (QMainWindow
+        # saveState() does not round-trip plain central-widget splitters).
+        self._splitters: List[QSplitter] = [top_split, main_split]
 
         # ── Button row ─────────────────────────────────────────────────
         btn_row = QWidget()
@@ -1418,9 +1437,14 @@ class MainWindow(QMainWindow):
         self._host_edit.setFixedWidth(120)
         bl.addWidget(self._host_edit)
 
-        bl.addWidget(QLabel(" Port:"))
+        bl.addWidget(QLabel(" Base port:"))
         self._port_edit = QLineEdit("1234")
         self._port_edit.setFixedWidth(60)
+        self._port_edit.setToolTip(
+            "Base port for the FIRST server. Each additional concurrent\n"
+            "server gets the next free port (1234, 1235, 1236…). Stopping\n"
+            "a server frees its port for reuse."
+        )
         bl.addWidget(self._port_edit)
 
         bl.addStretch()
@@ -1428,31 +1452,19 @@ class MainWindow(QMainWindow):
         self._btn_launch = QPushButton("▶  Launch")
         self._btn_launch.setFixedHeight(32)
         self._btn_launch.setEnabled(False)
+        self._btn_launch.setToolTip(
+            "Launch the selected model. If a server is already running, the\n"
+            "new model is placed on the emptier GPU and given the next port."
+        )
         self._btn_launch.clicked.connect(self._launch_server)
         bl.addWidget(self._btn_launch)
-
-        # Running-instance management. AutoTuner keeps several servers alive
-        # at once; the combo lists every live instance and the two Stop
-        # buttons act on the selected one / on all of them.
-        bl.addWidget(QLabel(" Running:"))
-        self._server_combo = QComboBox()
-        self._server_combo.setMinimumWidth(240)
-        self._server_combo.setToolTip("Live llama-server instances")
-        bl.addWidget(self._server_combo)
 
         self._btn_stop = QPushButton("■  Stop")
         self._btn_stop.setFixedHeight(32)
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setToolTip("Stop the selected instance")
-        self._btn_stop.clicked.connect(self._stop_selected_server)
+        self._btn_stop.setToolTip("Stop the most recently launched server.")
+        self._btn_stop.clicked.connect(self._stop_server)
         bl.addWidget(self._btn_stop)
-
-        self._btn_stop_all = QPushButton("■  Stop all")
-        self._btn_stop_all.setFixedHeight(32)
-        self._btn_stop_all.setEnabled(False)
-        self._btn_stop_all.setToolTip("Stop every running instance")
-        self._btn_stop_all.clicked.connect(self._stop_all_servers)
-        bl.addWidget(self._btn_stop_all)
 
         self._btn_quit = QPushButton("Quit")
         self._btn_quit.setFixedHeight(32)
@@ -1472,6 +1484,9 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Starting…")
+
+        # Re-apply the inner pane arrangement now that every splitter exists.
+        self._restore_splitter_states()
 
     # ------------------------------------------------------------------
     # Window geometry persistence
@@ -1516,6 +1531,48 @@ class MainWindow(QMainWindow):
             app_settings.set_window_state(base64.b64encode(state_bytes).decode("ascii"))
         except Exception as exc:  # pragma: no cover - defensive
             self._log(f"[Warning] Could not save window layout: {exc}")
+        # Inner pane arrangement — saved separately because QMainWindow
+        # saveState() does not round-trip plain central-widget splitters.
+        self._persist_splitter_states()
+
+    def _persist_splitter_states(self) -> None:
+        """Save each named QSplitter's handle positions.
+
+        Stored per object name so the inner layout (model-list vs config
+        width, and the log-panel height) is restored independently of the
+        outer window size.
+        """
+        for sp in getattr(self, "_splitters", []):
+            try:
+                name = sp.objectName()
+                if not name:
+                    continue
+                raw = sp.saveState().data() or b""
+                app_settings.set_splitter_state(
+                    name, base64.b64encode(raw).decode("ascii")
+                )
+            except Exception:  # pragma: no cover - defensive
+                continue
+
+    def _restore_splitter_states(self) -> None:
+        """Re-apply persisted handle positions to each named QSplitter.
+
+        Falls back silently to the hard-coded setSizes() defaults when no
+        blob exists or restoreState() rejects it (e.g. a pane count change
+        between versions).
+        """
+        for sp in getattr(self, "_splitters", []):
+            try:
+                name = sp.objectName()
+                if not name:
+                    continue
+                b64 = app_settings.get_splitter_state(name)
+                if not b64:
+                    continue
+                raw = base64.b64decode(b64)
+                sp.restoreState(QByteArray(raw))
+            except (ValueError, TypeError, OSError):
+                continue
 
     # ------------------------------------------------------------------
     def _apply_mono_font(self, w: QTextEdit) -> None:
@@ -1996,16 +2053,21 @@ class MainWindow(QMainWindow):
             self._btn_refresh.setEnabled(True)
             return
 
-        self._scan_worker = _ScanWorker(self.models_path)
-        self._scan_thread = QThread(self)
-        self._scan_worker.moveToThread(self._scan_thread)
-        self._scan_thread.started.connect(self._scan_worker.run)
-        self._scan_worker.finished.connect(self._on_scan_done)
-        self._scan_worker.error.connect(self._on_scan_error)
-        self._scan_worker.finished.connect(self._scan_thread.quit)
-        self._scan_worker.error.connect(self._scan_thread.quit)
-        self._scan_thread.finished.connect(self._scan_thread.deleteLater)
-        self._scan_thread.start()
+        worker = _ScanWorker(self.models_path)
+        thread = QThread(self)
+        self._scan_worker = worker
+        self._scan_thread = thread
+        # Bind to locals so static checkers (Pylance) can see these are
+        # definitely-not-None for the signal wiring below — the attributes
+        # are typed Optional[...] because they're cleared on teardown.
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_scan_done)
+        worker.error.connect(self._on_scan_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
 
     def _on_scan_done(self, entries: List[ModelEntry]) -> None:
         self._all_entries = entries
@@ -2228,6 +2290,77 @@ class MainWindow(QMainWindow):
         self._chk_ngram.setChecked(ngram_state)
         self._chk_ngram.blockSignals(False)
 
+        # ── mmproj precision dropdown ───────────────────────────────
+        # Populate from the candidate list the scanner attached to the
+        # model. Only shown when there's a real choice (>= 2 projectors).
+        # The remembered selection (per model) wins; otherwise the entry's
+        # auto-picked `mmproj` is preselected. Selecting here updates
+        # `entry.mmproj` so the launch + preview use the chosen file.
+        self._populate_mmproj_combo(entry, ov)
+
+        # ── Prompt caching (host RAM, -cram) ────────────────────────
+        # Supported on every NON-vision model (the feature is incompatible
+        # with the multimodal/mtmd path). Auto-ON by default where
+        # supported; per-model override remembered. When the *effective*
+        # vision state is on, the box is force-disabled + unchecked because
+        # llama-server cannot cache prompts while vision is loaded.
+        vision_effectively_on = self._chk_vision.isChecked() and self._chk_vision.isEnabled()
+        pc_supported = not vision_effectively_on
+        pc_state = ov["prompt_cache"] if "prompt_cache" in ov else True
+        self._chk_prompt_cache.blockSignals(True)
+        self._chk_prompt_cache.setEnabled(pc_supported)
+        self._chk_prompt_cache.setChecked(pc_supported and pc_state)
+        if not pc_supported:
+            self._chk_prompt_cache.setText(
+                "Prompt caching (unavailable — Vision active)"
+            )
+        else:
+            self._chk_prompt_cache.setText("Prompt caching (host RAM, -cram)")
+        self._chk_prompt_cache.blockSignals(False)
+
+    def _populate_mmproj_combo(self, entry: ModelEntry, ov: dict) -> None:
+        """Fill the mmproj dropdown from ``entry.mmproj_candidates``.
+
+        Shows the row only when 2+ projectors exist. Restores the
+        remembered per-model selection if its file is still present,
+        otherwise keeps the scanner's auto pick. Writes the resolved
+        choice back onto ``entry.mmproj`` so launch + preview agree.
+        """
+        candidates = list(getattr(entry, "mmproj_candidates", []) or [])
+        self._cb_mmproj.blockSignals(True)
+        self._cb_mmproj.clear()
+
+        if len(candidates) < 2:
+            # 0 or 1 projector → nothing to choose; hide the row entirely.
+            self._mmproj_row.setVisible(False)
+            self._cb_mmproj.blockSignals(False)
+            return
+
+        # Resolve the desired selection: remembered filename → else current
+        # entry.mmproj → else first candidate (scanner's best pick).
+        remembered = app_settings.get_mmproj_selection(entry.name)
+        chosen_idx = 0
+        for i, c in enumerate(candidates):
+            label = c.name
+            # Annotate the auto pick so the user knows the default.
+            if i == 0:
+                label += "   (auto)"
+            self._cb_mmproj.addItem(label, userData=str(c))
+            if remembered and c.name == remembered:
+                chosen_idx = i
+        # If nothing remembered, preselect whatever entry.mmproj points at.
+        if not remembered and entry.mmproj is not None:
+            for i, c in enumerate(candidates):
+                if c == entry.mmproj:
+                    chosen_idx = i
+                    break
+
+        self._cb_mmproj.setCurrentIndex(chosen_idx)
+        # Apply the resolved choice to the entry so launch uses it.
+        entry.mmproj = candidates[chosen_idx]
+        self._mmproj_row.setVisible(True)
+        self._cb_mmproj.blockSignals(False)
+
     def _auto_select_fork(self, profile: ModelProfile) -> None:
         """Auto-select fork from combo based on profile requirement.
 
@@ -2305,6 +2438,11 @@ class MainWindow(QMainWindow):
 
     def _on_vision_toggled(self, checked: bool) -> None:
         self._record_override("vision", checked)
+        # Vision interacts with prompt caching (mtmd is incompatible with
+        # -cram) — re-run the checkbox logic so the prompt-cache box flips
+        # enabled/disabled to match before rebuilding the preview.
+        if self._current_entry is not None:
+            self._update_checkboxes(self._current_entry)
         self._refresh_config_preview()
 
     def _on_draft_toggled(self, checked: bool) -> None:
@@ -2337,6 +2475,38 @@ class MainWindow(QMainWindow):
         # n-gram is independent of the model (no draft file needed), so it has
         # no effect on the vision/draft interlock — just persist and re-preview.
         self._record_override("ngram", checked)
+        self._refresh_config_preview()
+
+    def _on_prompt_cache_toggled(self, checked: bool) -> None:
+        # Persist the per-model prompt-cache choice. No interlock with other
+        # options (the only constraint — vision incompatibility — is enforced
+        # by disabling the box in _update_checkboxes), so just record + preview.
+        self._record_override("prompt_cache", checked)
+        self._refresh_config_preview()
+
+    def _on_mmproj_changed(self, index: int) -> None:
+        """User picked a different vision projector from the dropdown.
+
+        Updates the current model's `mmproj` to the chosen file, remembers
+        the choice per model, and refreshes the preview (the projector size
+        feeds the VRAM estimate).
+        """
+        if self._current_entry is None or index < 0:
+            return
+        path_str = self._cb_mmproj.itemData(index)
+        if not path_str:
+            return
+        chosen = Path(path_str)
+        self._current_entry.mmproj = chosen
+        try:
+            app_settings.set_mmproj_selection(self._current_entry.name, chosen.name)
+        except Exception as exc:
+            self._log(f"[Warning] Could not save mmproj selection: {exc}")
+        # Reflect the chosen file in the Vision checkbox label too.
+        if self._chk_vision.isEnabled():
+            self._chk_vision.blockSignals(True)
+            self._chk_vision.setText(f"Vision  ({chosen.name})")
+            self._chk_vision.blockSignals(False)
         self._refresh_config_preview()
 
     def _refresh_config_preview(self) -> None:
@@ -2424,6 +2594,9 @@ class MainWindow(QMainWindow):
         use_draft = self._chk_draft.isChecked() and self._chk_draft.isEnabled()
         turbo_kv = self._chk_turbo_kv.isChecked() and self._chk_turbo_kv.isEnabled()
         use_ngram = self._chk_ngram.isChecked() and self._chk_ngram.isEnabled()
+        use_prompt_cache = (
+            self._chk_prompt_cache.isChecked() and self._chk_prompt_cache.isEnabled()
+        )
 
         W = 64
         bar = "─" * W
@@ -2445,6 +2618,15 @@ class MainWindow(QMainWindow):
             lines.append(f"Draft   : {self._current_draft.name}  [{drf}]")
         if use_ngram:
             lines.append("n-gram  : ngram-mod (self-speculative)  [✓]")
+        # Prompt caching: only meaningful when NOT using vision (mtmd
+        # incompatibility), so show ✓ when active, and a note when vision
+        # has forced it off.
+        if use_vision:
+            lines.append("Prompt$ : off (unavailable while Vision active)")
+        else:
+            lines.append(
+                f"Prompt$ : host-RAM cache (-cram)  [{'✓' if use_prompt_cache else '✗'}]"
+            )
         if profile.server_binary:
             lines.append(f"Requires: {profile.server_binary}")
         lines.append(bar)
@@ -2780,34 +2962,174 @@ class MainWindow(QMainWindow):
         return resolved
 
     # ------------------------------------------------------------------
-    # Server control
+    # Multi-server helpers
     # ------------------------------------------------------------------
-    def _port_in_use(self, host: str, port: int) -> bool:
-        """True if a tracked instance already owns this port, or the OS
-        reports it bound (another process — e.g. a server we didn't start)."""
-        for srv in self._servers:
-            if srv.port == port and srv.is_running():
-                return True
-        probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((probe_host, port))
-                return False
-            except OSError:
-                return True
+    def _prune_dead_servers(self) -> None:
+        """Drop entries whose process has exited from the registry.
 
-    def _next_free_port(self, host: str, start: int) -> int:
-        """First free port at or above `start` (caps the search so a fully
-        occupied range can't spin forever)."""
-        port = max(1, start)
-        for _ in range(200):
-            if not self._port_in_use(host, port):
+        Keeping this tidy is what makes the port counter "reset": the next
+        port is always base_port + number-of-LIVE servers, so when a
+        llama-server is stopped or crashes its port becomes available again.
+        """
+        live = []
+        for s in self._servers:
+            proc = s.get("proc")
+            if proc is not None and proc.is_running():
+                live.append(s)
+        self._servers = live
+
+    def _next_free_port(self, host: str, base: int) -> int:
+        """Return the lowest base+N not used by a live server or another app.
+
+        Walks base, base+1, base+2… skipping ports already claimed by one
+        of our running servers AND ports an unrelated process is listening
+        on (so we never collide with something outside the AutoTuner).
+        """
+        import socket
+
+        used = {int(s.get("port", -1)) for s in self._servers}
+
+        def _port_busy(p: int) -> bool:
+            if p in used:
+                return True
+            # Probe: can we bind? If not, something else holds it.
+            probe_host = "127.0.0.1" if host in ("0.0.0.0", "") else host
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+                sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sk.bind((probe_host, p))
+                    return False
+                except OSError:
+                    return True
+
+        port = base
+        # Cap the search so a misconfigured host can't loop forever.
+        for _ in range(64):
+            if not _port_busy(port):
                 return port
             port += 1
-        return start
+        return base  # give up gracefully — caller still tries
 
+    def _choose_gpu_for_launch(
+        self, cfg: TunedConfig, entry: ModelEntry
+    ) -> Tuple[Optional[object], Optional[str]]:
+        """Pick which GPU a new server should target, given live VRAM use.
+
+        Returns ``(gpu_or_None, refusal_message_or_None)``.
+
+        Re-detects hardware so the free-VRAM figures reflect models that
+        earlier launches already loaded (the OS reports the real residency,
+        not our estimate). Then:
+          * estimates this model's GPU footprint (weights on GPU + KV in
+            VRAM + vision + draft),
+          * picks the GPU with the most free VRAM that can still hold it,
+          * if none can, returns a human-readable refusal so the caller can
+            stop and tell the user instead of piling onto a full card.
+
+        On single-GPU / CPU-only systems it returns ``(None, None)`` — the
+        existing tensor-split / env logic in compute_config already handles
+        placement and there is nothing to balance.
+        """
+        # Re-detect so "free" reflects already-loaded servers.
+        try:
+            fresh = detect_system()
+            if fresh is not None and fresh.gpus:
+                self._system = fresh
+        except Exception as exc:
+            self._log(f"[Balance] Live GPU re-detect failed ({exc}); using cached info.")
+
+        sysinfo = self._system
+        if sysinfo is None or not sysinfo.gpus:
+            return None, None
+
+        # Footprint this model wants on a GPU. For MoE/hybrid the experts on
+        # CPU don't count; model_vram already excludes them. KV that lives in
+        # VRAM + vision + draft are all GPU-resident.
+        footprint_gb = (
+            float(cfg.estimated_model_vram_gb)
+            + float(cfg.kv_vram_gb)
+            + float(cfg.vision_vram_gb)
+            + float(cfg.draft_vram_gb)
+        )
+        # A little breathing room so we don't fill a card to the last MB.
+        SAFETY_GB = 1.0
+        need = footprint_gb + SAFETY_GB
+
+        # Single GPU: just check it fits; let existing logic place it.
+        if len(sysinfo.gpus) == 1:
+            g = sysinfo.gpus[0]
+            if g.free_vram_gb < need:
+                return None, (
+                    f"Not enough free VRAM on {g.name}: needs ≈{need:.1f} GB "
+                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom), "
+                    f"only {g.free_vram_gb:.1f} GB free.\n\n"
+                    "Stop a running server to free memory, or pick a smaller "
+                    "model / lower context."
+                )
+            return None, None
+
+        # Multi-GPU: choose the emptiest card that can hold the footprint.
+        # Sort by free VRAM descending; the first that fits wins.
+        ranked = sorted(sysinfo.gpus, key=lambda g: g.free_vram_mb, reverse=True)
+        for g in ranked:
+            if g.free_vram_gb >= need:
+                self._log(
+                    f"[Balance] Targeting {g.name} "
+                    f"({g.free_vram_gb:.1f} GB free ≥ {need:.1f} GB needed)."
+                )
+                return g, None
+
+        # Nothing fits on a single card. Report the fullest picture so the
+        # user understands why — this is the "tell me when it's full" case.
+        usage = "\n".join(
+            f"  • {g.name}: {g.free_vram_gb:.1f} / {g.total_vram_gb:.1f} GB free"
+            for g in sysinfo.gpus
+        )
+        return None, (
+            f"No GPU has enough free VRAM for this model.\n"
+            f"Needs ≈{need:.1f} GB on one card "
+            f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom).\n\n"
+            f"Current GPU usage:\n{usage}\n\n"
+            "Stop one of the running servers to free memory, or choose a "
+            "smaller model / lower context. (Splitting one model across both "
+            "cards is handled automatically by the AutoTuner, but a second "
+            "concurrent model still needs room on a single card.)"
+        )
+
+    def _pin_cfg_to_gpu(self, cfg: TunedConfig, gpu: object) -> None:
+        """Force this server's tensors onto a specific GPU via env vars.
+
+        Sets HIP_VISIBLE_DEVICES / GGML_VK_VISIBLE_DEVICES to the chosen
+        card's device index so a second/third concurrent model lands on the
+        emptier GPU instead of defaulting back onto the (full) primary.
+        Clears any tensor_split the single-GPU pin would conflict with.
+        """
+        hip_index = getattr(gpu, "hip_index", None)
+        name = getattr(gpu, "name", "?")
+        if hip_index is None:
+            self._log(
+                f"[Balance] {name} has no resolved device index; cannot hard-pin "
+                "— relying on tensor-split. Ensure vulkaninfo is reachable."
+            )
+            return
+        vis = str(hip_index)
+        cfg.env_overrides = dict(cfg.env_overrides or {})
+        cfg.env_overrides["HIP_VISIBLE_DEVICES"] = vis
+        cfg.env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis
+        # After remapping, the chosen card is the only visible device (idx 0).
+        cfg.main_gpu = 0
+        cfg.tensor_split = None
+        self._log(f"[Balance] Pinned to {name} (device {vis}).")
+
+    # ------------------------------------------------------------------
+    # Server control
+    # ------------------------------------------------------------------
     def _launch_server(self) -> None:
+        # Multi-server: we no longer refuse when one is already running.
+        # Prune any that have exited so the port counter and VRAM picture
+        # are current before we plan this launch.
+        self._prune_dead_servers()
+
         if self._current_entry is None:
             QMessageBox.warning(
                 self, "No model selected", "Click a model in the list first."
@@ -2827,6 +3149,9 @@ class MainWindow(QMainWindow):
         use_thinking = self._chk_thinking.isChecked() and self._chk_thinking.isEnabled()
         turbo_kv = self._chk_turbo_kv.isChecked() and self._chk_turbo_kv.isEnabled()
         use_ngram = self._chk_ngram.isChecked() and self._chk_ngram.isEnabled()
+        use_prompt_cache = (
+            self._chk_prompt_cache.isChecked() and self._chk_prompt_cache.isEnabled()
+        )
 
         # Build a copy of entry so we can control mmproj inclusion
         entry = copy.copy(self._current_entry)
@@ -2863,22 +3188,47 @@ class MainWindow(QMainWindow):
         # for static checkers (Pylance / mypy) that cannot prove this.
         assert cfg is not None
 
-        host = self._host_edit.text().strip() or "127.0.0.1"
-        try:
-            requested_port = int(self._port_edit.text().strip())
-        except ValueError:
-            requested_port = 1234
+        # ── Load-balancing across GPUs for a 2nd/3rd concurrent model ──
+        # When at least one server is already running, re-check live VRAM
+        # and steer this model onto the emptier card — or refuse outright
+        # if nothing has room. The first server (none running yet) keeps the
+        # AutoTuner's own placement so single-model multi-GPU splits still
+        # work as before.
+        if self._servers:
+            chosen_gpu, refusal = self._choose_gpu_for_launch(cfg, entry)
+            if refusal is not None:
+                self._log(f"[Balance] Launch refused — {refusal.splitlines()[0]}")
+                QMessageBox.warning(self, "Not enough free VRAM", refusal)
+                return
+            if chosen_gpu is not None:
+                self._pin_cfg_to_gpu(cfg, chosen_gpu)
+        else:
+            # First model: still verify it actually fits somewhere so the
+            # user gets a clear message instead of an opaque server crash.
+            _gpu, refusal = self._choose_gpu_for_launch(cfg, entry)
+            if refusal is not None:
+                # For a single multi-GPU-splittable model the per-card check
+                # can be over-strict, so only hard-refuse on single-GPU /
+                # CPU systems; otherwise warn and let the split proceed.
+                if self._system and len(self._system.gpus) <= 1:
+                    self._log(f"[Balance] Launch refused — {refusal.splitlines()[0]}")
+                    QMessageBox.warning(self, "Not enough free VRAM", refusal)
+                    return
+                self._log(
+                    "[Balance] First model may not fit on a single card; "
+                    "letting the AutoTuner split it across GPUs."
+                )
 
-        # Auto-advance off any port that's already taken (by one of our own
-        # instances or by an unrelated process) so a second/third Launch never
-        # collides with a running server. The chosen port is what we bake into
-        # the command, log, and track — and we bump the field to the next free
-        # port so the next Launch defaults to a fresh endpoint.
-        port = self._next_free_port(host, requested_port)
-        if port != requested_port:
-            self._log(
-                f"[AutoTuner] Port {requested_port} busy — using {port} instead."
-            )
+        host = self._host_edit.text().strip() or "127.0.0.1"
+        # Auto-assign the port: base + number of live servers, skipping any
+        # port already taken. The Port field shows the *base*; the actual
+        # port used is computed here so 0 servers → 1234, 1 → 1235, etc.
+        try:
+            base_port = int(self._port_edit.text().strip())
+        except ValueError:
+            base_port = self._base_port
+        self._base_port = base_port
+        port = self._next_free_port(host, base_port + len(self._servers))
 
         server_binary = self._resolve_binary(profile, use_draft, entry.name)
         # Clean alias so RooCode/clients show a readable name, not the file path
@@ -2898,13 +3248,19 @@ class MainWindow(QMainWindow):
             # also flip enable_speculative off to actually suppress the MTP path.
             enable_speculative=use_draft,
             enable_ngram=use_ngram,
+            enable_prompt_cache=use_prompt_cache,
         )
 
         self._log("\n" + "─" * 60)
         self._log(f"Starting: {' '.join(cmd)}")
         self._log(
             f"Options : vision={use_vision} draft={use_draft} thinking={use_thinking} "
-            f"ngram={use_ngram} mode={self._current_mode()}"
+            f"ngram={use_ngram} prompt_cache={use_prompt_cache} "
+            f"mode={self._current_mode()}"
+        )
+        self._log(
+            f"Server  : #{len(self._servers) + 1}  port {port}  "
+            f"({len(self._servers)} already running)"
         )
         if cfg.env_overrides:
             for k, v in cfg.env_overrides.items():
@@ -2918,156 +3274,166 @@ class MainWindow(QMainWindow):
             self._log("  → Check fork selection or set LLAMA_CPP_DIR / LLAMA_SERVER")
             return
 
-        srv = _RunningServer(proc, host, port, alias)
-        self._servers.append(srv)
-
-        self._log(f"[AutoTuner] Server started — PID: {srv.pid}")
+        pid = proc.proc.pid if proc.proc else "?"
+        base_url = f"http://{host}:{port}"
+        self._log(f"[AutoTuner] Server started — PID: {pid}")
         self._log("[AutoTuner] Server output → separate terminal window")
-        self._log(f"[AutoTuner] Web UI → {srv.base_url}")
+        self._log(f"[AutoTuner] Web UI → {base_url}")
 
-        # Suggest the next free port so the following Launch lands on a fresh
-        # endpoint without the user touching the field — exactly what spawning
-        # several subagent models in a row needs.
-        self._port_edit.setText(str(self._next_free_port(host, port + 1)))
+        # Register the new server. `_server`/`_server_base_url` always point
+        # at the MOST RECENT launch so the existing status/health code keeps
+        # working unchanged; the registry holds every live instance.
+        record = {
+            "proc": proc,
+            "port": port,
+            "base_url": base_url,
+            "ready": False,
+            "model": entry.name,
+            "gpu": None,
+            "vram_gb": float(cfg.estimated_model_vram_gb) + float(cfg.kv_vram_gb),
+        }
+        self._servers.append(record)
+        self._server = proc
+        self._server_base_url = base_url
+        self._server_ready = False
 
-        # Launch stays enabled — more instances are allowed. Refresh the
-        # running-servers combo + stop buttons + status line. The per-instance
-        # /health latch flips from "loading" to "ready" in _poll_server.
-        self._refresh_server_combo(select_port=port)
-        self._update_server_controls()
+        # Stop is enabled whenever ≥1 server runs; Launch stays enabled so the
+        # user can fire up another model on the next port.
+        self._btn_launch.setEnabled(True)
+        self._btn_stop.setEnabled(True)
         self._status.showMessage(
-            f"Loading {alias} — PID {srv.pid} — {srv.base_url}  "
-            f"({len(self._servers)} running)"
+            f"Loading model — PID {pid} — {base_url}  "
+            f"({len(self._servers)} server(s) running)"
         )
 
-    # ------------------------------------------------------------------
-    # Running-instance helpers
-    # ------------------------------------------------------------------
-    def _selected_server(self) -> Optional[_RunningServer]:
-        """The _RunningServer currently chosen in the combo, if any."""
-        idx = self._server_combo.currentIndex()
-        if idx < 0:
-            return None
-        port = self._server_combo.itemData(idx)
-        for srv in self._servers:
-            if srv.port == port:
-                return srv
-        return None
+    def _stop_server(self) -> None:
+        """Stop the most-recently-launched server.
 
-    def _refresh_server_combo(self, select_port: Optional[int] = None) -> None:
-        """Rebuild the running-servers combo from the registry.
-
-        Preserves the current selection across rebuilds (the poll timer
-        rebuilds it on every tick to refresh the loading/ready label), or
-        selects `select_port` when a specific instance should be focused.
+        Removes it from the registry so its port is reclaimed (the counter
+        "resets" — the next launch reuses the freed port). Disables Stop only
+        once the last server is gone.
         """
-        keep = select_port
-        if keep is None:
-            cur = self._server_combo.currentData()
-            if cur is not None:
-                keep = cur
-
-        self._server_combo.blockSignals(True)
-        self._server_combo.clear()
-        for srv in self._servers:
-            self._server_combo.addItem(srv.combo_label(), srv.port)
-        if keep is not None:
-            i = self._server_combo.findData(keep)
-            if i >= 0:
-                self._server_combo.setCurrentIndex(i)
-        self._server_combo.blockSignals(False)
-
-    def _update_server_controls(self) -> None:
-        any_running = len(self._servers) > 0
-        self._btn_stop.setEnabled(any_running)
-        self._btn_stop_all.setEnabled(any_running)
-        self._server_combo.setEnabled(any_running)
-
-    def _stop_one(self, srv: _RunningServer) -> None:
-        """Stop a single instance and drop it from the registry."""
-        self._log(f"[AutoTuner] Stopping :{srv.port} ({srv.label})…")
-        try:
-            self._servers.remove(srv)
-        except ValueError:
-            pass
-        srv.proc.stop()  # sends signal + waits in daemon thread
-        self._refresh_server_combo()
-        self._update_server_controls()
-
-    def _stop_selected_server(self) -> None:
-        srv = self._selected_server()
-        if srv is None:
+        self._prune_dead_servers()
+        if not self._servers:
+            self._server = None
+            self._server_base_url = None
+            self._server_ready = False
+            self._btn_stop.setEnabled(False)
+            self._btn_launch.setEnabled(True)
             return
-        self._stop_one(srv)
-        n = len(self._servers)
-        self._status.showMessage(
-            "All servers stopped." if n == 0 else f"Server stopped. ({n} running)"
+
+        record = self._servers.pop()  # most recent
+        srv = record.get("proc")
+        self._log(
+            f"[AutoTuner] Stopping server on port {record.get('port')} "
+            f"({record.get('model')})…"
         )
+        if srv is not None:
+            srv.stop()  # sends signal + waits in daemon thread
+
+        # Re-point the "current" server at whatever is still running (if any).
+        if self._servers:
+            top = self._servers[-1]
+            self._server = top.get("proc")
+            self._server_base_url = top.get("base_url")
+            self._server_ready = bool(top.get("ready"))
+            self._btn_stop.setEnabled(True)
+            self._status.showMessage(
+                f"Server stopped — {len(self._servers)} still running."
+            )
+        else:
+            self._server = None
+            self._server_base_url = None
+            self._server_ready = False
+            self._btn_stop.setEnabled(False)
+            self._status.showMessage("Server stopped.")
+        self._btn_launch.setEnabled(True)
+        self._log("[AutoTuner] Stop signal sent.")
 
     def _stop_all_servers(self) -> None:
-        if not self._servers:
-            return
-        self._log("[AutoTuner] Stopping all servers…")
-        for srv in list(self._servers):
-            srv.proc.stop()
-        self._servers.clear()
-        self._refresh_server_combo()
-        self._update_server_controls()
-        self._status.showMessage("All servers stopped.")
+        """Stop every running server (used on quit)."""
+        for record in self._servers:
+            srv = record.get("proc")
+            if srv is not None:
+                try:
+                    srv.stop()
+                except Exception:
+                    pass
+        self._servers = []
+        self._server = None
+        self._server_base_url = None
+        self._server_ready = False
 
     # ------------------------------------------------------------------
-    # Server crash detection + readiness polling (all instances)
+    # Server crash detection
     # ------------------------------------------------------------------
     def _poll_server(self) -> None:
         if not self._servers:
             return
 
-        import urllib.request
-
-        changed = False  # combo label / registry membership changed this tick
-
-        for srv in list(self._servers):
-            # ── Liveness: catch crashes / clean exits ──────────────────
-            if not srv.is_running():
-                code = srv.returncode()
-                self._servers.remove(srv)
+        # Detect any server that exited (crash or external close). Removing it
+        # frees its port for reuse — this is what makes the counter reset when
+        # a llama-server is terminated.
+        still_live: List[dict] = []
+        for record in self._servers:
+            proc = record.get("proc")
+            if proc is not None and proc.is_running():
+                still_live.append(record)
+            else:
+                code = proc.returncode() if proc is not None else None
                 self._log(
-                    f"[AutoTuner] :{srv.port} ({srv.label}) exited (code {code})."
+                    f"[AutoTuner] Server on port {record.get('port')} "
+                    f"({record.get('model')}) exited (code {code})."
                 )
-                changed = True
-                continue
+        if len(still_live) != len(self._servers):
+            self._servers = still_live
+            if self._servers:
+                top = self._servers[-1]
+                self._server = top.get("proc")
+                self._server_base_url = top.get("base_url")
+                self._server_ready = bool(top.get("ready"))
+                self._btn_stop.setEnabled(True)
+                self._status.showMessage(
+                    f"{len(self._servers)} server(s) running."
+                )
+            else:
+                self._server = None
+                self._server_base_url = None
+                self._server_ready = False
+                self._btn_stop.setEnabled(False)
+                self._status.showMessage("Server exited.")
+            self._btn_launch.setEnabled(True)
 
-            # ── Readiness: probe /health until the first 200, then latch.
-            # 503 while loading, 200 once the model is ready. Big MoE models
-            # can take a while to load (or fail mid graph-build), so we don't
-            # claim "ready" the instant the PID exists.
-            if srv.ready:
+        # Health-probe any not-yet-ready server so its status flips to Ready.
+        for record in self._servers:
+            if record.get("ready"):
+                continue
+            base_url = record.get("base_url")
+            if not base_url:
                 continue
             try:
-                with urllib.request.urlopen(
-                    f"{srv.base_url}/health", timeout=0.3
-                ) as resp:
-                    is_ready = resp.status == 200
-            except Exception:
-                # 503 (HTTPError), connection refused, or any transient error
-                # all mean "not ready yet" — keep showing the loading state.
-                is_ready = False
-            if is_ready:
-                srv.ready = True
-                changed = True
-                self._log(f"[AutoTuner] :{srv.port} ready (/health → 200).")
+                import urllib.request
 
-        if changed:
-            self._refresh_server_combo()
-            self._update_server_controls()
-            n = len(self._servers)
-            ready = sum(1 for s in self._servers if s.ready)
-            if n == 0:
-                self._status.showMessage("No servers running.")
-            else:
-                self._status.showMessage(
-                    f"{n} server(s) running — {ready} ready."
+                with urllib.request.urlopen(
+                    f"{base_url}/health", timeout=0.3
+                ) as resp:
+                    ready = resp.status == 200
+            except Exception:
+                ready = False
+            if ready:
+                record["ready"] = True
+                proc = record.get("proc")
+                pid = proc.proc.pid if proc is not None and proc.proc else "?"
+                self._log(
+                    f"[AutoTuner] Server ready (/health → 200) — "
+                    f"port {record.get('port')}."
                 )
+                if record is self._servers[-1]:
+                    self._server_ready = True
+                    self._status.showMessage(
+                        f"Ready — PID {pid} — {base_url}  "
+                        f"({len(self._servers)} server(s) running)"
+                    )
 
     # ------------------------------------------------------------------
     # Log helper
@@ -3121,12 +3487,13 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
 
-        running = [s for s in self._servers if s.is_running()]
-        if running:
+        self._prune_dead_servers()
+        if self._servers:
+            n = len(self._servers)
             reply = QMessageBox.question(
                 self,
                 "Servers still running",
-                f"Stop {len(running)} running server(s) and quit?",
+                f"Stop {n} running server(s) and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
