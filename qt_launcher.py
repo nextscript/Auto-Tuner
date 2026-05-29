@@ -1409,6 +1409,7 @@ class MainWindow(QMainWindow):
         # ── Log panel ──────────────────────────────────────────────────
         self._log_panel = QTextEdit()
         self._log_panel.setReadOnly(True)
+        self._log_panel.setMinimumHeight(0)
         self._apply_mono_font(self._log_panel)
         self._log_panel.setPlaceholderText(
             "AutoTuner status messages appear here.\n"
@@ -1417,10 +1418,13 @@ class MainWindow(QMainWindow):
 
         main_split = QSplitter(Qt.Orientation.Vertical)
         main_split.setObjectName("main_split")
-        main_split.setChildrenCollapsible(False)
+        main_split.setChildrenCollapsible(True)
         main_split.addWidget(top_split)
         main_split.addWidget(self._log_panel)
         main_split.setSizes([560, 240])
+
+        # Prevent the top half from collapsing; only the log panel should be hideable.
+        top_split.setMinimumHeight(400)
 
         # Keep references so the inner pane arrangement can be persisted /
         # restored independently of the outer window geometry (QMainWindow
@@ -1446,6 +1450,14 @@ class MainWindow(QMainWindow):
             "a server frees its port for reuse."
         )
         bl.addWidget(self._port_edit)
+
+        bl.addWidget(QLabel(" Offset:"))
+        self._port_offset_combo = QComboBox()
+        self._port_offset_combo.setFixedWidth(60)
+        self._port_offset_combo.setToolTip("Manual port offset added to base + running servers.")
+        for i in range(11):  # 0 to 10
+            self._port_offset_combo.addItem(str(i))
+        bl.addWidget(self._port_offset_combo)
 
         bl.addStretch()
 
@@ -2299,23 +2311,15 @@ class MainWindow(QMainWindow):
         self._populate_mmproj_combo(entry, ov)
 
         # ── Prompt caching (host RAM, -cram) ────────────────────────
-        # Supported on every NON-vision model (the feature is incompatible
-        # with the multimodal/mtmd path). Auto-ON by default where
-        # supported; per-model override remembered. When the *effective*
-        # vision state is on, the box is force-disabled + unchecked because
-        # llama-server cannot cache prompts while vision is loaded.
-        vision_effectively_on = self._chk_vision.isChecked() and self._chk_vision.isEnabled()
-        pc_supported = not vision_effectively_on
+        # Traditionally, prompt caching was considered incompatible with the 
+        # multimodal/mtmd path. We now allow the user to toggle it anyway; 
+        # if the specific llama-server build refuses it, the server will 
+        # report an error in its terminal window.
         pc_state = ov["prompt_cache"] if "prompt_cache" in ov else True
         self._chk_prompt_cache.blockSignals(True)
-        self._chk_prompt_cache.setEnabled(pc_supported)
-        self._chk_prompt_cache.setChecked(pc_supported and pc_state)
-        if not pc_supported:
-            self._chk_prompt_cache.setText(
-                "Prompt caching (unavailable — Vision active)"
-            )
-        else:
-            self._chk_prompt_cache.setText("Prompt caching (host RAM, -cram)")
+        self._chk_prompt_cache.setEnabled(True)
+        self._chk_prompt_cache.setChecked(pc_state)
+        self._chk_prompt_cache.setText("Prompt caching (host RAM, -cram)")
         self._chk_prompt_cache.blockSignals(False)
 
     def _populate_mmproj_combo(self, entry: ModelEntry, ov: dict) -> None:
@@ -2618,15 +2622,11 @@ class MainWindow(QMainWindow):
             lines.append(f"Draft   : {self._current_draft.name}  [{drf}]")
         if use_ngram:
             lines.append("n-gram  : ngram-mod (self-speculative)  [✓]")
-        # Prompt caching: only meaningful when NOT using vision (mtmd
-        # incompatibility), so show ✓ when active, and a note when vision
-        # has forced it off.
-        if use_vision:
-            lines.append("Prompt$ : off (unavailable while Vision active)")
-        else:
-            lines.append(
-                f"Prompt$ : host-RAM cache (-cram)  [{'✓' if use_prompt_cache else '✗'}]"
-            )
+        
+        lines.append(
+            f"Prompt$ : host-RAM cache (-cram)  [{'✓' if use_prompt_cache else '✗'}]"
+            + (" (may conflict with Vision)" if use_vision else "")
+        )
         if profile.server_binary:
             lines.append(f"Requires: {profile.server_binary}")
         lines.append(bar)
@@ -3220,7 +3220,7 @@ class MainWindow(QMainWindow):
                 )
 
         host = self._host_edit.text().strip() or "127.0.0.1"
-        # Auto-assign the port: base + number of live servers, skipping any
+        # Auto-assign the port: base + offset + number of live servers, skipping any
         # port already taken. The Port field shows the *base*; the actual
         # port used is computed here so 0 servers → 1234, 1 → 1235, etc.
         try:
@@ -3228,7 +3228,14 @@ class MainWindow(QMainWindow):
         except ValueError:
             base_port = self._base_port
         self._base_port = base_port
-        port = self._next_free_port(host, base_port + len(self._servers))
+
+        try:
+            offset = int(self._port_offset_combo.currentText())
+        except (ValueError, AttributeError):
+            offset = 0
+
+        start_port = base_port + offset + len(self._servers)
+        port = self._next_free_port(host, start_port)
 
         server_binary = self._resolve_binary(profile, use_draft, entry.name)
         # Clean alias so RooCode/clients show a readable name, not the file path
@@ -3259,7 +3266,8 @@ class MainWindow(QMainWindow):
             f"mode={self._current_mode()}"
         )
         self._log(
-            f"Server  : #{len(self._servers) + 1}  port {port}  "
+            f"Server  : #{len(self._servers) + 1}  requested port {start_port} "
+            f"→ assigned port {port}  "
             f"({len(self._servers)} already running)"
         )
         if cfg.env_overrides:
