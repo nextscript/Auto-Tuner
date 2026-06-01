@@ -1372,7 +1372,13 @@ def compute_config(
     if has_gpu and len(system.gpus) > 1 and primary_gpu is not None:
         primary_pos = system.gpus.index(primary_gpu)
         hip_known = all(g.hip_index is not None for g in system.gpus)
-        is_moe_cfg = n_cpu_moe is not None
+        # An MoE that fits entirely on the GPUs returns n_cpu_moe=None +
+        # full_off=True, so "n_cpu_moe is not None" would mis-classify it as
+        # dense and route it through the priority-weighted spread — leaving
+        # the secondary card half-empty. Use the architectural is_moe flag
+        # (combined with has_gpu) so EVERY MoE that spreads uses the
+        # capacity-fill strategy, whether or not any experts spilled to CPU.
+        is_moe_cfg = is_moe and has_gpu
 
         # Per-card usable VRAM cap (GB). Keep a little headroom so the card
         # never runs bone-dry: 2 GB on the primary, 3 GB on secondaries
@@ -1394,14 +1400,16 @@ def compute_config(
         # even when their theoretical max-KV footprint exceeds the cap.
         model_footprint_gb = model_vram + vision_vram_gb + draft_vram_gb
 
-        # MoE: experts already spilled to CPU via --n-cpu-moe, so model_vram is
-        # the GPU-resident portion. Pin to primary ONLY if it fits; otherwise
-        # allow distribution across all GPUs to utilise the full VRAM pool.
-        # Dense: pin when the model weights fit the primary cap.
-        if is_moe_cfg:
-            pin_to_primary = model_footprint_gb <= primary_cap
-        else:
-            pin_to_primary = model_footprint_gb <= primary_cap
+        # Pin the whole model to the primary GPU when its GPU-resident
+        # weight footprint fits the primary's usable cap. This holds for
+        # both dense (all weights) and MoE (weights minus any CPU-spilled
+        # experts) — in both cases model_vram is exactly the portion that
+        # must live in GPU memory, so the single comparison is correct.
+        # KV is intentionally excluded here: it is allocated dynamically
+        # and capped downstream, so a model whose weights fit should pin to
+        # the primary even if its theoretical max-KV would not, keeping the
+        # secondary GPU free.
+        pin_to_primary = model_footprint_gb <= primary_cap
 
         if pin_to_primary:
             if hip_known:
@@ -1423,10 +1431,25 @@ def compute_config(
                 tensor_split = ",".join(parts)
                 main_gpu = primary_pos
         else:
-            # Spread: priority-weighted allocation across GPUs.
-            # The resulting per-GPU GB amounts are turned into tensor_split
-            # fractions (proportions of the whole model). llama.cpp distributes
-            # BOTH weights and KV by these fractions.
+            # ---- Spread across GPUs -------------------------------------
+            # Two distinct strategies, because dense and MoE want opposite
+            # things from the second GPU:
+            #
+            #   • DENSE → priority-weighted. Keep the gaming GPU (low
+            #     priority) as free as possible for OBS/desktop; push the
+            #     bulk of the weights onto the high-priority AI card. A
+            #     half-empty secondary is FINE here — the model runs fully
+            #     on GPU either way, and the user wants the headroom.
+            #
+            #   • MoE → capacity-fill. Every expert layer that sits in VRAM
+            #     instead of spilling to CPU (--n-cpu-moe) is a large speed
+            #     win, so when an MoE has to use both cards we want them BOTH
+            #     as full as possible. Priority-weighting here was Basti's
+            #     reported bug: it left several GB unused on the secondary,
+            #     forcing extra layers onto the CPU and slowing the MoE down.
+            #     We therefore distribute proportionally to each card's
+            #     USABLE CAPACITY (not its priority), which fills both cards
+            #     evenly and minimises the CPU-resident expert count.
             ordered = sorted(
                 system.gpus,
                 key=lambda g: max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb,
@@ -1435,15 +1458,22 @@ def compute_config(
             caps = [_usable_cap_gb(g, g is primary_gpu) for g in ordered]
             total_cap = sum(caps)
 
-            # Priority-weighted allocation: each GPU gets a share proportional
-            # to its priority×VRAM score, capped by its usable cap.
-            scores = [max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb for g in ordered]
-            total_score = sum(scores)
+            if is_moe_cfg:
+                # Capacity-proportional weights — fill both cards in step so
+                # the model packs as tightly as the combined VRAM allows.
+                weights = list(caps)
+            else:
+                # Priority×VRAM weights — bias the high-priority AI card.
+                weights = [
+                    max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb for g in ordered
+                ]
+            total_weight = sum(weights)
 
-            # First pass: allocate proportionally by score, respecting caps.
+            # First pass: allocate proportionally by the chosen weighting,
+            # respecting each card's usable cap.
             alloc: List[float] = []
             for i, cap in enumerate(caps):
-                proportion = scores[i] / total_score if total_score > 0 else 0
+                proportion = weights[i] / total_weight if total_weight > 0 else 0
                 alloc.append(min(cap, model_footprint_gb * proportion))
 
             # Second pass: if there's remaining footprint, distribute it
@@ -1525,13 +1555,56 @@ def compute_config(
         # Old flat format: every mode shares the same sampling block.
         sd = {k: v for k, v in raw_sampling.items() if not isinstance(v, dict)}
 
+    # ---- Sampling source priority ------------------------------------
+    # Per field, highest priority wins:
+    #   1. An explicit value in a MATCHED profile (non-empty patterns) —
+    #      Basti hand-tuned these, so a real family profile always wins.
+    #   2. The model author's GGUF recommendation (general.sampling.*),
+    #      read via ModelEntry.recommended_sampling. This is what fixes
+    #      loops / broken tool-calls on models that hit only the generic
+    #      fallback profile: e.g. Qwen3.6 ships top_k 20 / temp 1.0, but
+    #      _default.yaml would otherwise force top_k 40 / temp 0.7.
+    #   3. The hard-coded generic default (last resort).
+    #
+    # The fallback profile (_default.yaml or the builtin) has EMPTY
+    # patterns. Its values are treated as soft: GGUF metadata outranks
+    # them. A matched profile's values are hard and outrank GGUF.
+    gguf_sampling = model.recommended_sampling  # subset, may be empty
+    profile_is_fallback = not profile.patterns
+
+    _DEFAULTS = {
+        "temperature": 0.7,
+        "top_k": 40.0,
+        "top_p": 0.9,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "presence_penalty": 0.0,
+    }
+
+    def _resolve_sampling(field_name: str) -> float:
+        profile_val = sd.get(field_name)
+        gguf_val = gguf_sampling.get(field_name)
+        if profile_is_fallback:
+            # Soft profile: GGUF first, then profile (≈ default), then default.
+            if gguf_val is not None:
+                return gguf_val
+            if profile_val is not None:
+                return float(profile_val)
+        else:
+            # Matched profile: explicit profile value first, then GGUF, then default.
+            if profile_val is not None:
+                return float(profile_val)
+            if gguf_val is not None:
+                return gguf_val
+        return _DEFAULTS[field_name]
+
     sampling = {
-        "temperature": float(sd.get("temperature", 0.7)),
-        "top_k": int(sd.get("top_k", 40)),
-        "top_p": float(sd.get("top_p", 0.9)),
-        "min_p": float(sd.get("min_p", 0.05)),
-        "repeat_penalty": float(sd.get("repeat_penalty", 1.05)),
-        "presence_penalty": float(sd.get("presence_penalty", 0.0)),
+        "temperature": float(_resolve_sampling("temperature")),
+        "top_k": int(_resolve_sampling("top_k")),
+        "top_p": float(_resolve_sampling("top_p")),
+        "min_p": float(_resolve_sampling("min_p")),
+        "repeat_penalty": float(_resolve_sampling("repeat_penalty")),
+        "presence_penalty": float(_resolve_sampling("presence_penalty")),
     }
 
     # no_context_shift für bessere Performance bei grossen Kontexten aktivieren

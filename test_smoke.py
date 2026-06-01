@@ -72,6 +72,7 @@ def test_all_profiles_load() -> None:
         ("Devstral-Small-2-24B-Instruct-2512-Q3_K_L", "Devstral (Mistral, code)"),
         ("Ministral-3-14B-Reasoning-2512-Q6_K", "Ministral 3 (Mistral, reasoning)"),
         ("Mistral-Medium-3.5-128B-UD-IQ3_XXS", "Mistral Medium 3.x"),
+        ("m51Lab-MiniMax-M2.7-REAP-139B-A10B.i1-IQ3_M", "MiniMax-M2 (MiniMaxAI)"),
         ("Bonsai-8B", "Bonsai 8B (PrismML, 1-bit)"),
         ("Ternary-Bonsai-8B-Q2_0", "Ternary-Bonsai (PrismML, 1.58-bit)"),
         ("Archon-14B.Q6_K", "Frankenmerger / community merge"),
@@ -1261,3 +1262,210 @@ def test_thinking_detection_excludes_qwen3_2507_instruct() -> None:
         metadata_supports_thinking(md_with_think, "Qwen3-7B-Instruct-2507-Q6_K")
         is False
     )
+
+
+# ---------------------------------------------------------------------------
+# mmproj detection — token-anywhere + .mmproj extension (regression guards)
+
+
+def test_mmproj_token_detected_mid_name(tmp_path) -> None:
+    """A projector whose 'mmproj' marker sits mid-name (after the quant
+    label) must still be classified as a projector and paired with its
+    model. Regression for qwen3.6-…-mxfp4-moe-mmproj-f16.gguf, which the
+    old prefix-only check ('mmproj-' / 'mmproj_') missed entirely."""
+    folder = tmp_path / "Alibaba" / "Abliterated"
+    _write_minimal_gguf(folder / "qwen3.6-35b-a3b-mxfp4_moe.gguf")
+    _write_minimal_gguf(folder / "qwen3.6-35b-a3b-mxfp4-moe-mmproj-f16.gguf")
+
+    entries = scan_models(tmp_path)
+    # Only the model is a choosable entry; the projector is attached.
+    assert len(entries) == 1, [e.name for e in entries]
+    model = entries[0]
+    assert model.name == "qwen3.6-35b-a3b-mxfp4_moe"
+    assert model.has_vision, "mid-name mmproj projector was not paired"
+    assert model.mmproj is not None
+    assert model.mmproj.name == "qwen3.6-35b-a3b-mxfp4-moe-mmproj-f16.gguf"
+
+
+def test_mmproj_extension_file_is_paired(tmp_path) -> None:
+    """A projector saved with a literal '.mmproj' extension (e.g. some
+    audio projectors) is not matched by the '*.gguf' glob; the scanner
+    must pick it up via the dedicated '*.mmproj' pass and attach it."""
+    folder = tmp_path / "Liquid AI"
+    _write_minimal_gguf(folder / "LFM2.5-Audio-1.5B-bf16.gguf")
+    # ".mmproj" extension projector (content irrelevant — never parsed as model)
+    (folder).mkdir(parents=True, exist_ok=True)
+    (folder / "LFM2.5-Audio-1.5B-f32.mmproj").write_bytes(b"GGUF")
+
+    entries = scan_models(tmp_path)
+    assert len(entries) == 1, [e.name for e in entries]
+    model = entries[0]
+    assert model.has_vision, ".mmproj-extension projector was not paired"
+    assert model.mmproj is not None
+    assert model.mmproj.name.endswith(".mmproj")
+
+
+def test_mmproj_pairing_still_size_specific(tmp_path) -> None:
+    """The looser (bidirectional, separator-tolerant) matcher must NOT
+    let a model grab a projector for a different size in the same dir."""
+    folder = tmp_path / "X"
+    _write_minimal_gguf(folder / "Qwen3.5-2B-Q8_0.gguf")
+    _write_minimal_gguf(folder / "mmproj-Qwen3.5-0.8B-BF16.gguf")
+    entries = scan_models(tmp_path)
+    by_name = {e.name: e for e in entries}
+    # The 2B model must NOT be paired with the 0.8B projector.
+    assert by_name["Qwen3.5-2B-Q8_0"].mmproj is None
+
+
+# ---------------------------------------------------------------------------
+# GGUF sampling metadata fallback (loops / tool-call fix)
+
+
+def _fake_model_md(tmp_path, name, size_gb, metadata):
+    """Like _fake_model but attaches GGUF metadata."""
+    from scanner import ModelEntry
+
+    p = tmp_path / f"{name}.gguf"
+    _write_minimal_gguf(p)
+    return ModelEntry(
+        path=p,
+        name=name,
+        group=".",
+        size_bytes=int(size_gb * 1024**3),
+        metadata=metadata,
+    )
+
+
+def test_metadata_sampling_reader() -> None:
+    """general.sampling.* keys are read and typed correctly."""
+    from scanner import metadata_sampling
+
+    md = {
+        "general.sampling.temp": 1.0,
+        "general.sampling.top_k": 20,
+        "general.sampling.top_p": 0.95,
+    }
+    s = metadata_sampling(md)
+    assert s["temperature"] == 1.0
+    assert s["top_k"] == 20.0
+    assert s["top_p"] == 0.95
+    assert "min_p" not in s  # absent key stays absent
+    # Empty / missing metadata yields an empty dict, never raises.
+    assert metadata_sampling({}) == {}
+
+
+def test_gguf_sampling_used_when_profile_is_fallback(tmp_path) -> None:
+    """A model that matches only the generic fallback profile must adopt
+    the author-recommended GGUF samplers instead of the generic defaults.
+    This is the loop / broken-tool-call fix for unprofiled models: any
+    GGUF that ships general.sampling.* but has no tailored YAML profile."""
+    profiles = load_profiles(SETTINGS_DIR)
+    md = {
+        "general.architecture": "llama",
+        "llama.block_count": 32,
+        "general.sampling.temp": 1.0,
+        "general.sampling.top_k": 40,
+        "general.sampling.top_p": 0.95,
+    }
+    # A name no shipped profile pattern matches → fallback profile.
+    model = _fake_model_md(tmp_path, "SomeUnprofiledFinetune-13B-Q6_K", 13.0, md)
+    profile = match_profile(model.name, profiles)
+    assert not profile.patterns, "expected the fallback profile for this name"
+    cfg = compute_config(model, _fake_system(), profile)
+    assert cfg.sampling["temperature"] == 1.0
+    assert cfg.sampling["top_p"] == 0.95
+
+
+def test_matched_profile_wins_over_gguf_sampling(tmp_path) -> None:
+    """When a real family profile matches, its explicit sampler values
+    take precedence over the GGUF recommendation (Basti hand-tuned these)."""
+    profiles = load_profiles(SETTINGS_DIR)
+    md = {
+        "general.architecture": "qwen35moe",
+        "qwen35moe.block_count": 40,
+        "qwen35moe.expert_count": 256,
+        # Deliberately absurd GGUF value that must be overridden.
+        "general.sampling.top_k": 99,
+    }
+    model = _fake_model_md(tmp_path, "Qwen3.6-35B-A3B-UD-Q6_K", 30.0, md)
+    profile = match_profile(model.name, profiles)
+    assert profile.patterns, "expected a matched (non-fallback) profile"
+    cfg = compute_config(model, _fake_system(), profile)
+    # qwen3_5-3_6.yaml sets top_k 20 for both chat and coding.
+    assert cfg.sampling["top_k"] == 20
+
+
+# ---------------------------------------------------------------------------
+# MoE multi-GPU capacity-fill (don't strand VRAM on the secondary card)
+
+
+def test_moe_spread_fills_both_gpus_by_capacity(tmp_path) -> None:
+    """An MoE too large for the primary alone must spread proportionally to
+    each card's usable capacity, NOT priority-weighted — so the secondary
+    GPU is filled to roughly the same utilisation as the primary. Stranding
+    several GB on the 9070 XT (the old priority-weighted behaviour) forced
+    extra expert layers onto the CPU and slowed the model down."""
+    profiles = load_profiles(SETTINGS_DIR)
+    md = {
+        "general.architecture": "qwen3moe",
+        "qwen3moe.block_count": 48,
+        "qwen3moe.expert_count": 128,
+        "qwen3moe.attention.head_count": 40,
+        "qwen3moe.attention.head_count_kv": 8,
+        "qwen3moe.attention.key_length": 128,
+        "qwen3moe.attention.value_length": 128,
+        "qwen3moe.embedding_length": 5120,
+    }
+    model = _fake_model_md(tmp_path, "BigMoE-40B-A10B-Q4", 40.0, md)
+    profile = match_profile(model.name, profiles)
+    prio = {
+        "AMD Radeon AI PRO R9700": 2,
+        "AMD Radeon RX 9070 XT": 1,
+    }
+    cfg = compute_config(
+        model, _fake_dual_gpu_system_with_vk_order(), profile, gpu_priorities=prio
+    )
+    assert cfg.tensor_split is not None, "expected a spread, got pin/None"
+    parts = [float(x) for x in cfg.tensor_split.split(",")]
+    assert len(parts) == 2
+    # Vulkan order: device 0 = 9070 XT (cap ~13 GB), device 1 = R9700 (cap ~30 GB).
+    xt_share, r97_share = parts[0], parts[1]
+    # Capacity-proportional shares: 13/43 ≈ 0.30 and 30/43 ≈ 0.70.
+    # The 9070 XT must get a MEANINGFUL share — well above the ~0.20 the
+    # old priority-weighting produced.
+    assert xt_share > 0.25, (
+        f"9070 XT under-filled (capacity-fill regressed): share={xt_share:.3f}"
+    )
+    # Sanity: the larger card still carries the larger share.
+    assert r97_share > xt_share
+
+
+def test_dense_spread_stays_priority_weighted(tmp_path) -> None:
+    """Dense models keep the priority-weighted split: the high-priority AI
+    card carries the bulk so the gaming GPU stays as free as possible. This
+    must NOT change to capacity-fill (that's MoE-only)."""
+    profiles = load_profiles(SETTINGS_DIR)
+    # Dense (no expert_count) 40 GB model — too big for the 32 GB primary.
+    md = {
+        "general.architecture": "llama",
+        "llama.block_count": 80,
+        "llama.attention.head_count": 64,
+        "llama.attention.head_count_kv": 8,
+        "llama.embedding_length": 8192,
+    }
+    model = _fake_model_md(tmp_path, "Dense-70B-Q4", 40.0, md)
+    profile = match_profile(model.name, profiles)
+    prio = {
+        "AMD Radeon AI PRO R9700": 2,
+        "AMD Radeon RX 9070 XT": 1,
+    }
+    cfg = compute_config(
+        model, _fake_dual_gpu_system_with_vk_order(), profile, gpu_priorities=prio
+    )
+    assert cfg.tensor_split is not None
+    parts = [float(x) for x in cfg.tensor_split.split(",")]
+    xt_share, r97_share = parts[0], parts[1]
+    # Priority×VRAM (2×32 vs 1×16) → R9700 ≥ ~0.75; 9070 XT ≤ ~0.25.
+    assert r97_share > 0.70, f"dense split not priority-weighted: r97={r97_share:.3f}"
+    assert xt_share < 0.30, f"dense split puts too much on the 9070 XT: {xt_share:.3f}"
+    

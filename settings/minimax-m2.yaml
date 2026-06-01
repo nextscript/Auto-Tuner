@@ -1,0 +1,67 @@
+display_name: "MiniMax-M2 (MiniMaxAI)"
+patterns:
+  - minimax-m2
+  - minimax-m2.7
+
+# MiniMax-M2 (2026): sparse MoE, 230B total / ~10B active (A10B), 154
+# experts, 8 active. The REAP-pruned community build in the tree is
+# "MiniMax-M2.7-REAP-139B-A10B" (≈25% experts pruned) — same arch tag
+# (minimax-m2), same sampler recommendation, just fewer experts.
+# Native context 196608 (192k) from GGUF (minimax-m2.context_length).
+# We cap at the native value; the tuner clamps to GGUF native anyway.
+max_context: 196608
+
+# KV-quant: q5_0 (asymmetric cv=q4_0 when the cascade needs room). With
+# key_length = value_length = 128 and 8 GQA KV-heads across 62 layers the
+# KV cache is moderate, but a 139B-A10B build still nearly fills the
+# combined 48 GB VRAM pool with weights, so keeping KV compact lets one
+# or two more expert layers stay resident on GPU.
+recommended_kv_quant: q5_0
+
+# Large MoE on a 48 GB combined VRAM pool: maximise GPU-resident expert
+# layers. "throughput" reserves only a 32k KV budget for placement so the
+# capacity-fill spread can pack both cards with experts instead of holding
+# back VRAM for a 128k cache most coding runs never use. Switch to
+# "balanced"/"safe" in the GUI for long-context sessions — the GUI choice
+# always wins over this recommendation.
+performance_target: throughput
+
+# Sampling: MiniMax-M2's recommended inference settings are temperature
+# 1.0, top_p 0.95, top_k 40 (the GGUF embeds top_k 40 / top_p 0.95 in
+# general.sampling.*; temperature is added here). A non-zero min_p (0.02)
+# trims the long tail that, combined with the large 154-expert routing,
+# is a common source of repetition drift on the pruned build. Coding uses
+# a lower temperature for deterministic tool-calls.
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.02
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    temperature: 0.6
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.02
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+# Speculative decoding: MiniMax-M2 GGUFs ship no integrated MTP head, so
+# this only applies if a sibling assistant/draft model is present. Keep
+# the Vulkan-safe defaults (2 tokens, p_min 0.75).
+draft_max: 2
+draft_p_min: 0.75
+
+notes: >
+  MiniMax-M2 is a sparse-MoE model (154 experts, 8 active) tuned for
+  agentic coding and tool use. Native context is 192k (clamped to GGUF
+  native). The build in the tree is the REAP-pruned 139B-A10B variant —
+  same arch tag and sampler recommendation as the full model, just fewer
+  experts, so it shares this profile. Recommended samplers (temp 1.0 /
+  top_p 0.95 / top_k 40) follow MiniMaxAI's published defaults; min_p 0.02
+  trims the routing tail to curb repetition on the pruned weights. As a
+  large MoE it relies on AutoTuner's capacity-fill spread to pack both
+  GPUs with expert layers; everything else (n-cpu-moe, tensor-split, ctx)
+  is derived automatically.

@@ -19,17 +19,17 @@ the RAM/VRAM you actually have free — without manual edits.
 ============================================================
   DEBUG / VERBOSE MODE SELECTION
 ============================================================
-  1. Debugging OFF (standard)
-  2. Debugging ON (alle Kategorien)
+  1. Debugging OFF (default)
+  2. Debugging ON (all categories)
 ------------------------------------------------------------
-  Kategorie-Debugging (einzelne Bereiche):
-  3. Hardware-Erkennung (GPU/RAM/CPU)
-  4. Model-Scanning & Profil-Matching
-  5. Server-Pfad-Suche (llama.cpp)
-  6. Konfigurations-Berechnung (KV-Cache, Kontext)
+  Category debugging (individual areas):
+  3. Hardware detection (GPU/RAM/CPU)
+  4. Model scanning & profile matching
+  5. Server-path discovery (llama.cpp)
+  6. Configuration computation (KV cache, context)
 ------------------------------------------------------------
-Wahl [1-6] (default 1):
-[AutoTuner] Debugging deaktiviert.
+Choice [1-6] (default 1):
+[AutoTuner] Debugging disabled.
 ============================================================
 
 
@@ -85,13 +85,13 @@ Available models:
   ...
 
 Select a model [1-40, q to quit]: 16
-Vision aktivieren? (mmproj-gemma-4-26B-A4B-it-BF16.gguf) [Y/n] y
-Draft-Modell aktivieren? (gemma-4-26B-A4B-it-assistant-Q8_0) [Y/n] n
-Thinking/Reasoning aktivieren? (<|think|> / <|reserved_special_token>) [Y/n] y
+Enable vision? (mmproj-gemma-4-26B-A4B-it-BF16.gguf) [Y/n] y
+Enable draft model? (gemma-4-26B-A4B-it-assistant-Q8_0) [Y/n] n
+Enable thinking/reasoning? (<|think|> / <|reserved_special_token>) [Y/n] y
 ────────────────────────────────────────────────────────────────
 Model:    gemma-4-26B-A4B-it-UD-IQ4_XS
 Profile:  Gemma 4 (Google)  (gemma-4.yaml)
-Notes:    Gemma ist empfindlich gegenüber repeat_penalty > 1.0. E2B/E4B = multimodal (Text+Bild+Audio), 26B-A4B + 31B = Text+Bild. Thinking-Modus aktivierbar durch <|think|> am Anfang des System-Prompts. Tipp: Manche Community-Tests zeigen, dass Gemma 4 für Coding sogar mit temp=1.5 besser performt - bei Bedarf mit `-- --temp 1.5` überschreiben.
+Notes:    Gemma is sensitive to repeat_penalty > 1.0. E2B/E4B = multimodal (text+image+audio), 26B-A4B + 31B = text+image. Thinking mode is enabled by putting <|think|> at the start of the system prompt. Tip: some community tests show Gemma 4 performs better for coding even at temp=1.5 — override with `-- --temp 1.5` if needed.
 Vision:   mmproj-gemma-4-26B-A4B-it-BF16.gguf
 ────────────────────────────────────────────────────────────────
   Placement       : GPU full offload (ngl=all of 60)
@@ -117,10 +117,21 @@ Launch llama-server now? [Y/n]
   models folder, no editing required.
 - **Hardware auto-detection** — works on **AMD (ROCm)**, **NVIDIA**,
   **Intel**, and **Apple Silicon** (unified memory). Multi-GPU is
-  supported via automatic, **priority-weighted** `--tensor-split`: a
-  model that fits the largest card is pinned to it (the second GPU stays
-  free for gaming/OBS); only larger models spread across both. Device
-  visibility is pinned via `HIP_VISIBLE_DEVICES` *and*
+  supported via automatic `--tensor-split`. The split strategy depends on
+  the model type:
+  - **Dense** models use a **priority-weighted** split: a model that fits
+    the largest card is pinned to it (the second GPU stays free for
+    gaming/OBS); larger models put the bulk of the weights on the
+    high-priority card.
+  - **MoE** models that don't fit the primary card alone use a
+    **capacity-fill** split instead — both GPUs are packed to roughly the
+    same utilisation so the maximum number of expert layers stays resident
+    in VRAM (every expert that lands on the GPU instead of spilling to CPU
+    via `--n-cpu-moe` is a real speed win). This replaces the old
+    priority-weighted behaviour for MoE, which stranded several GB on the
+    secondary card and slowed the model down.
+
+  Device visibility is pinned via `HIP_VISIBLE_DEVICES` *and*
   `GGML_VK_VISIBLE_DEVICES` so it works on both ROCm and Vulkan builds.
 - **Free-memory aware** — context length and KV quant are picked to
   use the RAM/VRAM that's actually free *right now*, not a hard-coded
@@ -130,12 +141,21 @@ Launch llama-server now? [Y/n]
   Easy for contributors to extend without touching Python.
 - **Companion-file auto-pairing** — sibling files don't pollute the
   model menu, they're attached to their main model:
-  - `mmproj-*.gguf` → vision (longest-prefix wins). When a model ships
-    **several projector precisions** side by side (`…-bf16`, `…-f16`,
-    `…-f32`), all of them are kept as candidates and a **dropdown** in the
-    Launch options lets you switch between them. The auto pick now prefers
-    the **highest precision** (f32 > f16 > bf16) on an otherwise-equal
-    name match; your manual choice is remembered per model.
+  - `mmproj` projectors → vision (longest-prefix wins). The `mmproj`
+    marker is detected **anywhere in the filename**, not just as a
+    leading `mmproj-` prefix — so a projector named with the marker
+    mid-name (e.g. `qwen3.6-35b-a3b-mxfp4-moe-mmproj-f16.gguf`, where the
+    vendor put the quant label before `mmproj`) is now paired correctly.
+    Projectors saved with a literal **`.mmproj` extension** (some audio
+    projectors) are picked up too, even though they don't match the
+    `*.gguf` glob. Matching is separator-tolerant (`-moe` vs `_moe` no
+    longer blocks a pair) but still size-specific, so a 2B model never
+    grabs a 0.8B projector. When a model ships **several projector
+    precisions** side by side (`…-bf16`, `…-f16`, `…-f32`), all are kept
+    as candidates and a **dropdown** in the Launch options lets you switch
+    between them. The auto pick prefers the **highest precision**
+    (f32 > f16 > bf16) on an otherwise-equal name match; your manual
+    choice is remembered per model.
   - `*-assistant-*.gguf` / `*-draft-*.gguf` → speculative decoding
       (smallest matching sibling wins)
 - **Capability badges in the model list** — symbols make it obvious
@@ -150,6 +170,17 @@ Launch llama-server now? [Y/n]
   (neither thinking nor tools) are correctly excluded.
 - **Reads GGUF metadata** — pulls `n_layers` and `context_length`
   straight from the file so partial GPU offload (`-ngl`) is exact.
+- **Author-recommended samplers from GGUF metadata** — many models embed
+  their recommended sampler defaults in `general.sampling.*`
+  (e.g. Qwen3.5/3.6 ship `temp 1.0 / top_k 20 / top_p 0.95`). The tuner
+  now reads these and uses them to fill any sampling value a matched YAML
+  profile leaves unspecified. Priority per field is: a **matched family
+  profile's explicit value** wins first (these are hand-tuned), then the
+  **GGUF recommendation**, then the generic default. The practical effect:
+  a model with **no tailored profile** (so it would otherwise fall back to
+  the generic `temp 0.7 / top_k 40`) now runs on its intended samplers —
+  a frequent cause of repetition loops and broken tool-calls on models
+  tuned for a low `top_k` with a non-zero `min_p`.
 - **Multi-server (run several models at once)** — Launch no longer
   refuses while a server is running. Each new model gets the **next free
   port**: 0 servers → `1234`, 1 → `1235`, 2 → `1236`, … When a server is
@@ -192,12 +223,12 @@ Launch llama-server now? [Y/n]
   restored too — not just the outer window size. `saveState()` alone does
   not round-trip plain central-widget splitters, hence the separate
   per-splitter persistence.
-- **Globale Schriftgröße** — peristente Schriftgröße (Clamp 7..22),
-  wird beim App-Start sofort angewendet (kein Flash von Default).
-- **Reasoning-Effort** — pro-Modell wählbar: `auto` / `off` /
-  `minimal` / `low` / `medium` / `high` / `extra_high`. Think-Budget
-  (Spin-Box, -1 = aus, 0 = sofort stop, N = Token-Budget) im
-  Expert-Panel.
+- **Global font size** — persistent font size (clamped 7..22), applied
+  immediately on app start (no flash of the default).
+- **Reasoning effort** — selectable per model: `auto` / `off` /
+  `minimal` / `low` / `medium` / `high` / `extra_high`. Think-budget
+  (spin-box, -1 = off, 0 = stop immediately, N = token budget) in the
+  Expert panel.
 
 ### Vision control
 
@@ -291,16 +322,16 @@ that only make sense with persistent state:
   maximize-state and toolbar status are saved, **and** the inner pane
   arrangement (model-list vs config width, log-panel height) is restored
   via each splitter's own `saveState()` — not just the outer window.
-- **Font persistence.** Globale QApplication-Schriftgröße wird
-  persistiert und beim Start sofort angewendet (`_change_font`).
-  Kein Flash von der Default-Schriftgröße mehr.
-- **Reasoning-Panel (Expert-Panel).** Neue Sektion mit:
+- **Font persistence.** The global QApplication font size is persisted
+  and applied immediately on start (`_change_font`). No more flash of the
+  default font size.
+- **Reasoning panel (Expert panel).** New section with:
   - Dropdown "Effort": `auto` / `off` / `minimal` / `low` /
       `medium` / `high` / `extra_high`
-  - SpinBox "Think budget": `-1` = aus, `0` = sofort stop, `N` =
-      Token-Budget
-  Die Werte werden als `--reasoning`, `--think-budget` und
-  `--chat-template-kwargs` in `cfg.extra_cli_flags` übersetzt.
+  - SpinBox "Think budget": `-1` = off, `0` = stop immediately, `N` =
+      token budget
+  The values are translated into `--reasoning`, `--think-budget` and
+  `--chat-template-kwargs` in `cfg.extra_cli_flags`.
 
 ### Useful flags
 
@@ -406,7 +437,7 @@ H:\LAB\
 └── ai-local\
     ├── llama.cpp\      ← standard build
     ├── tq_llama.cpp\   ← Turbo-Quant build
-    ├── ik_llama.cpp\   ← Gemma 4 externer Drafter (Fork noch nötig)
+    ├── ik_llama.cpp\   ← Gemma 4 external drafter (fork still needed)
     └── 1b_llama.cpp\   ← BitNet fork (Ternary-Bonsai)
 I:\
 └── models\             ← your models
@@ -421,27 +452,27 @@ When you start the tuner, you can choose between:
 1. **Standard-Quant**: Uses standard `llama.cpp` binaries.
 2. **Turbo-Quant**: Uses the `tq_llama.cpp` binary for faster inference.
 
-#### Turbo-Quant Labels & KV-Quant-Options
+#### Turbo-Quant labels & KV-quant options
 
-`kv_quant_factor()` unterstützt jetzt folgende Turbo-Quant-Labels:
+`kv_quant_factor()` now supports the following Turbo-Quant labels:
 `turbo2`, `turbo3`, `turbo4`, `iq4_nl`, `tq3_0`, `turbo3_tcq`.
 
-`_TURBO_QUANT_MAP` korrigiert die echten Labels:
+`_TURBO_QUANT_MAP` corrects the real labels:
 
-| Label   | Turbo-Quant | Faktor (vs F16) |
+| Label   | Turbo-Quant | Factor (vs F16) |
 |---------|-------------|-----------------|
 | `q8_0`  | `turbo4`    | ~3.8x           |
 | `q5_0`  | `turbo3`    | ~4.3x           |
 | `q4_0`  | `turbo3`    | ~4.3x           |
 
-(Vorher mappte es fälschlich auf `q4_1`/`q5_1`, was Mainline-Labels
-sind, NICHT TurboQuant.)
+(It previously mapped incorrectly to `q4_1`/`q5_1`, which are mainline
+labels, NOT TurboQuant.)
 
-`_pick_kv_quant` rechnet das Budget jetzt mit Turbo-Faktoren — beim
-Umschalten zeigt sich die echte Token-Zahl-Erhöhung (gemessen: 48k →
-63k bei Qwen3.6-35B-A3B).
+`_pick_kv_quant` now computes the budget with the Turbo factors — when you
+switch, the real token-count increase shows up (measured: 48k → 63k on
+Qwen3.6-35B-A3B).
 
-Die KV-Dropdowns in der GUI zeigen die volle Auswahl: `iq4_nl`,
+The KV dropdowns in the GUI show the full selection: `iq4_nl`,
 `q4_1`, `q5_1`, `turbo2`, `turbo3`, `turbo4`.
 
 #### Specialized Binary Logic
@@ -450,7 +481,7 @@ The tuner intelligently selects the best binary based on your model and settings
 
 - **Gemma 4 (with external draft)** $\rightarrow$ uses `ik_llama.cpp` (external sibling drafter still requires the fork).
 - **Gemma 4 (without draft)** $\rightarrow$ uses standard `llama.cpp`.
-- **Integriertes MTP (z.B. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (b9190+ nativ; PR #22673 seit 16. Mai 2026 in Mainline; kein Fork nötig).
+- **Integrated MTP (e.g. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (native since b9190+; PR #22673 in mainline since 16 May 2026; no fork needed).
 - **Ternary-Bonsai** $\rightarrow$ uses `1b_llama.cpp`.
 - **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
 
@@ -598,117 +629,137 @@ cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TY
 cmake --build build --config Release -j $(nproc)
 ```
 
-## Server-Features (Stand b9409)
+## Server features (as of b9442)
 
-Die folgenden `llama-server` Features werden unterstützt (aus `tools/server/README.md`):
+The following `llama-server` features are supported (from `tools/server/README.md`):
 
-| Flag | Unterstützung |
-|------|---------------|
-| `-fa [on\|off\|auto]` | ✅ Form `-fa on` wird emittiert |
-| `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ Alle im Dropdown |
-| `--fit off` | ✅ Immer emittiert, damit llama.cpps eigener Auto-Fit-Pass (Default `on`) die berechneten Werte nicht still nachjustiert (AutoTuner ist die Autorität) |
-| `--metrics` | ✅ Prometheus-Endpoint `GET /metrics` auf demselben host:port (siehe „Monitoring") |
-| `--cache-ram` / `-cram` | ✅ **Neu** — Host-Memory-Prompt-Caching (PR #16391). Auto-an (`-1`, unbegrenzt) für jedes **Nicht-Vision**-Modell, per GUI-Checkbox abschaltbar. **Erzwungen `0` bei Vision-Modellen** (inkompatibel mit dem mtmd-Pfad) |
-| `--reasoning on/off/auto` | ✅ Via Dropdown |
-| `--think-budget N` | ✅ Via SpinBox |
-| `--chat-template-kwargs ...` | ✅ Dropdown produziert das automatisch |
-| `--jinja` | ✅ Wird sichtbar angehakt |
-| `--mlock` / `--no-mmap` | ✅ Windows-Guard; manuell überschreibbar |
-| `-md` externer Drafter | ✅ Ohne `--spec-type` — die Anwesenheit von `-md` aktiviert den Draft-Pfad in Mainline automatisch (verifiziert b9409) |
-| `--spec-type draft-mtp` | ✅ Integriertes MTP (Qwen3.6-MTP u.a.) — `draft-mtp` ist der Mainline-Name seit Merge von PR #22673 (16. Mai 2026) |
-| `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (Default). Auf MTP-Modellen unterdrückt, weil `draft-mtp,ngram-mod` mitten in der Generierung crasht (#23154, bis b9409 nicht behoben) |
-| `--spec-type ngram-map-k4v` (draftless) | ✅ Die MTP-**kompatible** ngram-Methode aus ggerganovs MTP-Cleanup (PR #23269). Per `ngram_method: ngram-map-k4v` läuft sie zusammen mit `draft-mtp` → so kombiniert man „MTP + ngram" |
-| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Wählbar via `ngram_method`; nur das Typ-Token wird emittiert, Sub-Parameter überlässt der Tuner den llama.cpp-Defaults |
-| `--spec-draft-n-max` | ✅ Via `draft_max` im YAML-Profil |
-| `--spec-draft-p-min` | ✅ Via `draft_p_min` im YAML-Profil — Mainline-Default ist seit PR #23269 jetzt **0.0**; der AutoTuner emittiert weiterhin explizit **0.75** in **beiden** Spec-Paths (extern + integriert), damit MTP nur bei sicheren Schritten feuert |
-| `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ Via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` im YAML (Defaults 16/24/1 aus PR #23269) |
-| `--spec-draft-ngl` | ✅ Immer 99 (MTP-Head auf GPU halten) |
-| `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` aktiv; `-ot` für gezielte Expert-Platzierung vorbereitet |
-| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted, mit Single-GPU-Pinning; bei Multi-Server wird das 2./3. Modell per `HIP_/GGML_VK_VISIBLE_DEVICES` auf die leerere Karte gepinnt |
-| `--rope-scaling yarn` | ✅ Bereits vorhanden |
-| `--numa` | ✅ Bereits vorhanden |
-| `--no-context-shift` | ✅ Wird nicht mehr dupliziert (Dedup via seen-Set) |
+| Flag | Support |
+|------|---------|
+| `-fa [on\|off\|auto]` | ✅ Emits the `-fa on` form |
+| `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ All in the dropdown |
+| `--fit off` | ✅ Always emitted so llama.cpp's own auto-fit pass (default `on`) doesn't silently re-adjust the computed values (AutoTuner is the authority) |
+| `--metrics` | ✅ Prometheus endpoint `GET /metrics` on the same host:port (see "Monitoring") |
+| `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391). Auto-on (`-1`, unlimited) for every **non-vision** model, switchable off via GUI checkbox. **Forced `0` for vision models** (incompatible with the mtmd path) |
+| `--reasoning on/off/auto` | ✅ Via dropdown |
+| `--think-budget N` | ✅ Via spin-box |
+| `--chat-template-kwargs ...` | ✅ The dropdown produces this automatically |
+| `--jinja` | ✅ Ticked visibly |
+| `--mlock` / `--no-mmap` | ✅ Windows guard; manually overridable |
+| `-md` external drafter | ✅ Without `--spec-type` — the presence of `-md` enables the draft path automatically in mainline (verified b9442) |
+| `--spec-type draft-mtp` | ✅ Integrated MTP (Qwen3.6-MTP etc.) — `draft-mtp` is the mainline name since PR #22673 merged (16 May 2026) |
+| `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (default). Suppressed on MTP models because `draft-mtp,ngram-mod` crashes mid-generation (#23154, still open as of b9442) |
+| `--spec-type ngram-map-k4v` (draftless) | ✅ The MTP-**compatible** ngram method from ggerganov's MTP cleanup (PR #23269). Via `ngram_method: ngram-map-k4v` it runs together with `draft-mtp` → this is how you combine "MTP + ngram" |
+| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Selectable via `ngram_method`; only the type token is emitted, sub-parameters are left to the llama.cpp defaults |
+| `--spec-draft-n-max` | ✅ Via `draft_max` in the YAML profile |
+| `--spec-draft-p-min` | ✅ Via `draft_p_min` in the YAML profile — the mainline default has been **0.0** since PR #23269; AutoTuner still emits an explicit **0.75** in **both** spec paths (external + integrated) so MTP only fires on confident steps |
+| `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ Via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` in the YAML (defaults 16/24/1 from PR #23269) |
+| `--spec-draft-ngl` | ✅ Always 99 (keep the MTP head on GPU) |
+| `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` active; `-ot` prepared for targeted expert placement |
+| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted for dense, **capacity-fill for MoE**, with single-GPU pinning; for multi-server the 2nd/3rd model is pinned to the emptier card via `HIP_/GGML_VK_VISIBLE_DEVICES` |
+| `--rope-scaling yarn` | ✅ Already present |
+| `--numa` | ✅ Already present |
+| `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
+
+### Review b9409 → b9442
+
+Reviewed the releases up to **b9442** (`d4c8e2c`, a vocab/tokenizer commit
+adding jina-embeddings-v2-base-zh). **Result: no functional AutoTuner
+changes to existing flags needed** — every server flag in use (`--fit off`,
+`--metrics`, `--cache-ram`, `--spec-type` with `draft-mtp` / `ngram-mod` /
+`ngram-map-k4v`, `--spec-draft-*`, `-fa on`, `--n-cpu-moe`, `--tensor-split`,
+YaRN, KV-cache types) was verified against the b9442 `common/arg.cpp` and
+`common/speculative.cpp` and is unchanged and still valid. The changes added
+in this round are AutoTuner-side, not forced by any flag rename:
+
+- **mmproj detection** now matches the `mmproj` marker **anywhere** in a
+  filename and also picks up `.mmproj`-extension projectors, so the
+  MXFP4 MoE pair (`…-mxfp4-moe-mmproj-f16.gguf`) is paired correctly.
+- **GGUF `general.sampling.*`** is now read and used to fill any sampler
+  value a matched profile leaves unspecified — fixing repetition loops and
+  broken tool-calls on models without a tailored profile.
+- **MoE multi-GPU spread** switched from priority-weighting to
+  **capacity-fill**, so both GPUs are packed with expert layers instead of
+  stranding VRAM on the secondary card.
 
 ### Review b9371 → b9409
 
-Durchsicht der Releases bis **b9409** (`fe12e42`, ein reiner `sync : ggml`
-Commit). **Ergebnis: keine funktionalen AutoTuner-Anpassungen an bestehenden
-Flags nötig** — alle genutzten Server-Flags (`--fit off`, `--metrics`,
-`--cache-ram`, `--spec-type`, `--spec-draft-*`, `-fa on`, `--n-cpu-moe`, YaRN,
-KV-Cache-Typen) sind unverändert und weiterhin gültig. Neu in dieser Runde
-**hinzugefügt** (nicht durch ein b9409-Flag-Rename erzwungen, sondern als
-Feature):
+Reviewed the releases up to **b9409** (`fe12e42`, a pure `sync : ggml`
+commit). **Result: no functional AutoTuner changes to existing flags
+needed** — all server flags in use (`--fit off`, `--metrics`,
+`--cache-ram`, `--spec-type`, `--spec-draft-*`, `-fa on`, `--n-cpu-moe`,
+YaRN, KV-cache types) were unchanged and still valid. Added this round (not
+forced by a b9409 flag rename, but as a feature):
 
-- **`--cache-ram` Prompt-Caching** wird jetzt aktiv emittiert (vorher gar
-  nicht). Auto-an für Nicht-Vision-Modelle, `0` bei Vision (mtmd-inkompatibel,
+- **`--cache-ram` prompt caching** is now actively emitted (previously not
+  at all). Auto-on for non-vision models, `0` for vision (mtmd-incompatible,
   PR #16391).
-- **Multi-Server-Portvergabe** (1234, 1235, … mit Reset beim Beenden) und
-  **Live-VRAM-Lastverteilung** auf die leerere GPU vor dem Start eines
-  zweiten/dritten Modells — rein GUI-/Launcher-seitig, keine neuen
-  Server-Flags.
+- **Multi-server port assignment** (1234, 1235, … with a reset on exit) and
+  **live-VRAM load-balancing** onto the emptier GPU before starting a
+  second/third model — purely GUI/launcher-side, no new server flags.
 
-### Review b9334 → b9371 (37 Commits)
+### Review b9334 → b9371 (37 commits)
 
-Vollständige Durchsicht aller 37 Commits zwischen b9334 und b9371. **Ergebnis:
-keine funktionalen AutoTuner-Anpassungen nötig** — alle genutzten Server-Flags
-(`--fit off`, `--metrics`, `--spec-type`, `--spec-draft-*`, `-fa on`,
-`--n-cpu-moe`, YaRN, KV-Cache-Typen) sind unverändert. Relevante Punkte:
+Full review of all 37 commits between b9334 and b9371. **Result: no
+functional AutoTuner changes needed** — all server flags in use (`--fit
+off`, `--metrics`, `--spec-type`, `--spec-draft-*`, `-fa on`, `--n-cpu-moe`,
+YaRN, KV-cache types) were unchanged. Relevant points:
 
-- **Env-Rename (#23778):** llama.cpp hat mehrere Environment-Variablen auf den
-  einheitlichen `LLAMA_ARG_`-Präfix gezogen: `LLAMA_LOG_FILE/COLORS/VERBOSITY/PREFIX/TIMESTAMPS`
+- **Env rename (#23778):** llama.cpp moved several environment variables to
+  the unified `LLAMA_ARG_` prefix: `LLAMA_LOG_FILE/COLORS/VERBOSITY/PREFIX/TIMESTAMPS`
   → `LLAMA_ARG_LOG_*`, `LLAMA_OFFLINE` → `LLAMA_ARG_OFFLINE`,
-  `LLAMA_CHAT_TEMPLATE_KWARGS` → `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. **Die CLI-Flags
-  selbst bleiben gleich.** Der AutoTuner setzt als Env-Overrides nur
-  `HIP_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES` (GGML-Vars, nicht betroffen);
-  `LLAMA_ARG_FIT` trägt den Präfix bereits → kein Einfluss.
-  ⚠️ *Falls künftig llama-Log-/Offline-Env-Overrides ergänzt werden, ab b9371 den
-  `LLAMA_ARG_`-Präfix verwenden.*
-- **Vulkan-Performance:** mehrere transparente Backend-Optimierungen (MUL_MAT_VEC
-  4 K/Iteration für F16/F32 #22887, conv2d + coopmat1 #22620, REPEAT f16→f16 #23298).
-  Profitiert allein durch den Rebuild, keine Flag-Änderung. Der AMD-UMA-Transfer-Queue-Fix
-  (#22455) betrifft nur integrierte GPUs/APUs, nicht die dedizierten R9700 / RX 9070 XT.
-- **Neue Modell-/Konvertierungs-Unterstützung (convert-seitig, nicht Server-Laufzeit):**
-  `Gemma4ForCausalLM`-Konvertierung (#23682), MiniCPM5-Tokenizer (#23384),
-  talkie-1930-13b (#22596), Mistral3-NVFP4-Weight-Scales (#23629). Profil-Pflege
-  nur bei Adoption — Arch wird im Tuner dynamisch aus den Metadaten gelesen.
-- **Server-Code:** nur kosmetisch (SSL-Log-Message #23393, cpp-httplib 0.46.0 #23650).
+  `LLAMA_CHAT_TEMPLATE_KWARGS` → `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. **The CLI
+  flags themselves stay the same.** AutoTuner sets only
+  `HIP_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES` as env overrides (GGML
+  vars, not affected); `LLAMA_ARG_FIT` already carries the prefix → no impact.
+  ⚠️ *If llama log/offline env overrides are added in the future, use the
+  `LLAMA_ARG_` prefix from b9371 on.*
+- **Vulkan performance:** several transparent backend optimisations
+  (MUL_MAT_VEC 4 K/iteration for F16/F32 #22887, conv2d + coopmat1 #22620,
+  REPEAT f16→f16 #23298). Benefits from the rebuild alone, no flag change.
+  The AMD UMA transfer-queue fix (#22455) affects only integrated GPUs/APUs,
+  not the dedicated R9700 / RX 9070 XT.
+- **New model/conversion support (convert-side, not server runtime):**
+  `Gemma4ForCausalLM` conversion (#23682), MiniCPM5 tokenizer (#23384),
+  talkie-1930-13b (#22596), Mistral3-NVFP4 weight scales (#23629). Profile
+  maintenance only on adoption — the arch is read dynamically from the
+  metadata in the tuner.
+- **Server code:** cosmetic only (SSL log message #23393, cpp-httplib 0.46.0 #23650).
 
-### Spekulatives Dekodieren (MTP + n-gram)
+### Speculative decoding (MTP + n-gram)
 
-Der AutoTuner kombiniert bis zu drei spekulative Pfade in **einer**
-`--spec-type`-Liste:
+The AutoTuner combines up to three speculative paths into **one**
+`--spec-type` list:
 
-- **Path A — externer Sibling-Drafter** (`-md`): ein kleines `*-draft-*` /
-  `*-assistant-*` Geschwistermodell. Wird übersprungen, wenn Vision
-  (`--mmproj`) aktiv ist (drei große Graphen gleichzeitig im VRAM sind auf
-  16-GB-Karten zu riskant).
-- **Path B — integriertes MTP** (`--spec-type draft-mtp`): der trainierte
-  MTP-Kopf steckt im Haupt-GGUF (Qwen3.6-MTP usw.). Koexistiert seit b9180 mit
-  Vision.
-- **Path C — draftless n-gram** (`--spec-type <ngram_method>`): braucht kein
-  Draft-Modell. Methode wählbar pro Profil über `ngram_method`.
+- **Path A — external sibling drafter** (`-md`): a small `*-draft-*` /
+  `*-assistant-*` sibling model. Skipped when vision (`--mmproj`) is
+  active (three large graphs in VRAM at once is too risky on 16-GB cards).
+- **Path B — integrated MTP** (`--spec-type draft-mtp`): the trained MTP
+  head lives inside the main GGUF (Qwen3.6-MTP etc.). Coexists with vision
+  since b9180.
+- **Path C — draftless n-gram** (`--spec-type <ngram_method>`): needs no
+  draft model. Method selectable per profile via `ngram_method`.
 
-Seit b9334 ist die draftless-Familie gewachsen: `ngram-mod` (Default),
+Since b9334 the draftless family has grown: `ngram-mod` (default),
 `ngram-map-k`, `ngram-map-k4v`, `ngram-simple`, `ngram-cache`.
 
-**MTP + n-gram zusammen.** Nur `ngram-mod` kollidiert mit `draft-mtp`
-(`draft-mtp,ngram-mod` → zufällige Mid-Generation-Crashes, llama.cpp #23154,
-im Review-Bereich b9334→b9371 nicht behoben). Darum unterdrückt der Tuner `ngram-mod` neben MTP. Die
-`ngram-map-*`-Methoden wurden von ggerganovs MTP-Cleanup (PR #23269) gezielt
-für die Koexistenz mit `draft-mtp` gebaut — `ngram-map-k4v` steht dort sogar
-im `--spec-default`. Um „MTP + n-gram" auf einem MTP-Modell zu aktivieren,
-genügt also ein Eintrag im Profil:
+**MTP + n-gram together.** Only `ngram-mod` conflicts with `draft-mtp`
+(`draft-mtp,ngram-mod` → random mid-generation crashes, llama.cpp #23154,
+still open as of b9442). That's why the tuner suppresses `ngram-mod` next
+to MTP. The `ngram-map-*` methods were built by ggerganov's MTP cleanup
+(PR #23269) specifically to coexist with `draft-mtp` — `ngram-map-k4v` is
+even in its `--spec-default`. So to enable "MTP + n-gram" on an MTP model,
+one profile entry is enough:
 
 ```yaml
 # settings/qwen3_5-3_6.yaml  (Qwen3.6-MTP)
-ngram_method: ngram-map-k4v     # läuft neben draft-mtp statt es zu unterdrücken
-# optional feinjustieren (Defaults aus PR #23269):
+ngram_method: ngram-map-k4v     # runs next to draft-mtp instead of being suppressed
+# optionally fine-tune (defaults from PR #23269):
 ngram_k4v_size_n: 16
 ngram_k4v_size_m: 24
 ngram_k4v_min_hits: 1
 ```
 
-Für ein MTP-Modell mit `ngram_method: ngram-map-k4v` ergibt das:
+For an MTP model with `ngram_method: ngram-map-k4v` this yields:
 
 ```
 --spec-type draft-mtp,ngram-map-k4v
@@ -716,111 +767,111 @@ Für ein MTP-Modell mit `ngram_method: ngram-map-k4v` ergibt das:
 --spec-ngram-map-k4v-size-n 16 --spec-ngram-map-k4v-size-m 24 --spec-ngram-map-k4v-min-hits 1
 ```
 
-Ein unbekannter `ngram_method`-Wert im YAML fällt beim Laden mit einer Warnung
-auf `ngram-mod` zurück (statt erst beim Server-Start zu crashen).
+An unknown `ngram_method` value in the YAML falls back to `ngram-mod` with
+a warning at load time (instead of crashing only at server start).
 
-> ⚠️ **Realitäts-Check:** Auf bandbreitenlimitierten MoE-A3B-Modellen schlägt
-> spekulatives Dekodieren laut aktuellen Benchmarks oft *nicht* die Baseline
-> (Expert-Saturation). `ngram_method` ist deshalb bewusst Opt-in — vorher/
-> nachher tok/s messen.
+> ⚠️ **Reality check:** on bandwidth-limited MoE-A3B models, speculative
+> decoding often does *not* beat the baseline according to current
+> benchmarks (expert saturation). `ngram_method` is therefore deliberately
+> opt-in — measure tok/s before and after.
 
-### Mehrere Modelle gleichzeitig + GPU-Lastverteilung
+### Several models at once + GPU load-balancing
 
-Die GUI kann mehrere `llama-server`-Instanzen parallel betreiben:
+The GUI can run multiple `llama-server` instances in parallel:
 
-- **Automatische Portvergabe.** Der *Base port*-Eintrag (Default `1234`)
-  gilt für den **ersten** Server. Jeder weitere Server bekommt den nächsten
-  freien Port: 0 laufende → `1234`, 1 → `1235`, 2 → `1236`, … Ports werden
-  vor der Vergabe geprüft (Socket-Bind), damit es keine Kollision mit
-  fremden Prozessen gibt.
-- **Counter-Reset beim Beenden.** Wird ein Server gestoppt **oder** stürzt
-  er ab, gibt der Launcher seinen Port wieder frei — der nächste Start
-  verwendet den freigewordenen Port erneut. Der Zähler ist immer
-  `Base + Anzahl laufender Server`.
-- **Lastverteilung vor dem 2./3. Modell.** Bevor ein *zusätzliches* Modell
-  startet, liest der AutoTuner die **aktuelle** VRAM-Belegung neu ein (also
-  inklusive dessen, was bereits geladene Modelle halten) und steuert das
-  neue Modell auf die **leerere Karte** — per `HIP_VISIBLE_DEVICES` /
-  `GGML_VK_VISIBLE_DEVICES` wird genau diese GPU sichtbar gemacht.
-- **Klare Absage statt Überbuchung.** Passt das Modell auf **keine** Karte
-  mehr (z. B. R9700 schon bei 31/32 GB), bricht der Launcher mit einer
-  verständlichen Meldung ab und zeigt die VRAM-Belegung aller Karten, statt
-  ein bereits volles Gerät weiter zu überladen. Das *erste* Modell nutzt
-  weiterhin die normale automatische Multi-GPU-Aufteilung (`--tensor-split`);
-  die Pro-Karte-Prüfung greift nur als Warnung, nicht als harte Absage,
-  wenn ein einzelnes Modell über beide Karten gesplittet werden soll.
+- **Automatic port assignment.** The *base port* entry (default `1234`)
+  applies to the **first** server. Each additional server gets the next
+  free port: 0 running → `1234`, 1 → `1235`, 2 → `1236`, … Ports are
+  checked before assignment (socket bind) so there's no collision with
+  other processes.
+- **Counter reset on exit.** When a server is stopped **or** crashes, the
+  launcher frees its port again — the next launch reuses the freed port.
+  The counter is always `base + number of running servers`.
+- **Load-balancing before the 2nd/3rd model.** Before an *additional*
+  model starts, the AutoTuner re-reads the **current** VRAM usage (i.e.
+  including what already-loaded models hold) and steers the new model onto
+  the **emptier card** — exactly that GPU is made visible via
+  `HIP_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES`.
+- **Clear refusal instead of overcommit.** If the model no longer fits on
+  **any** card (e.g. the R9700 already at 31/32 GB), the launcher aborts
+  with a clear message and shows the VRAM usage of all cards, instead of
+  overloading an already-full device. The *first* model still uses the
+  normal automatic multi-GPU split (`--tensor-split`); the per-card check
+  is only a warning, not a hard refusal, when a single model is meant to
+  be split across both cards.
 
-### Prompt-Caching im Host-RAM (`--cache-ram`)
+### Host-RAM prompt caching (`--cache-ram`)
 
-Seit PR #16391 cached `llama-server` berechnete Prompt-Präfixe im normalen
-System-RAM und tauscht sie wieder in den `llama_context` ein, wenn eine neue
-Anfrage ein langes Präfix teilt (System-Prompt, RAG-Scaffold, Roo-Code-
-Präambel). Das senkt die Time-to-First-Token bei wiederholten Prompts massiv.
+Since PR #16391 `llama-server` caches computed prompt prefixes in regular
+system RAM and swaps them back into the `llama_context` when a new request
+shares a long prefix (system prompt, RAG scaffold, Roo-Code preamble). This
+massively lowers time-to-first-token on repeated prompts.
 
-- **Auto-an** für jedes Modell, das es unterstützt (= jedes **Nicht-Vision-**
-  Modell). Default-Cap ist `-1` (kein Byte-Limit, nutzt verfügbaren RAM).
-- **Abschaltbar** über die Checkbox *Prompt caching* in den Launch-Optionen
-  bzw. per CLI `--no-prompt-cache` (emittiert `--cache-ram 0`).
-- **Erzwungen aus bei Vision.** Das Feature ist inkompatibel mit dem
-  multimodalen (`mtmd`) Pfad — `server_tokens` ist dort nicht kopierbar
-  (siehe PR #16391). Sobald Vision aktiv ist, emittiert der AutoTuner
-  `--cache-ram 0`, die Checkbox wird ausgegraut und die Vorschau weist
-  darauf hin. Pro-Modell-Auswahl wird wie vision/draft/thinking gemerkt.
+- **Auto-on** for every model that supports it (= every **non-vision**
+  model). The default cap is `-1` (no byte limit, uses available RAM).
+- **Switchable off** via the *Prompt caching* checkbox in the Launch
+  options or with CLI `--no-prompt-cache` (emits `--cache-ram 0`).
+- **Forced off for vision.** The feature is incompatible with the
+  multimodal (`mtmd`) path — `server_tokens` is not copyable there (see
+  PR #16391). As soon as vision is active the AutoTuner emits
+  `--cache-ram 0`, the checkbox greys out and the preview says so. The
+  per-model choice is remembered like vision/draft/thinking.
 
-### Mehrere mmproj-Präzisionen wählen
+### Choosing among several mmproj precisions
 
-Liefert ein Modell mehrere Projektoren nebeneinander (`…-bf16`, `…-f16`,
-`…-f32`), behält der Scanner **alle** als Kandidaten (`mmproj_candidates`).
-In den Launch-Optionen erscheint dann ein **Dropdown**, in dem du die
-gewünschte Präzision wählst; die Auswahl wird pro Modell in
-`autotuner_settings.json` (`mmproj_selection`) gemerkt. Die automatische
-Vorauswahl bevorzugt jetzt die **höchste** Präzision (f32 > f16 > bf16) statt
-wie früher rein alphabetisch immer bf16 zu nehmen.
+If a model ships several projectors side by side (`…-bf16`, `…-f16`,
+`…-f32`), the scanner keeps **all** of them as candidates
+(`mmproj_candidates`). A **dropdown** then appears in the Launch options
+where you pick the precision you want; the choice is remembered per model
+in `autotuner_settings.json` (`mmproj_selection`). The automatic pre-pick
+now prefers the **highest** precision (f32 > f16 > bf16) instead of, as
+before, always taking bf16 purely alphabetically.
 
-Auf einem Arrow-Lake-System (Core Ultra 285K) erscheinen die integrierte
-Intel-GPU und die NPU bewusst nur als *ignored* in der GPU-Liste, nicht im
-Inferenz-Pool. b9334 bringt zwar einen **OpenVINO**-Backend (Intel CPU/GPU/NPU)
-und **SYCL** (Intel GPU), aber:
+On an Arrow Lake system (Core Ultra 285K) the integrated Intel GPU and the
+NPU deliberately appear only as *ignored* in the GPU list, not in the
+inference pool. b9334 does bring an **OpenVINO** backend (Intel CPU/GPU/NPU)
+and **SYCL** (Intel GPU), but:
 
-1. OpenVINO ist ein **eigenständiges Whole-Model-Backend**, das den
-   GGML-Graph komplett ersetzt — es lässt sich **nicht** mit dem Vulkan-/
-   ROCm-AMD-Pool in einem Prozess mischen (Entweder/Oder).
-2. Offizielle Windows-Binaries gibt es nur als CPU / CUDA / Vulkan / HIP —
-   **kein** Windows-OpenVINO-Build (nur Ubuntu). Seit b9371 (#23705) werden
-   zudem **keine offiziellen SYCL-Releases** mehr gebaut, SYCL wäre also ein
-   Eigen-Build.
-3. Die Desktop-iGPU (~4 Xe-Cores) und die ~13-TOPS-NPU teilen sich die
-   DDR5-Bandbreite mit der CPU, die bereits die MoE-Experten rechnet, und im
-   Layer-Split taktet das langsamste Gerät die Pipeline — neben zwei starken
-   AMD-Karten wäre das ein Netto-Verlust.
+1. OpenVINO is a **standalone whole-model backend** that completely
+   replaces the GGML graph — it **cannot** be mixed with the Vulkan/ROCm
+   AMD pool in one process (either/or).
+2. Official Windows binaries exist only as CPU / CUDA / Vulkan / HIP —
+   there is **no** Windows OpenVINO build (Ubuntu only). Since b9371
+   (#23705) **no official SYCL releases** are built either, so SYCL would
+   be a self-build.
+3. The desktop iGPU (~4 Xe cores) and the ~13-TOPS NPU share DDR5
+   bandwidth with the CPU, which is already computing the MoE experts, and
+   in a layer split the slowest device paces the pipeline — next to two
+   strong AMD cards that would be a net loss.
 
-Sinnvoll wäre die iGPU/NPU nur als **separate, eigenständige**
-`llama-server`-Instanz (SYCL auf Windows, OpenVINO auf Linux) für ein kleines
-Hintergrundmodell — nicht im Haupt-Inferenzpfad. Diese Trennung ist Absicht.
+The iGPU/NPU would only make sense as a **separate, standalone**
+`llama-server` instance (SYCL on Windows, OpenVINO on Linux) for a small
+background model — not in the main inference path. This separation is
+intentional.
 
 ### Monitoring (`/health` + `/metrics`)
 
-Beim Start hängt der AutoTuner `--metrics` an, sodass `llama-server` zwei
-HTTP-Endpoints auf demselben `host:port` wie die Inferenz-API bereitstellt
-(es gibt **keinen** separaten Metrics-Port):
+At launch the AutoTuner appends `--metrics`, so `llama-server` exposes two
+HTTP endpoints on the same `host:port` as the inference API (there is **no**
+separate metrics port):
 
-- **`GET /health`** — `503` während des Ladens, `200` wenn das Modell
-  bereit ist. Die Qt-GUI pollt diesen Endpoint und schaltet den Status
-  von *Loading model* auf *Ready* (siehe oben).
-- **`GET /metrics`** — Prometheus-Textformat. Die wichtigsten Kennzahlen
-  (Single-Model-Modus, Prefix `llamacpp:`):
+- **`GET /health`** — `503` while loading, `200` when the model is ready.
+  The Qt GUI polls this endpoint and switches the status from *Loading
+  model* to *Ready* (see above).
+- **`GET /metrics`** — Prometheus text format. The most important metrics
+  (single-model mode, prefix `llamacpp:`):
 
-  | Metrik | Typ | Bedeutung |
+  | Metric | Type | Meaning |
   |---|---|---|
-  | `llamacpp:predicted_tokens_seconds` | gauge | Generierungs-Durchsatz (tok/s) |
-  | `llamacpp:prompt_tokens_seconds` | gauge | Prompt-/Prefill-Durchsatz (tok/s) |
-  | `llamacpp:kv_cache_usage_ratio` | gauge | KV-Cache-Füllstand (1.0 = 100 %) |
-  | `llamacpp:kv_cache_tokens` | gauge | Tokens im KV-Cache |
-  | `llamacpp:requests_processing` | gauge | Aktive Requests |
-  | `llamacpp:tokens_predicted_total` | counter | Generierte Tokens kumuliert |
-  | `llamacpp:prompt_tokens_total` | counter | Prompt-Tokens kumuliert |
+  | `llamacpp:predicted_tokens_seconds` | gauge | Generation throughput (tok/s) |
+  | `llamacpp:prompt_tokens_seconds` | gauge | Prompt/prefill throughput (tok/s) |
+  | `llamacpp:kv_cache_usage_ratio` | gauge | KV-cache fill level (1.0 = 100%) |
+  | `llamacpp:kv_cache_tokens` | gauge | Tokens in the KV cache |
+  | `llamacpp:requests_processing` | gauge | Active requests |
+  | `llamacpp:tokens_predicted_total` | counter | Generated tokens, cumulative |
+  | `llamacpp:prompt_tokens_total` | counter | Prompt tokens, cumulative |
 
-  Scrapen ohne Prometheus-Client (z. B. für den System Tricorder):
+  Scraping without a Prometheus client (e.g. for the System Tricorder):
 
   ```python
   import urllib.request
@@ -834,10 +885,11 @@ HTTP-Endpoints auf demselben `host:port` wie die Inferenz-API bereitstellt
                   except ValueError: pass
       return out
   # llama_metrics("http://127.0.0.1:1234")["llamacpp:predicted_tokens_seconds"]
-
-  - **get_metadata.py** — In den Ordner mit den Modellen packen (pip install gguf) und alle Metadaten aller Modelle auslesen und speichern. Für Debugging!
-
   ```
+
+- **get_metadata.py** — drop it into the folder with your models
+  (`pip install gguf`) to read and save the metadata of every model. For
+  debugging!
 
 ## License
 

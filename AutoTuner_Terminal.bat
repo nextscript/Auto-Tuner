@@ -10,11 +10,16 @@ REM ---------------------------------------------------------------------------
 set "AUTOTUNER_MODELS=C:\LAB\ai-local\models"
 set "LLAMA_CPP_DIR=C:\LAB\ai-local\llama.cpp"
 
-REM Auto-Tuner starten und alle übergebenen Argumente weiterreichen.
-REM Statt der ENV-Vars oben kannst du auch CLI-Flags benutzen:
-REM   python auto_tuner.py --models-path "C:\LAB\ai-local\models" ^
-REM                        --llama-cpp-dir "C:\LAB\ai-local\llama.cpp" %*
-python auto_tuner.py %*
+REM -- venv-Interpreter bevorzugen, sonst auf globales python zurueckfallen ----
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    echo [WARN] .venv nicht gefunden - nutze globales python.
+    echo        venv anlegen:  py -m venv .venv ^&^& .venv\Scripts\activate ^&^& pip install -r requirements.txt
+    set "PY=python"
+)
 
-REM Fenster offen halten, falls ein Fehler kommt — sonst klappt es zu
+REM Auto-Tuner starten und alle uebergebenen Argumente weiterreichen.
+"%PY%" auto_tuner.py %*
+
+REM Fenster offen halten, falls ein Fehler kommt - sonst klappt es zu
 pause

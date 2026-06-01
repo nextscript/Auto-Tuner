@@ -327,6 +327,66 @@ def metadata_native_context(md: Dict[str, Any]) -> int:
     return 0
 
 
+# Keys the converters write to record the model author's recommended
+# sampler defaults. Qwen3.5/3.6, GLM-4.x and several others embed these
+# (e.g. general.sampling.temp = 1.0, general.sampling.top_k = 20). They
+# are the single most reliable per-model sampling source — better than a
+# generic family profile and far better than the global defaults.
+_SAMPLING_MD_KEYS = {
+    "temperature": ("general.sampling.temp", "general.sampling.temperature"),
+    "top_k": ("general.sampling.top_k",),
+    "top_p": ("general.sampling.top_p",),
+    "min_p": ("general.sampling.min_p",),
+    "repeat_penalty": (
+        "general.sampling.repeat_penalty",
+        "general.sampling.repetition_penalty",
+    ),
+    "presence_penalty": ("general.sampling.presence_penalty",),
+}
+
+
+def metadata_sampling(md: Dict[str, Any]) -> Dict[str, float]:
+    """Extract the author-recommended sampler settings from GGUF metadata.
+
+    Returns a dict with whatever subset of
+    ``temperature / top_k / top_p / min_p / repeat_penalty /
+    presence_penalty`` the file actually declares (missing keys are simply
+    absent — the caller decides how to merge). ``top_k`` is returned as an
+    int; everything else as a float.
+
+    These ``general.sampling.*`` keys are emitted by the mainstream
+    converter for models whose authors ship recommended defaults
+    (Qwen3.5/3.6: temp 1.0 / top_k 20 / top_p 0.95; GLM-4.x; etc.). They
+    were previously ignored, so a model with no matching YAML profile fell
+    back to the generic ``temp 0.7 / top_k 40`` defaults — a frequent cause
+    of repetition loops and broken tool-calls on models tuned for a low
+    top_k with a non-zero min_p.
+    """
+    out: Dict[str, float] = {}
+    if not md:
+        return out
+    for field_name, keys in _SAMPLING_MD_KEYS.items():
+        for k in keys:
+            v = md.get(k)
+            if v is None:
+                continue
+            # GGUF scalars may arrive as 0-d values or 1-element lists
+            # depending on the reader; coerce defensively.
+            if isinstance(v, (list, tuple)):
+                if not v:
+                    continue
+                v = v[0]
+            try:
+                if field_name == "top_k":
+                    out[field_name] = float(int(v))
+                else:
+                    out[field_name] = float(v)
+            except (TypeError, ValueError):
+                continue
+            break  # first present key wins
+    return out
+
+
 # Architektur-Namen die RoPE-Scaling (YaRN) unterstützen bis zu 1M tokens
 _ROPE_SCALE_SUPPORTED_ARCHS = frozenset(
     {
@@ -613,17 +673,21 @@ def metadata_supports_tool_use(md: Dict[str, Any], filename: str = "") -> bool:
 # ---------------------------------------------------------------------------
 # Model entries + scanner
 
-# Strip quant + extension when normalizing for mmproj pairing
+# Strip quant + extension when normalizing for mmproj pairing.
+# Recognises the standard llama.cpp quant tails plus a few non-standard
+# community ones (mxfp4 / mxfp4_moe — the MXFP4 micro-scaled FP4 format
+# used by e.g. the qwen3.6-…-mxfp4_moe GGUFs, which carry no Q*/IQ* token).
 _QUANT_PATTERN = re.compile(
-    r"[-.]"
+    r"[-._]"
     r"(?:UD-)?"
     r"(?:i\d+-)?"  # i1- prefix (imatrix variants)
     r"(?:Q\d+(?:_[A-Z0-9]+)*"
     r"|IQ\d+(?:_[A-Z0-9]+)*"
+    r"|MXFP4(?:_MOE)?"  # MXFP4 / MXFP4_MOE (no Q-prefix)
     r"|BF16|F16|F32"
     r")"
-    r"(?:[-.][0-9.]+bpw)?"
-    r"(?:[-.](?:bf16|f16|f32))?"
+    r"(?:[-._][0-9.]+bpw)?"
+    r"(?:[-._](?:bf16|f16|f32))?"
     r"\.gguf$",
     re.IGNORECASE,
 )
@@ -727,6 +791,19 @@ class ModelEntry:
         return metadata_supports_tool_use(self.metadata, self.name)
 
     @property
+    def recommended_sampling(self) -> Dict[str, float]:
+        """Author-recommended sampler settings from GGUF metadata, if any.
+
+        Subset of temperature/top_k/top_p/min_p/repeat_penalty/
+        presence_penalty actually declared in ``general.sampling.*``.
+        Empty when the file carries none. The tuner uses this to fill any
+        sampling value a matched YAML profile leaves unspecified, so models
+        without a tailored profile still run on their intended samplers
+        instead of the generic defaults.
+        """
+        return metadata_sampling(self.metadata)
+
+    @property
     def has_embedded_mtp(self) -> bool:
         """True if this GGUF contains an integrated MTP/draft-head.
 
@@ -771,22 +848,92 @@ class ModelEntry:
 
 
 def _strip_quant(filename: str) -> str:
-    if filename.lower().endswith(".gguf"):
-        return _QUANT_PATTERN.sub("", filename).rstrip(".-_")
+    """Strip the quant tail and the GGUF/mmproj extension from a filename.
+
+    Two stages:
+      1. Try the standard quant-tail pattern (``…-Q6_K_XL.gguf`` etc.) and
+         strip the whole tail if it matches.
+      2. If the name carries no recognised quant token (e.g. the
+         ``…-mxfp4_moe.gguf`` community files, or a bare
+         ``Model.gguf`` / ``…-f32.mmproj``), still remove the trailing
+         ``.gguf`` / ``.mmproj`` extension so the stem is usable for
+         prefix matching. The previous version left ``.gguf`` attached
+         whenever the quant pattern missed, which broke mmproj pairing
+         for any non-standard quant label.
+    """
+    low = filename.lower()
+    if low.endswith(".gguf"):
+        stripped = _QUANT_PATTERN.sub("", filename)
+        if stripped != filename:
+            return stripped.rstrip(".-_")
+        # No quant tail matched — just drop the extension.
+        return filename[: -len(".gguf")].rstrip(".-_")
+    if low.endswith(".mmproj"):
+        # ".mmproj"-extension projectors (e.g. LFM2.5-Audio-…-f32.mmproj).
+        # Strip a trailing precision token (f16/f32/bf16) too.
+        stem = filename[: -len(".mmproj")]
+        stem = re.sub(r"[-._](?:bf16|f16|f32)$", "", stem, flags=re.IGNORECASE)
+        return stem.rstrip(".-_")
     return filename
+
+
+def _canonical_sep(s: str) -> str:
+    """Collapse all separators (``- _ .``) to a single ``-`` and lowercase.
+
+    Used for separator-tolerant prefix matching between a model and its
+    projector: the mxfp4 pair, for instance, mixes ``-moe`` (in the
+    projector name) with ``_moe`` (in the model name), so a literal
+    ``startswith`` fails. Canonicalising both sides to ``-moe`` fixes it
+    without loosening the match to an unrelated model.
+    """
+    return re.sub(r"[-_.]+", "-", s.lower()).strip("-")
 
 
 def _normalize_model(filename: str) -> str:
     return _strip_quant(filename).lower()
 
 
+# Matches the "mmproj" marker anywhere in a filename stem, bounded by a
+# separator or the string ends — so it catches both the canonical
+# "mmproj-Model-F16.gguf" prefix form AND the mid-name form
+# "Model-mxfp4-moe-mmproj-f16.gguf". A bare substring check would also
+# fire on an unrelated word containing "mmproj", which never occurs in
+# practice, but the boundary keeps it strict regardless.
+_MMPROJ_TOKEN_RE = re.compile(r"(?:^|[-_.])mmproj(?:[-_.]|$)", re.IGNORECASE)
+
+
+def _is_mmproj_filename(name: str) -> bool:
+    """True if *name* is a vision/audio projector file.
+
+    Two independent signals:
+      1. A ``.mmproj`` extension (e.g. ``LFM2.5-Audio-1.5B-f32.mmproj``) —
+         these never reach the ``*.gguf`` glob, so the scanner picks them
+         up via a separate ``*.mmproj`` pass.
+      2. The ``mmproj`` token anywhere in a ``.gguf`` filename — covers the
+         standard ``mmproj-…`` prefix and the embedded ``…-mmproj-…`` form
+         the MXFP4 GGUFs use.
+    """
+    low = name.lower()
+    if low.endswith(".mmproj"):
+        return True
+    return bool(_MMPROJ_TOKEN_RE.search(low))
+
+
 def _normalize_mmproj(filename: str) -> str:
+    """Normalize an mmproj filename to its bare model base for matching.
+
+    The ``mmproj`` marker is removed wherever it appears — not only as a
+    leading ``mmproj-`` / ``mmproj_`` prefix but also embedded mid-name,
+    e.g. ``qwen3.6-35b-a3b-mxfp4-moe-mmproj-f16.gguf`` (the projector for
+    ``qwen3.6-35b-a3b-mxfp4_moe.gguf``), where the vendor put the quant
+    label before the ``mmproj`` token. The previous prefix-only strip left
+    those files unmatched, so the model showed up without its projector.
+    """
     base = _strip_quant(filename)
-    low = base.lower()
-    if low.startswith("mmproj-"):
-        base = base[len("mmproj-") :]
-    elif low.startswith("mmproj_"):
-        base = base[len("mmproj_") :]
+    # Remove a leading mmproj prefix first (mmproj-… / mmproj_…).
+    base = re.sub(r"^mmproj[-_.]", "", base, flags=re.IGNORECASE)
+    # Then remove any embedded/trailing mmproj token (…-mmproj-… / …-mmproj).
+    base = re.sub(r"[-_.]mmproj(?=[-_.]|$)", "", base, flags=re.IGNORECASE)
     return base.lower().rstrip(".-_")
 
 
@@ -836,6 +983,7 @@ def _find_mmproj_candidates(model: Path, candidates: List[Path]) -> List[Path]:
     precisions instead of being stuck with whatever sorted first.
     """
     model_norm = _normalize_model(model.name)
+    model_canon = _canonical_sep(model_norm)
     scored: List[Tuple[int, int, str, Path]] = []
     for c in candidates:
         if c.parent != model.parent:
@@ -843,9 +991,23 @@ def _find_mmproj_candidates(model: Path, candidates: List[Path]) -> List[Path]:
         c_norm = _normalize_mmproj(c.name)
         if not c_norm:
             continue
-        if model_norm.startswith(c_norm):
+        c_canon = _canonical_sep(c_norm)
+        # Separator-tolerant, BIDIRECTIONAL prefix match. Normally the
+        # projector base is a prefix of the model name. But the two sides
+        # don't always strip the same tokens: for the mxfp4 pair the model
+        # ("qwen3.6-35b-a3b-mxfp4_moe") loses "mxfp4_moe" as a quant tail
+        # while the projector ("…-mxfp4-moe-mmproj-f16") keeps "mxfp4-moe"
+        # (its quant token is the trailing "f16"), leaving the PROJECTOR
+        # base longer than the model base. Accept the match when either
+        # canonical base is a prefix of the other, so the pair survives
+        # regardless of which side carried the extra quant token.
+        if model_canon.startswith(c_canon) or c_canon.startswith(model_canon):
+            # Rank by the length of the OVERLAP (the shorter of the two
+            # bases), so a more-specific projector still outranks a generic
+            # one and an unrelated short prefix can't hijack the pairing.
+            overlap = min(len(model_canon), len(c_canon))
             scored.append(
-                (len(c_norm), _mmproj_precision_score(c.name), c.name.lower(), c)
+                (overlap, _mmproj_precision_score(c.name), c.name.lower(), c)
             )
     # Sort: longest prefix first, then highest precision, then name.
     scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
@@ -950,13 +1112,17 @@ def scan_models(
     if not root.exists() or not root.is_dir():
         return []
 
+    # Projectors can ship either as ".gguf" (the common case) or with a
+    # ".mmproj" extension (some audio projectors, e.g. LFM2.5-Audio). The
+    # ".mmproj" files are NOT matched by the "*.gguf" glob, so collect them
+    # explicitly and feed them into the same projector pool.
     all_gguf = list(root.rglob("*.gguf"))
-    mmprojs: List[Path] = []
+    all_mmproj_ext = list(root.rglob("*.mmproj"))
+    mmprojs: List[Path] = list(all_mmproj_ext)
     drafts: List[Path] = []
     models: List[Path] = []
     for f in all_gguf:
-        nm = f.name.lower()
-        if nm.startswith("mmproj-") or nm.startswith("mmproj_"):
+        if _is_mmproj_filename(f.name):
             mmprojs.append(f)
         elif _is_draft_filename(f.name):
             drafts.append(f)
