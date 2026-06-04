@@ -1,0 +1,70 @@
+display_name: "Granite Embedding Multilingual R2 (IBM)"
+patterns:
+  - granite-embedding-311m-multilingual-r2
+  - granite-embedding-97m-multilingual-r2
+  - granite-embedding-multilingual-r2
+  - granite-embedding-multilingual
+  - granite-embedding
+
+# llama.cpp arch string: "modern-bert" (LLM_ARCH_MODERN_BERT). Die Granite
+# Embedding R2 Modelle basieren auf der ModernBERT-Architektur; PR #22716
+# (b9500) ergänzt nur den Tokenizer/Pre-Type (granite-embed-multi-97m /
+# -311m) und hidden_activation — der Loader ist der bestehende modern-bert.
+#
+# Das ist ein EMBEDDING-Modell, KEIN Chat/Completion-Modell:
+#   - granite-embedding-97m-multilingual-r2  : 97M,  384-dim Vektoren
+#   - granite-embedding-311m-multilingual-r2 : 311M, 768-dim (Matryoshka:
+#       truncatebar auf 512/384/256/128)
+# Beide: 200+ Sprachen, 32768 Token Kontext, CLS-Pooling, Apache 2.0.
+#
+# Betrieb als llama-server-Embedding-Endpoint (POST /embedding bzw.
+# OpenAI-kompatibel /v1/embeddings). Sampling/Reasoning/Speculation sind
+# hier bedeutungslos — der Generierungspfad wird nicht benutzt.
+max_context: 32768
+
+# KV-Quant ist für einen reinen Encoder/Embedder irrelevant (keine
+# autoregressive KV-Cache-Nutzung im Embedding-Modus). Wert bleibt auf dem
+# loader-Default, nur damit das Feld gesetzt ist.
+recommended_kv_quant: q8_0
+
+# Embedding-Server-Schalter. --embeddings aktiviert den Embedding-Modus,
+# --pooling cls entspricht dem von IBM dokumentierten CLS-Pooling der R2-
+# Multilingual-Modelle (model_output[0][:, 0]). Beide Flags existieren in
+# b9500 (common/arg.cpp: "--embedding"/"--embeddings", "--pooling
+# {none,mean,cls,last,rank}").
+extra_args:
+  - --embeddings
+  - --pooling
+  - cls
+
+# Kein Performance-Target-Trick: ein 97M/311M-Encoder passt komplett in
+# VRAM. Leer = globaler Default.
+performance_target: ""
+
+# Sampling steht nur formal hier (Embedding-Modus generiert nicht). Werte
+# sind neutral; sie werden im --embeddings-Betrieb nicht ausgewertet.
+sampling:
+  chat:
+    temperature: 0.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+# Keine Speculative-Decoding-Konfiguration — für ein Embedding-Modell
+# sinnlos. draft_max bewusst 0 lassen wäre nicht nötig; der Tuner aktiviert
+# Speculation ohnehin nur bei Draft/MTP-Fund, was es hier nicht gibt.
+
+notes: >
+  IBM Granite Embedding Multilingual R2 (April 2026) — ModernBERT-basierte
+  Dense-Embedding-Modelle, arch "modern-bert". Zwei Größen: 97m (384-dim)
+  und 311m (768-dim, Matryoshka 768->512/384/256/128). 200+ Sprachen
+  (erweitert für 52 + Code), 32768 Token Kontext, CLS-Pooling, Apache 2.0.
+  KEIN Chat/Completion — als Embedding-Endpoint betreiben (--embeddings,
+  --pooling cls sind in extra_args gesetzt). Use-Cases: semantische Suche,
+  RAG-Retrieval. Reranker separat (eigenes Modell).
+  HINWEIS: Falls AutoTuner-GUI-Logik (Sampling-Dropdowns, Draft/n-gram-
+  Checkboxen, KV-Quant) für dieses Profil sichtbar bleibt, einfach
+  ignorieren — im --embeddings-Modus haben sie keine Wirkung. Sollte ein
+  künftiger AutoTuner-Build einen expliziten "embedding"-Task-Schalter
+  bekommen, kann dieses Profil entsprechend vereinfacht werden.

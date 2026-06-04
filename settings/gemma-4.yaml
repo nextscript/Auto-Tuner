@@ -3,7 +3,7 @@ patterns:
   - gemma-4
   - gemma4
 
-# E2B/E4B unterstützen 131072 (128k); 26B-A4B und 31B bis 262144 (256k).
+# E2B/E4B unterstützen 131072 (128k); 12B, 26B-A4B und 31B bis 262144 (256k).
 # Wird automatisch via GGUF-Metadata (native_context) je nach Modell
 # heruntergeregelt - daher hier den größten Wert eintragen.
 max_context: 262144
@@ -11,10 +11,13 @@ recommended_kv_quant: q8_0
 
 # RoPE-Scaling (YaRN): Optional aktivierbar wenn genügend Speicher frei ist
 # und der berechnete Context das native Limit überschreitet.
+# HINWEIS: greift bei Gemma 4 nur über diese rope_scale.enabled-Flagge, NICHT
+# automatisch — die Arch "gemma4" steht (korrekt) nicht in scanner.py's
+# _ROPE_SCALE_SUPPORTED_ARCHS, weil 256k nativ für normale Nutzung reicht.
 rope_scale:
   enabled: false        # Standard aus — User kann in GUI aktivieren
   max_context: 524288   # 0.5M tokens mit YaRN möglich
-  scale_factor: 4.0     # yarn scaling factor (4x für Gemma-4-E2B/E4B, 2x für 26B-A4B/31B)
+  scale_factor: 4.0     # yarn scaling factor (4x für Gemma-4-E2B/E4B, 2x für 12B/26B-A4B/31B)
 
 # Performance-Target-Empfehlung des Profils.
 # Gemma-4-26B-A4B ist ein MoE-Modell (4B aktiv von 26B total), das auf
@@ -23,8 +26,11 @@ rope_scale:
 # VRAM für Expert-Layer übrig bleibt. Wer regelmäßig >32k Kontext
 # braucht, in der GUI auf "balanced" oder "safe" wechseln — die
 # GUI-Wahl gewinnt immer gegen diese Empfehlung.
-# Für die Dense-Varianten (E2B/E4B/31B) ist das Target relativ
-# folgenlos, weil sie eh komplett in VRAM passen.
+# Für die Dense-Varianten (E2B/E4B/12B/31B) ist das Target weitgehend
+# folgenlos, SOLANGE das Modell komplett in VRAM passt: das 12B (dense,
+# ~14 GB @ Q8) passt auf der 32-GB-R9700 mit vollem KV locker. NUR auf
+# einer 16-GB-Karte würde der 32k-KV-Cap das dense 12B unnötig
+# beschränken — dort dann in der GUI auf "balanced"/"safe" stellen.
 performance_target: throughput
 
 # Sampling-Profile pro Modus.
@@ -62,7 +68,14 @@ draft_p_min: 0.75
 
 notes: >
   Gemma ist empfindlich gegenüber repeat_penalty > 1.0.
-  E2B/E4B = multimodal (Text+Bild+Audio), 26B-A4B + 31B = Text+Bild.
+  Multimodalität nach Größe: E2B/E4B = Text+Bild+Audio, 12B = Text+Bild+Audio
+  (NEU, "Unified"-Variante: encoder-free, Vision/Audio über direkte
+  Linear-Projektionen statt separater Encoder), 26B-A4B + 31B = Text+Bild.
+  Kontext: E2B/E4B = 128k, 12B/26B-A4B/31B = 256k.
+  Arch-Hinweis: das 12B-Sprachmodell-GGUF lädt unter general.architecture
+  "gemma4" (identisch zur restlichen Familie); die Strings gemma4uv/gemma4ua
+  sind nur Projector-Typen auf der separaten mmproj-Datei. Scanner, KV-Logik
+  und match_profile behandeln das 12B daher wie jedes andere Gemma-4-Modell.
   Thinking-Modus aktivierbar durch <|think|> am Anfang des System-Prompts.
   Coding-Profil nutzt temp=1.5 (vs. 1.0 chat) entsprechend Community-Tests
   die zeigen, dass Gemma 4 für Coding mit höherer Temperatur kreativere

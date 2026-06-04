@@ -1,0 +1,86 @@
+display_name: "EXAONE 4.5 (LG AI Research)"
+patterns:
+  - exaone-4.5
+  - exaone4.5
+  - exaone-4-5
+  - exaone-4
+
+# llama.cpp arch string: "exaone4" (LLM_ARCH_EXAONE4). EXAONE 4.5 wird über
+# Exaone4_5_ForConditionalGeneration -> Exaone4_5_TextModel(Exaone4Model)
+# konvertiert; das Sprachmodell-GGUF trägt general.architecture "exaone4"
+# (Tensors matchen EXAONE4). PR #21733, b9500.
+# Die Vision-Tower-Tensoren landen wie üblich in einer separaten
+# mmproj-Datei (Projector-Typ "exaone4_5", Qwen2-VL-Style ViT).
+#
+# EXAONE 4.5 (April 2026): 33B total (31.7B Core-LLM + 1.29B Vision-Encoder),
+# DENSE (kein MoE). Hybrid-Attention: 64 Main-Layer, Muster aus 3x
+# Sliding-Window-Attention (4096er Fenster, 40 Q-Heads / 8 KV-Heads) + 1x
+# Global-Attention (NoPE, keine Positional Embeddings), 16x wiederholt.
+# Vision-Language (Text + Bild). Lizenz: nicht-kommerziell (Research/Academic).
+#
+# Kontext: 262144 (256k), via Context-Extension direkt in der SFT-Stage.
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# RoPE-Scaling: aus. 256k ist nativ; die Global-Layer nutzen ohnehin NoPE
+# (kein RoPE zum Skalieren). Arch "exaone4" steht nicht in scanner.py's
+# _ROPE_SCALE_SUPPORTED_ARCHS — korrekt so.
+rope_scale:
+  enabled: false
+  max_context: 262144
+  scale_factor: 1.0
+
+# Dense 33B → kein Throughput-Trick nötig. Auf der 32-GB-R9700 passt das
+# 33B nur quantisiert (Q4_K_M ~20 GB Weights + KV); bei zu großem Kontext
+# regelt die Cascade den ctx automatisch herunter. "balanced" als neutraler
+# Default; leer lassen wäre auch ok (= globaler Default).
+performance_target: balanced
+
+sampling:
+  chat:
+    # LG-offizielle Empfehlung: temp=1.0, top_p=0.95, min_p=0,
+    # presence_penalty=1.5. presence_penalty hier KONSERVATIV auf 0.0
+    # (siehe Begründung in notes — 1.5 erzeugt reproduzierbar
+    # Tool-Calling-Schleifen, gleiche Problematik wie bei Qwen3.6).
+    temperature: 1.0
+    top_k: 0          # LG gibt kein top_k vor → deaktiviert
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    # Etwas konservativer für deterministischere Code-Ausgabe; LG selbst
+    # gibt keine separaten Coding-Werte vor, daher leicht reduzierte Temp.
+    temperature: 0.7
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+# Speculative decoding.
+# src/models/exaone4.cpp (b9500): "MTP / NextN tail blocks are loaded for
+# compatibility but NOT executed (same as exaone-moe)." → es gibt KEINE
+# nutzbare integrierte MTP-Spekulation für exaone4. Daher klassisches
+# draftless ngram-mod (Default), KEIN draft-mtp.
+# draft_max=2 als Vulkan-Grenze (greift nur, falls extern ein -md-Drafter
+# gepaart wird; EXAONE 4.5 hat keinen offiziellen Draft-Sibling).
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  LG AI Research EXAONE 4.5 — erstes Open-Weight VLM von LG, 33B total
+  (31.7B Core + 1.29B Vision), DENSE, Text+Bild, 256k Kontext.
+  Hybrid-Attention (3x SWA-4096 + 1x Global-NoPE, 16x), 64 Layer.
+  WICHTIG Lizenz: nicht-kommerziell — nur Research/Academic, keine
+  Produktion (anders als die meisten anderen Profile hier).
+  LG-Launch-Command nutzt `-fa on -sm row -c 262144 --no-context-shift`;
+  `-sm row` (row-split) statt layer-split kann bei dieser Hybrid-Attention
+  auf Multi-GPU stabiler sein — bei Bedarf via Expert-Panel/Extra-Args.
+  Vision braucht die separate mmproj-Datei (mmproj-EXAONE-4.5-*.gguf).
+  Integrierte MTP/NextN-Layer existieren im GGUF, werden von llama.cpp
+  (b9500) aber NICHT ausgeführt — daher kein draft-mtp, sondern draftless
+  ngram-mod. presence_penalty steht auf 0.0 statt LGs offizieller 1.5,
+  weil 1.5 bei Tool-Calling/strukturierter Ausgabe Schleifen erzeugt; für
+  reinen Chat ohne Tools: `-- --presence-penalty 1.5`.

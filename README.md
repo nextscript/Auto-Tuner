@@ -526,6 +526,36 @@ notes: >
 Profiles with empty `patterns:` become the fallback when nothing else
 matches. See `settings/_default.yaml`.
 
+**Profiles bundled as of b9500** (arch string read from GGUF metadata):
+
+| Profile file | Models | llama.cpp arch |
+|--------------|--------|----------------|
+| `gemma-4.yaml` | Gemma 4 E2B/E4B/**12B**/26B-A4B/31B | `gemma4` |
+| `mellum.yaml` | JetBrains Mellum2-12B-A2.5B (Base/Instruct/Thinking), MoE | `mellum` |
+| `exaone-4_5.yaml` | LG EXAONE 4.5 33B VLM (dense, non-commercial license) | `exaone4` |
+| `step35.yaml` | StepFun Step 3.5 Flash + Step 3.7-Flash (MoE ~196–198B/11B, MTP-3) | `step35` |
+| `granite-embedding-r2.yaml` | IBM Granite Embedding Multilingual R2 97m/311m (**embedding**, not chat) | `modern-bert` |
+
+Notes on the new profiles:
+
+- **Mellum 2** is a code-focused MoE (64 experts, 8 active; 12B total /
+  2.5B active; 128k ctx). `ngram_method` is deliberately set to
+  `ngram-map-k4v` (MTP-compatible) so it survives whether or not llama.cpp's
+  `mellum` loader executes JetBrains' MTP head.
+- **EXAONE 4.5** is a dense 33B VLM. Its integrated MTP/NextN tail blocks are
+  *loaded but not executed* by llama.cpp (b9500, same as `exaone-moe`), so the
+  profile uses draftless `ngram-mod`, not `draft-mtp`. License is
+  non-commercial (research/academic only).
+- **Step 3.5 / 3.7-Flash** both load under `step35` and both carry a real
+  MTP-3 head (`num_nextn_predict_layers`), so the profile pairs
+  `draft-mtp` + `ngram-map-k4v` with `draft_max: 3`. ⚠️ At ~196–198B MoE
+  these exceed this machine's 48 GB (VRAM+RAM) — realistically need heavy
+  `--n-cpu-moe` offload or are not runnable; the profile is for
+  correctness/future smaller builds.
+- **Granite Embedding R2** is an *embedding* model — it runs as an embedding
+  endpoint (`--embeddings --pooling cls`, set via `extra_args`), not a
+  chat/completion model. Sampling/draft fields are inert in that mode.
+
 ## How the auto-tuning works
 
 1. **Detect**: total / free RAM, every GPU's total / free VRAM, total
@@ -629,7 +659,7 @@ cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TY
 cmake --build build --config Release -j $(nproc)
 ```
 
-## Server features (as of b9442)
+## Server features (as of b9500)
 
 The following `llama-server` features are supported (from `tools/server/README.md`):
 
@@ -659,6 +689,62 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--rope-scaling yarn` | ✅ Already present |
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
+
+### Review b9442 → b9500 (58 commits)
+
+Full review of all 58 commits between b9442 and b9500. **Result: no
+functional AutoTuner changes to existing flags needed** — every server flag
+and `--spec-type` value in use was verified against the b9500
+`common/arg.cpp` and `common/speculative.cpp` and is unchanged and still
+valid. Specifically re-confirmed present at b9500: `--spec-type`,
+`--spec-draft-ngl/-n-max/-p-min`, `--spec-ngram-mod-n-match/-n-min/-n-max`,
+`--spec-ngram-map-k4v-size-n/-size-m/-min-hits`, and the spec-type tokens
+`draft-mtp`, `ngram-mod`, `ngram-map-k`, `ngram-map-k4v`, `ngram-simple`,
+`ngram-cache`. Relevant points:
+
+- **Speculative: `draft-simple` auto-enable removed (#23988).** The server
+  no longer auto-enables a `draft-simple` path; the `common/arg.cpp` diff was
+  whitespace-only (no flag renamed/removed). **No impact** — AutoTuner always
+  emits `--spec-type` explicitly and never relied on auto-enabling. A new
+  `draft-eagle3` spec-type also exists now (EAGLE3 drafters); not emitted by
+  AutoTuner.
+- **Gemma 4 "unified" runtime + 12B (#24077, #24082, #24088, #24025).**
+  Vision/audio (mtmd) fixes for the encoder-free "unified" Gemma 4 and the
+  new arch enums `gemma4uv`/`gemma4ua`. The **12B `gemma-4-12b-it` is the
+  unified variant**, but its language-model GGUF still loads under
+  `general.architecture` = **`gemma4`** (verified in the b9500 converter:
+  `Gemma4UnifiedModel` → `MODEL_ARCH.GEMMA4`); `gemma4uv`/`gemma4ua` are only
+  projector types on the separate mmproj file. → scanner, KV-sizing and
+  `match_profile` treat the 12B exactly like the rest of the family. The
+  `gemma-4.yaml` profile was updated for accuracy (12B added to the
+  context-tier comment and the multimodal/audio notes; throughput-vs-dense
+  caveat clarified) — no code change required for it to work.
+- **Qwen3.5 MTP post-norm (#24025).** Qwen35 now uses the post-norm hidden
+  state for MTP, internal rename `pre_norm` → `nextn`. Runtime correction
+  only; no CLI flag or metadata-key change → the tri-state MTP scanner over
+  `{arch}.nextn_predict_layers` stays valid.
+- **New architectures (profiles added this round).** `mellum` (JetBrains
+  Mellum2-12B-A2.5B, MoE, #23966), `exaone4` (EXAONE 4.5 33B VLM, #21733),
+  `step35` (StepFun Step 3.5 + Step 3.7-Flash, MoE+MTP-3, #23274/#23845), and
+  `modern-bert` (IBM Granite Embedding Multilingual R2 97m/311m, #22716). See
+  *Adding profiles for new models* — these are profile additions, not forced
+  by any flag rename. The arch is read dynamically from the GGUF metadata.
+- **Vulkan performance (transparent).** Device mutex no longer held while
+  compiling pipelines (#23641), reduced host-memory lock contention (#23376),
+  Q3_K/Q6_K block-load on 32-bit ints (#23056). Benefits from the rebuild
+  alone, no flag change; relevant to the Vulkan backend on the R9700 /
+  RX 9070 XT (faster server start / pipeline warmup).
+- **Library API (not CLI).** `llama_set_warmup` deprecated (#24009),
+  `llama_context` max-outputs limited (#23861), CUDA reserves quantized-KV
+  space at startup (#23907). No effect on the flags AutoTuner emits.
+
+**Scanner fix shipped this round (AutoTuner-side):** `scanner.py`'s
+`_ROPE_SCALE_SUPPORTED_ARCHS` matched only the `qwen2` prefix, so the newer
+`qwen3*` / `qwen35*` arch strings (Qwen3/3.5/3.6) fell through and were
+excluded from automatic YaRN (they could only get RoPE-scaling via an
+explicit `rope_scale.enabled: true` in the profile). Broadened the prefix
+`qwen2` → `qwen` (matched via `startswith`, so it now covers
+`qwen`/`qwen2*`/`qwen3*`/`qwen35*` and stays correct for future Qwen archs).
 
 ### Review b9409 → b9442
 

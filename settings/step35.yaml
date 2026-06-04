@@ -1,0 +1,94 @@
+display_name: "StepFun Step 3.5 / 3.7 Flash"
+patterns:
+  - step-3.7-flash
+  - step3.7-flash
+  - step3p7
+  - step-3.5-flash
+  - step3.5-flash
+  - step3p5
+  - step35
+
+# llama.cpp arch string: "step35" (LLM_ARCH_STEP35). EIN Profil deckt beide
+# StepFun-Generationen ab, weil beide unter step35 laden:
+#   - Step3p5ForCausalLM            -> Step35Model -> MODEL_ARCH.STEP35
+#   - Step3p7ForConditionalGeneration (Step-3.7-Flash, VLM) -> ebenfalls
+#     Step35Model -> MODEL_ARCH.STEP35
+# (PR #23274 Step3.5-MTP, PR #23845 Step3.7-Flash-Convert, b9500.)
+# Bei Step-3.7-Flash landet der Vision-Tower in einer separaten mmproj-Datei.
+#
+# Step 3.5 Flash : Sparse MoE, 196B total / ~11B aktiv, 288 routed Experten
+#                  + 1 shared, Top-8/Token, 3:1 SWA/Full-Attention, MTP-3.
+# Step 3.7 Flash : 198B total / ~11B aktiv, Text-Backbone = Step 3.5, +Vision
+#                  (Bild/Video), 3:1 SWA (512er-Fenster)/Global, MTP-3.
+#
+# Kontext: 256k bei beiden.
+# ACHTUNG: 196-198B MoE ist RIESIG. Selbst @ Q4 sind das ~110+ GB Weights —
+# passt NICHT in 48 GB VRAM+RAM dieses Systems. Realistisch nur mit starkem
+# --n-cpu-moe-Offload und entsprechend langsamer TG, oder gar nicht. Das
+# Profil ist trotzdem korrekt, falls ein kleiner-quantisierter Build oder
+# zukünftig eine kompaktere Variante hinzukommt.
+max_context: 262144
+# MoE mit sehr vielen Experten → q5_0 spart KV-VRAM für mehr Expert-Layer.
+recommended_kv_quant: q5_0
+
+# RoPE-Scaling: aus (256k nativ). Arch "step35" nicht in
+# _ROPE_SCALE_SUPPORTED_ARCHS — korrekt.
+rope_scale:
+  enabled: false
+  max_context: 262144
+  scale_factor: 1.0
+
+# Extrem-MoE → throughput, um so viele Expert-Layer wie möglich im VRAM zu
+# halten (KV-Budget auf 32k gedeckelt). Bei einem Modell dieser Größe ist
+# der Großteil der Experten ohnehin via --n-cpu-moe im RAM.
+performance_target: throughput
+
+sampling:
+  chat:
+    # StepFun gibt keine knappen offiziellen Sampling-Defaults in der
+    # Modellkarte; die Reasoning-Modelle laufen gut mit moderaten Werten.
+    # Drei Reasoning-Level (low/medium/high) werden über das Chat-Template
+    # / die API gesteuert, nicht über Sampling.
+    temperature: 0.7
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Agentisches Coding ist ein Kern-Use-Case (74.4% SWE-bench Verified) —
+    # etwas niedrigere Temp für stabileres Tool-Calling.
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+# Speculative decoding — beide Modelle haben einen echten MTP-3-Head.
+# Die Conversion schreibt add_nextn_predict_layers (num_nextn_predict_layers),
+# d.h. der Tri-State-MTP-Scanner sollte "found" melden und der Tuner
+# kombiniert automatisch zu: --spec-type draft-mtp,ngram-map-k4v
+#   - ngram_method = ngram-map-k4v (MTP-kompatibel, wird neben draft-mtp
+#     NICHT unterdrückt; ngram-mod WÜRDE unterdrückt, daher hier k4v).
+#   - draft_max = 3: MTP-3 ist auf 3 Token ausgelegt. Auf Vulkan/AMD ist 2
+#     normalerweise die Grenze — hier wird 3 belassen, weil das die native
+#     MTP-Tiefe ist; bei Instabilität/schlechter Acceptance im Expert-Panel
+#     auf 2 reduzieren.
+draft_max: 3
+draft_p_min: 0.75
+ngram_method: ngram-map-k4v
+ngram_k4v_size_n: 16
+ngram_k4v_size_m: 24
+ngram_k4v_min_hits: 1
+
+notes: >
+  StepFun Step 3.5 Flash (Text) + Step 3.7 Flash (VLM, +Bild/Video), beide
+  Sparse-MoE ~196-198B total / ~11B aktiv, 3:1 SWA/Full-Attention, MTP-3,
+  256k Kontext. Beide laden unter arch "step35".
+  GRÖSSEN-WARNUNG: ~196-198B MoE übersteigt 48 GB (VRAM+RAM) dieses Systems
+  bei Weitem — realistisch nur mit massivem CPU-MoE-Offload und langsamer
+  Generierung, oder nicht lauffähig. Profil dient der Korrektheit/Zukunft.
+  Reasoning-Level (low/medium/high) werden via Chat-Template/API gesteuert.
+  draft_max steht auf 3 (native MTP-3-Tiefe); auf Vulkan ggf. instabil →
+  im Expert-Panel auf 2 reduzieren. Bei Step-3.7-Flash separate mmproj-Datei
+  für Vision. `--jinja` aktiviert saubere Reasoning-Trennung:
+    -- --jinja

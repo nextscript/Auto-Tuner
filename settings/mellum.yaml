@@ -1,0 +1,91 @@
+display_name: "Mellum 2 (JetBrains)"
+patterns:
+  - mellum2
+  - mellum-2
+  - mellum
+
+# llama.cpp arch string: "mellum" (LLM_ARCH_MELLUM, added in PR #23966, b9500).
+# Converter: MellumForCausalLM -> MODEL_ARCH.MELLUM.
+#
+# Mellum2-12B-A2.5B: sparse MoE, 64 Experten (8 aktiv/Token), 12B total /
+# 2.5B aktiv. Code-fokussiertes "Focal Model" (Completion, Tool-Use,
+# Refactoring, agentische Sub-Tasks). Drei Checkpoints:
+#   -Base      : Completion/Pretrain-Basis
+#   -Instruct  : direkte Antworten, kein CoT
+#   -Thinking  : Reasoning in <think>...</think>-Blöcken
+#
+# Kontext: 131072 (128k), erreicht via layer-selektivem YaRN auf den
+# Global-Attention-Layern (SWA-Layer bleiben kurz). Wird automatisch über
+# GGUF native_context begrenzt, daher hier den nativen 128k-Wert.
+max_context: 131072
+# MoE-A2.5B → q5_0 wie bei den Qwen3.5/3.6-MoE-Varianten: spart ggü. q8_0
+# ~37% KV-VRAM, sodass auf 16-GB-Karten mehr Expert-Layer im VRAM bleiben.
+# Für reine Sessions auf der 32-GB-R9700, wo eh alles passt, kann im
+# Expert-Panel q8_0 gepinnt werden.
+recommended_kv_quant: q5_0
+
+# RoPE-Scaling: aus. Das Modell IST bereits das YaRN-erweiterte 128k-Target;
+# weiter zu skalieren wird von JetBrains nicht unterstützt. Arch "mellum"
+# steht ohnehin nicht in scanner.py's _ROPE_SCALE_SUPPORTED_ARCHS.
+rope_scale:
+  enabled: false
+  max_context: 131072
+  scale_factor: 1.0
+
+# MoE-Modell, das auf 16-GB-GPUs nicht voll passt → throughput hält mehr
+# Expert-Layer im VRAM (32k KV-Budget statt 64k). Auf der 32-GB-R9700
+# folgenlos (12B @ q4/q5 + KV passt locker). Bei regelmäßig >32k Kontext
+# in der GUI auf "balanced"/"safe".
+performance_target: throughput
+
+sampling:
+  chat:
+    # JetBrains-Empfehlung (Instruct & Thinking, identisch).
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Code-Completion/agentisch: gleiche JetBrains-Werte. Mellum ist ein
+    # Code-Modell by design — der offizielle Completion-Sweep nutzt
+    # ebenfalls temp=0.6/top_p=0.95/top_k=20 (kein Greedy).
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+# Speculative decoding.
+# JetBrains beschreibt einen integrierten MTP-Head für draftless
+# Self-Speculation. UNSICHER ob llama.cpp's "mellum"-Loader (b9500) die
+# MTP-Tail-Layer auch AUSFÜHRT — src/models/mellum.cpp zeigt (noch) kein
+# nextn-Handling. Daher defensiv:
+#   - ngram_method bewusst auf "ngram-map-k4v" statt "ngram-mod": k4v ist
+#     MTP-kompatibel und wird NICHT unterdrückt, falls der Scanner einen
+#     MTP-Head erkennt. Erkennt er keinen, läuft k4v einfach als
+#     eigenständige draftless Methode → in beiden Fällen kein Crash.
+#   - Falls der Tri-State-MTP-Scanner "found" meldet, kombiniert der Tuner
+#     automatisch zu: --spec-type draft-mtp,ngram-map-k4v
+# draft_max=2: Vulkan-Grenze wie bei allen MoE-A*B-Profilen.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-map-k4v
+ngram_k4v_size_n: 16
+ngram_k4v_size_m: 24
+ngram_k4v_min_hits: 1
+
+notes: >
+  JetBrains Mellum2-12B-A2.5B — sparse MoE (64 Experten, 8 aktiv), 12B total
+  / 2.5B aktiv, 128k Kontext via layer-selektives YaRN, Apache 2.0. Kein
+  Multimodal. Inference-Kosten/Speed verhalten sich wie ein dichtes 2.5B,
+  trotz 12B Gesamtgröße.
+  Drei Varianten: Base (Completion), Instruct (direkt), Thinking
+  (<think>-CoT). Für die Thinking-Variante `--jinja` als Extra-Arg setzen,
+  damit <think>-Blöcke sauber ins reasoning_content-Feld getrennt werden:
+    -- --jinja
+  ngram_method steht hier ABSICHTLICH auf ngram-map-k4v (nicht dem globalen
+  Default ngram-mod): das ist MTP-kompatibel und übersteht beide Fälle —
+  egal ob llama.cpp den von JetBrains beschriebenen MTP-Head erkennt/ausführt
+  oder nicht. Bei Crashes mit Speculation: in der GUI Draft/n-gram abschalten
+  und tok/s vergleichen (MoE-A2.5B profitiert nicht garantiert von Speculation).

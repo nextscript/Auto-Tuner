@@ -387,10 +387,16 @@ def metadata_sampling(md: Dict[str, Any]) -> Dict[str, float]:
     return out
 
 
-# Architektur-Namen die RoPE-Scaling (YaRN) unterstützen bis zu 1M tokens
+# Architektur-Namen die RoPE-Scaling (YaRN) unterstützen bis zu 1M tokens.
+# Gematcht wird via arch.startswith() in metadata_supports_rope_scale(), daher
+# deckt das Prefix "qwen" ALLE Qwen-Arch-Strings ab: qwen2/qwen2moe/qwen2vl
+# UND qwen3/qwen3moe/qwen3next/qwen3vl/qwen3vlmoe/qwen35/qwen35moe. Vorher
+# stand hier "qwen2", was die neueren qwen3*/qwen35*-Strings NICHT traf —
+# die ganze Qwen3/3.5/3.6-Familie wäre so vom automatischen YaRN
+# ausgeschlossen gewesen (nur noch via rope_scale.enabled=true im Profil).
 _ROPE_SCALE_SUPPORTED_ARCHS = frozenset(
     {
-        "qwen2",  # Qwen2/Qwen2.5/Qwen3/Qwen3.5/Qwen3.6 Familie
+        "qwen",  # Qwen / Qwen2 / Qwen2.5 / Qwen3 / Qwen3.5 / Qwen3.6 Familie
     }
 )
 
