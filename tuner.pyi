@@ -114,6 +114,7 @@ def compute_config(
     force_n_cpu_moe: Optional[int] = ...,
     force_rope_scale: Optional[bool] = ...,
     gpu_priorities: Optional[Dict[str, int]] = ...,
+    force_gpu: Optional[str] = ...,
 ) -> TunedConfig: ...
 
 

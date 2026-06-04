@@ -589,3 +589,32 @@ def set_gpu_priority(gpu_name: str, priority: int) -> None:
     overrides[gpu_name] = entry
     s["gpu_overrides"] = overrides
     save_settings(s)
+
+
+# ---------------------------------------------------------------------------
+# Forced GPU (hard pin for the next server launch)
+#
+# Stored as a top-level string under "forced_gpu". When set to a GPU name
+# (or a distinctive substring of it, e.g. "R9700"), compute_config pins the
+# server to that single card and hides the others — the manual "boot only on
+# the GPU I choose" control used when launching a second server so it lands
+# on the still-empty card instead of piling onto an already-full one. An
+# empty string / missing key means "auto" (free-VRAM-aware selection).
+
+
+def get_forced_gpu() -> Optional[str]:
+    """Return the GPU name the next launch is pinned to, or None for auto."""
+    val = load_settings().get("forced_gpu")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def set_forced_gpu(gpu_name: Optional[str]) -> None:
+    """Pin launches to *gpu_name* exclusively, or clear the pin when None/empty."""
+    s = load_settings()
+    if gpu_name and gpu_name.strip():
+        s["forced_gpu"] = gpu_name.strip()
+    else:
+        s.pop("forced_gpu", None)
+    save_settings(s)

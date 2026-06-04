@@ -820,6 +820,75 @@ def test_priority_weighted_tensor_split(tmp_path) -> None:
     )
 
 
+def test_second_server_avoids_full_primary(tmp_path) -> None:
+    """Regression (Basti report #2): launching a second server must NOT
+    pile onto the high-priority R9700 when server #1 has already filled it.
+
+    Scenario: the 32 GB R9700 is down to ~1 GB free (server #1 holds it),
+    while the 16 GB RX 9070 XT still has ~13 GB free. A new ~10 GB model
+    scored purely by priority×VRAM would still pick the R9700 and OOM.
+    The free-VRAM demotion must instead route it to the 9070 XT, which is
+    the only card that can actually hold the weights.
+    """
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=10.0)
+    profile = match_profile(model.name, profiles)
+    # R9700 nearly full (1 GB free), 9070 XT mostly free (13 GB free).
+    sys_info = _fake_dual_gpu_system_with_vk_order(
+        large_free=1, small_free=13,
+    )
+    # Even with the R9700 given a higher priority, free VRAM must win:
+    prio = {
+        "AMD Radeon AI PRO R9700": 2,
+        "AMD Radeon RX 9070 XT": 1,
+    }
+    cfg = compute_config(model, sys_info, profile, gpu_priorities=prio)
+
+    # The model fits on the 9070 XT alone → exclusive pin to its Vulkan
+    # index (small_vk_idx=0), and the (full) R9700 must be hidden.
+    assert cfg.full_offload is True
+    assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "0", (
+        "second server must pin to the only card with free VRAM (9070 XT, "
+        f"Vulkan 0); got {cfg.env_overrides.get('GGML_VK_VISIBLE_DEVICES')!r}"
+    )
+    assert cfg.env_overrides.get("HIP_VISIBLE_DEVICES") == "0"
+
+
+def test_force_gpu_pins_to_named_card(tmp_path) -> None:
+    """force_gpu must pin the server to the named card EXCLUSIVELY, even
+    when another GPU scores higher by priority×VRAM. This is the manual
+    "boot only on the GPU I choose" override."""
+    profiles = load_profiles(SETTINGS_DIR)
+    # Small model that would otherwise auto-pin to the 32 GB R9700.
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_dual_gpu_system_with_vk_order()  # both cards have room
+
+    # Force onto the 9070 XT via a substring of its name.
+    cfg = compute_config(model, sys_info, profile, force_gpu="9070")
+
+    assert cfg.full_offload is True
+    # 9070 XT is Vulkan device 0 (small_vk_idx=0) — it must be the sole
+    # visible device, hiding the R9700 the auto-logic would have chosen.
+    assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "0"
+    assert cfg.env_overrides.get("HIP_VISIBLE_DEVICES") == "0"
+
+
+def test_force_gpu_unknown_name_falls_back_to_auto(tmp_path) -> None:
+    """An unknown force_gpu name is ignored — the config must fall back to
+    automatic selection rather than crashing or producing no placement."""
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_dual_gpu_system_with_vk_order()
+
+    cfg = compute_config(model, sys_info, profile, force_gpu="RTX 5090")
+
+    # Falls back to auto: small model pins to the R9700 (Vulkan index 1).
+    assert cfg.full_offload is True
+    assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "1"
+
+
 # ---------------------------------------------------------------------------
 # llama-server resolver
 

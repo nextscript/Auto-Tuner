@@ -765,6 +765,18 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "(case-insensitive contains-match). Without: reports all models.",
     )
     p.add_argument(
+        "--gpu",
+        "-g",
+        metavar="NAME",
+        default=None,
+        help="Pin this server to ONE GPU exclusively (boots only on the "
+        "named card, hides the rest). NAME is matched case-insensitively "
+        "as a substring of the card name, e.g. 'R9700' or '9070'. Use when "
+        "launching a second server so it lands on the still-free card "
+        "instead of piling onto an already-full one. Overrides the "
+        "persisted forced_gpu setting; omit to use auto selection.",
+    )
+    p.add_argument(
         "--",
         dest="passthrough",
         nargs=argparse.REMAINDER,
@@ -1023,6 +1035,7 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             force_mlock=getattr(args, "force_mlock", False),
             perf_target=perf_target,
             gpu_priorities=app_settings.get_gpu_priorities(),
+            force_gpu=getattr(args, "gpu", None) or app_settings.get_forced_gpu(),
         )
 
         print(f"\n  [mlock] decision: model={model.name}")

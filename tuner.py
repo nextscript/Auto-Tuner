@@ -749,6 +749,17 @@ def compute_config(
     # exposed through app_settings.get_gpu_priorities(). When absent or
     # None, pure VRAM size determines the primary GPU (legacy behaviour).
     gpu_priorities: Optional[Dict[str, int]] = None,
+    # ---- Hard GPU pin --------------------------------------------------
+    # Optional GPU *name* the user wants this server to boot on EXCLUSIVELY.
+    # When set (and the named card is present) it overrides both the
+    # priority×VRAM primary selection AND the free-VRAM demotion below:
+    # the model is pinned to that single card and every other GPU is hidden
+    # via the visibility env vars. This is the "du hast jetzt auf der GPU
+    # only zu booten die ich bestimme" escape hatch — used when launching a
+    # second server so the user can send it to the still-empty card instead
+    # of letting it pile onto an already-full one. Matched case-insensitively
+    # against GPUInfo.name; an unknown name is ignored (falls back to auto).
+    force_gpu: Optional[str] = None,
 ) -> TunedConfig:
     """Compute a TunedConfig that fits this model on this system.
 
@@ -817,11 +828,53 @@ def compute_config(
     def _gpu_score(g: GPUInfo) -> float:
         return max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb
 
+    # Resolve an explicit user pin (force_gpu) up front. Matched case-
+    # insensitively against the card name; substring match is allowed so the
+    # user can pass a short label ("R9700", "9070") instead of the full
+    # driver string. None / unknown name → no forced pin (auto behaviour).
+    forced_gpu: Optional[GPUInfo] = None
+    if force_gpu and has_gpu and system.gpus:
+        needle = force_gpu.strip().lower()
+        if needle:
+            forced_gpu = next(
+                (g for g in system.gpus if needle in g.name.lower()), None
+            )
+
     primary_gpu: Optional[GPUInfo] = None
     primary_free_vram_gb = free_vram  # default = summed (single-GPU / CPU)
     if has_gpu and system.gpus:
-        primary_gpu = max(system.gpus, key=_gpu_score)
-        if len(system.gpus) > 1:
+        if forced_gpu is not None:
+            # Hard pin: the user named the card this server must boot on.
+            primary_gpu = forced_gpu
+        elif len(system.gpus) > 1:
+            # Auto primary = highest priority×VRAM score — BUT a card whose
+            # *free* VRAM cannot even hold the model weights is no longer a
+            # sane primary, regardless of its size/priority. This is the
+            # second-server case: server #1 has filled the 32 GB R9700
+            # (≈1 GB free), so scoring it highest and pinning there OOMs
+            # while a 16 GB card sits with 9–13 GB free. We therefore pick
+            # the best-scoring card *that can actually fit the weights in its
+            # free VRAM*, and only fall back to the raw top score if none
+            # qualifies (then the spread/CPU-spill logic downstream copes).
+            ranked = sorted(system.gpus, key=_gpu_score, reverse=True)
+            primary_gpu = ranked[0]
+            # model_vram (the precise GPU weight footprint) is computed
+            # further down, so here we use the on-disk file size as a
+            # conservative proxy: for a given quant the GPU-resident weights
+            # are ≈ the file size, so a card that can't fit the file in its
+            # free VRAM certainly can't host the model as primary.
+            need_gb = model.size_bytes / (1024**3) if model.size_bytes else 0.0
+            if need_gb > 0:
+                fit = next(
+                    (g for g in ranked if (g.free_vram_mb / 1024.0) >= need_gb),
+                    None,
+                )
+                if fit is not None:
+                    primary_gpu = fit
+        else:
+            primary_gpu = max(system.gpus, key=_gpu_score)
+
+        if len(system.gpus) > 1 and primary_gpu is not None:
             primary_free_vram_gb = max(0.0, primary_gpu.free_vram_mb / 1024.0)
 
     # ---- (0.1) KV per-token: MUST be defined before any branch uses it.
@@ -1381,13 +1434,24 @@ def compute_config(
         is_moe_cfg = is_moe and has_gpu
 
         # Per-card usable VRAM cap (GB). Keep a little headroom so the card
-        # never runs bone-dry: 2 GB on the primary, 3 GB on secondaries
-        # (the RX 9070 XT also drives the desktop + OBS encode). Clamp by the
-        # card's *free* VRAM so we never plan to use memory that other apps
-        # already hold — "inclusive was schon genutzt wird".
+        # never runs bone-dry, but make it PROPORTIONAL to the card size
+        # instead of a flat amount. A flat 3 GB on a 16 GB card is a ~19 %
+        # tax that strands several GB of the RX 9070 XT on big MoE spreads
+        # (Basti's report #1), while the same 3 GB is trivial on a 32 GB
+        # card. We instead reserve a fraction of TOTAL VRAM — more on the
+        # secondary (it also drives desktop + OBS encode) than the primary —
+        # floored at a small minimum so a tiny card still keeps a safety
+        # margin. Then clamp by the card's *free* VRAM so we never plan to
+        # use memory other apps already hold ("inclusive was schon genutzt
+        # wird"), and never let the proportional reserve grow so large on a
+        # big card that it wastes more than the old flat value would have.
         def _usable_cap_gb(gpu: GPUInfo, is_primary: bool) -> float:
-            headroom = 2.0 if is_primary else 3.0
-            cap_by_total = gpu.total_vram_mb / 1024.0 - headroom
+            total_gb = gpu.total_vram_mb / 1024.0
+            frac = 0.06 if is_primary else 0.10  # 6 % primary, 10 % secondary
+            floor = 1.0 if is_primary else 1.5  # GB, minimum breathing room
+            cap_flat = 2.0 if is_primary else 3.0  # legacy flat reserve = ceiling
+            headroom = min(cap_flat, max(floor, total_gb * frac))
+            cap_by_total = total_gb - headroom
             free_gb = gpu.free_vram_mb / 1024.0
             return max(0.0, min(cap_by_total, free_gb))
 
@@ -1409,7 +1473,16 @@ def compute_config(
         # and capped downstream, so a model whose weights fit should pin to
         # the primary even if its theoretical max-KV would not, keeping the
         # secondary GPU free.
-        pin_to_primary = model_footprint_gb <= primary_cap
+        #
+        # A user-supplied force_gpu ALWAYS pins exclusively: the user has
+        # explicitly chosen the card this server boots on, so we hide every
+        # other GPU and never spread — even if the weights are large. If they
+        # don't fit, MoE experts spill to CPU (--n-cpu-moe, computed against
+        # this card's free VRAM above) rather than silently bleeding onto the
+        # card the user wanted left alone.
+        pin_to_primary = (forced_gpu is not None) or (
+            model_footprint_gb <= primary_cap
+        )
 
         if pin_to_primary:
             if hip_known:

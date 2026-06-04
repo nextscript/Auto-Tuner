@@ -2608,6 +2608,7 @@ class MainWindow(QMainWindow):
                 mode=self._current_mode(),
                 turbo_kv=turbo_kv,
                 gpu_priorities=app_settings.get_gpu_priorities(),
+                force_gpu=app_settings.get_forced_gpu(),
                 **kwargs,
             )
         except Exception as exc:
@@ -3231,6 +3232,7 @@ class MainWindow(QMainWindow):
                 mode=self._current_mode(),
                 turbo_kv=turbo_kv,
                 gpu_priorities=app_settings.get_gpu_priorities(),
+                force_gpu=app_settings.get_forced_gpu(),
             )
         # cfg is always non-None here: either the expert panel provided it
         # or compute_config just returned one.  The assert narrows the type
