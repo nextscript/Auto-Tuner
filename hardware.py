@@ -1261,6 +1261,63 @@ def _detect_llama_device_order(binary: Optional[str]) -> List[str]:
     return [n for _, n in indexed]
 
 
+def _detect_llama_device_vram(
+    binary: Optional[str],
+) -> Dict[str, Tuple[int, int]]:
+    """Return ``{gpu_name_lower: (total_mb, free_mb)}`` from ``--list-devices``.
+
+    This is the AUTHORITATIVE VRAM source: the numbers llama-server itself
+    reports for each backend device, already attributed to the correct card
+    and reflecting live residency of anything already loaded (other servers,
+    the desktop, OBS, games). It is the same binary that will run inference,
+    so the free figure is exactly what the next model has to fit into.
+
+    Using this sidesteps every Windows WMI problem at once — missing
+    DedicatedUsage counters on RDNA 5, the LUID-vs-PCI-id mismatch, and the
+    registry/Vulkan enumeration-order difference that made the old WMI path
+    swap the two AMD cards (reporting the full RX 9070 XT as empty and the
+    empty R9700 as half-full).
+
+    Output line shape (Vulkan build):
+
+        Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)
+
+    Units are normalised to MB (MiB/MB treated as ~MB; GiB/GB ×1024). Returns
+    ``{}`` when the binary is missing, errors, or the table can't be parsed.
+    """
+    if not binary:
+        return {}
+    out = _run([binary, "--list-devices"], timeout=15)
+    if not out:
+        return {}
+
+    # "<Backend><idx>: <name> (<TOTAL UNIT>, <FREE UNIT> free)"
+    # Name may contain parentheses (e.g. "Intel(R) Graphics"), so anchor the
+    # capture on the " (NNNN <unit>, NNNN <unit> free)" memory annotation.
+    pat = re.compile(
+        r"^\s*[A-Za-z][A-Za-z0-9]*?\d+:\s*(.+?)\s*\(\s*"
+        r"(\d+)\s*(MiB|MB|GiB|GB)\s*,\s*"
+        r"(\d+)\s*(MiB|MB|GiB|GB)\s*free\s*\)",
+        re.MULTILINE,
+    )
+
+    def _to_mb(value: int, unit: str) -> int:
+        if unit in ("GiB", "GB"):
+            return value * 1024
+        return value  # MiB ≈ MB for our purposes
+
+    result: Dict[str, Tuple[int, int]] = {}
+    for m in pat.finditer(out):
+        name = m.group(1).strip().lower()
+        if not name:
+            continue
+        total_mb = _to_mb(int(m.group(2)), m.group(3))
+        free_mb = _to_mb(int(m.group(4)), m.group(5))
+        if total_mb > 0:
+            result[name] = (total_mb, min(free_mb, total_mb))
+    return result
+
+
 def _detect_vulkan_device_order() -> List[str]:
     """Return GPU display names in Vulkan / HIP enumeration order (lowercased).
 
@@ -1580,6 +1637,27 @@ def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
     except Exception:
         pass
 
+    # --- Authoritative VRAM from llama-server --list-devices ---------------
+    # The WMI/registry path above can mis-attribute used VRAM on multi-AMD-GPU
+    # Windows systems (RDNA 5 has no usable DedicatedUsage counters, and the
+    # perf-counter LUIDs map to neither PCI id nor Vulkan UUID). llama-server
+    # reports total + free per device directly, correctly per card, and live —
+    # so when it's available we overwrite total/free with its numbers. This is
+    # the same binary that runs inference, so the free figure is exactly what
+    # the next model must fit into. Name-keyed (lowercased), unique per card.
+    llama_bin = _resolve_llama_binary(llama_binary)
+    try:
+        dev_vram = _detect_llama_device_vram(llama_bin)
+        if dev_vram:
+            for g in raw:
+                hit = dev_vram.get(g.name.lower())
+                if hit is not None:
+                    total_mb, free_mb = hit
+                    g.total_vram_mb = total_mb
+                    g.free_vram_mb = free_mb
+    except Exception:
+        pass
+
     used, ignored = _filter_inference_gpus(raw)
 
     # --- HIP / Vulkan device index resolution (multi-GPU) ------------------
@@ -1600,7 +1678,7 @@ def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
         if (len(used) + len(ignored)) > 1:
             _assign_hip_indices(
                 list(used) + list(ignored),
-                _resolve_llama_binary(llama_binary),
+                llama_bin,
             )
     except Exception:
         pass  # non-fatal — hip_index stays None, tuner handles that safely

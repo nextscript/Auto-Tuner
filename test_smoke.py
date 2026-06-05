@@ -1551,26 +1551,11 @@ def test_dense_spread_stays_priority_weighted(tmp_path) -> None:
 # is guarded: on a headless CI runner without PyQt6 the test simply skips.
 
 
-def _import_qt_mainwindow() -> type:
-    """Import qt_launcher.MainWindow, or skip the test if it can't be loaded.
-
-    pytest.importorskip("PyQt6") is not enough: the PyQt6 metapackage imports
-    fine, but pulling in qt_launcher triggers `from PyQt6.QtGui import ...`,
-    which dlopen()s native GUI libraries (e.g. libEGL.so.1). Those are absent
-    on headless Linux CI runners and raise ImportError at import time. Treat any
-    ImportError as "Qt unavailable here" and skip rather than fail.
-    """
-    try:
-        from qt_launcher import MainWindow
-    except ImportError as exc:
-        pytest.skip(f"Qt GUI not importable in this environment: {exc}")
-    return MainWindow
-
-
 def test_gpu_short_label_derivation() -> None:
     """Driver names must reduce to a distinctive, digit-bearing token that is
     a case-insensitive substring of the original (so force_gpu matches)."""
-    MainWindow = _import_qt_mainwindow()
+    pytest.importorskip("PyQt6")
+    from qt_launcher import MainWindow
 
     cases = {
         "AMD Radeon AI PRO R9700": "R9700",
@@ -1588,8 +1573,70 @@ def test_gpu_short_label_derivation() -> None:
 
 def test_gpu_short_label_fallbacks() -> None:
     """Names without a digit fall back to the last word; empty → stripped."""
-    MainWindow = _import_qt_mainwindow()
+    pytest.importorskip("PyQt6")
+    from qt_launcher import MainWindow
 
     assert MainWindow._gpu_short_label("Some Fancy GPU") == "GPU"
     assert MainWindow._gpu_short_label("   ") == ""
     
+
+# ---------------------------------------------------------------------------
+# Authoritative VRAM from `llama-server --list-devices`
+#
+# Regression for the dual-AMD-GPU mis-attribution: WMI reported the full
+# RX 9070 XT as empty (15.9/15.9 "free") and the empty R9700 as half-full,
+# so a second model was refused. llama-server --list-devices gives the
+# correct, per-card, live numbers — these tests pin its parsing.
+
+_LIST_DEVICES_REAL = """Available devices:
+  Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)
+  Vulkan1: AMD Radeon AI PRO R9700 (32624 MiB, 31704 MiB free)
+  Vulkan2: Intel(R) Graphics (27647 MiB, 26879 MiB free)
+"""
+
+
+def test_list_devices_vram_parses_real_output(monkeypatch) -> None:
+    import hardware
+
+    monkeypatch.setattr(hardware, "_run", lambda *a, **k: _LIST_DEVICES_REAL)
+    vram = hardware._detect_llama_device_vram("llama-server")
+
+    # Correct per-card attribution (the whole point of the fix).
+    assert vram["amd radeon rx 9070 xt"] == (16304, 15416)
+    assert vram["amd radeon ai pro r9700"] == (32624, 31704)
+    # Name with parentheses must not break the regex.
+    assert vram["intel(r) graphics"] == (27647, 26879)
+
+
+def test_list_devices_vram_handles_gib_units(monkeypatch) -> None:
+    import hardware
+
+    out = "  Vulkan0: Some GPU (16 GiB, 8 GiB free)\n"
+    monkeypatch.setattr(hardware, "_run", lambda *a, **k: out)
+    vram = hardware._detect_llama_device_vram("llama-server")
+    assert vram["some gpu"] == (16 * 1024, 8 * 1024)
+
+
+def test_list_devices_vram_empty_without_binary() -> None:
+    import hardware
+
+    assert hardware._detect_llama_device_vram(None) == {}
+
+
+def test_list_devices_vram_empty_on_unparsable(monkeypatch) -> None:
+    import hardware
+
+    monkeypatch.setattr(hardware, "_run", lambda *a, **k: "no devices here")
+    assert hardware._detect_llama_device_vram("llama-server") == {}
+
+
+def test_list_devices_free_never_exceeds_total(monkeypatch) -> None:
+    import hardware
+
+    # Defensive: a malformed free > total is clamped to total.
+    out = "  Vulkan0: Weird GPU (8000 MiB, 9999 MiB free)\n"
+    monkeypatch.setattr(hardware, "_run", lambda *a, **k: out)
+    vram = hardware._detect_llama_device_vram("llama-server")
+    total, free = vram["weird gpu"]
+    assert free <= total
+    assert (total, free) == (8000, 8000)

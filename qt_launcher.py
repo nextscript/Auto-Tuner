@@ -3223,7 +3223,11 @@ class MainWindow(QMainWindow):
             + float(cfg.draft_vram_gb)
         )
         # A little breathing room so we don't fill a card to the last MB.
-        SAFETY_GB = 1.0
+        # 0.5 GB is deliberately tight: llama-server reports true free VRAM
+        # via --list-devices, so we don't need a large fudge factor on top.
+        # For MoE this matters — a model whose experts spill into free RAM
+        # should not be refused over a conservative GPU margin.
+        SAFETY_GB = 0.5
         need = footprint_gb + SAFETY_GB
 
         # Single GPU: just check it fits; let existing logic place it.
@@ -3232,7 +3236,7 @@ class MainWindow(QMainWindow):
             if g.free_vram_gb < need:
                 return None, (
                     f"Not enough free VRAM on {g.name}: needs ≈{need:.1f} GB "
-                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom), "
+                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.1f} GB headroom), "
                     f"only {g.free_vram_gb:.1f} GB free.\n\n"
                     "Stop a running server to free memory, or pick a smaller "
                     "model / lower context."
@@ -3259,7 +3263,7 @@ class MainWindow(QMainWindow):
         return None, (
             f"No GPU has enough free VRAM for this model.\n"
             f"Needs ≈{need:.1f} GB on one card "
-            f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom).\n\n"
+            f"(model {footprint_gb:.1f} + {SAFETY_GB:.1f} GB headroom).\n\n"
             f"Current GPU usage:\n{usage}\n\n"
             "Stop one of the running servers to free memory, or choose a "
             "smaller model / lower context. (Splitting one model across both "
@@ -3331,6 +3335,24 @@ class MainWindow(QMainWindow):
             entry.mmproj = None
 
         profile = match_profile(entry.name, self._profiles)
+
+        # When a server is already running, refresh live VRAM BEFORE building
+        # the config. Otherwise compute_config (and its MoE expert-offload
+        # decision) would use the stale startup snapshot and might keep too
+        # many expert layers on the GPU — placing them in RAM is exactly what
+        # frees the card for a concurrent model. _choose_gpu_for_launch also
+        # re-detects, but that runs after the config is already built, so the
+        # offload split must be informed here.
+        if self._servers:
+            try:
+                fresh = detect_system()
+                if fresh is not None and fresh.gpus:
+                    self._system = fresh
+            except Exception as exc:
+                self._log(
+                    f"[Balance] Pre-config VRAM re-detect failed ({exc}); "
+                    "using cached info."
+                )
 
         # When Expert mode is open we use the panel's current config
         # (Manual mode = literal widget values; Auto mode = the last
@@ -3819,4 +3841,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-    
