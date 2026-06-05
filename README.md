@@ -306,6 +306,16 @@ that only make sense with persistent state:
   **next free port** (1234, 1235, 1236, …). Stop a server and its port is
   freed for the next launch. If no card has room, the GUI tells you
   instead of overcommitting a full GPU.
+- **GPU pin dropdown (toolbar → *GPU*).** Click-path equivalent of the
+  CLI `--gpu` flag: choose **Auto** for the usual free-VRAM-aware
+  selection, or pick a card by name to **hard-pin** the next launch to it
+  and hide the others. The card list is filled from detected hardware, so
+  it shows your actual GPUs (e.g. *R9700*, *9070*) rather than fixed
+  labels. Use it to force a second server onto the still-empty card
+  instead of letting it pile onto the busy one. The choice is persisted as
+  `forced_gpu` in `autotuner_settings.json` and feeds the same
+  `compute_config(force_gpu=…)` path as the CLI flag, so the config
+  preview updates the instant you change it.
 - **Fork picker remembers the parent folder.** Hit *📂 Fork* and
   pick a directory that holds multiple `*_llama.cpp` builds — every
   build appears in the dropdown next time too, not just the last one
@@ -344,6 +354,7 @@ that only make sense with persistent state:
 | `--port N` | Server port (default `1234`). In the GUI this is the **base** port; each additional concurrent server gets the next free one (1235, 1236, …) |
 | `--ctx N` | Override the auto-tuned context length |
 | `--model SUBSTR` | Skip the menu, pick a model by name substring |
+| `--gpu NAME` | Hard-pin the server to a single GPU by name substring (e.g. `--gpu 9070`, `--gpu R9700`). Overrides the persisted `forced_gpu`; omit for free-VRAM-aware auto selection. The GUI exposes the same pin via the toolbar **GPU** dropdown |
 | `--ngram` | Enable n-gram (ngram-mod) self-speculative decoding |
 | `--no-prompt-cache` | Disable host-memory prompt caching (`--cache-ram 0`). Caching is auto-on for non-vision models by default; always off for vision models |
 | `--dry-run` | Print the command, don't start the server |
@@ -685,7 +696,7 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ Via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` in the YAML (defaults 16/24/1 from PR #23269) |
 | `--spec-draft-ngl` | ✅ Always 99 (keep the MTP head on GPU) |
 | `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` active; `-ot` prepared for targeted expert placement |
-| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted for dense, **capacity-fill for MoE**, with single-GPU pinning; for multi-server the 2nd/3rd model is pinned to the emptier card via `HIP_/GGML_VK_VISIBLE_DEVICES` |
+| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted for dense, **capacity-fill for MoE**, with single-GPU pinning; for multi-server the 2nd/3rd model is pinned to the emptier card via `HIP_/GGML_VK_VISIBLE_DEVICES`. A manual hard-pin to one card is available three ways — CLI `--gpu NAME`, the toolbar **GPU** dropdown, or the `forced_gpu` key in the settings JSON — all resolving through `compute_config(force_gpu=…)` |
 | `--rope-scaling yarn` | ✅ Already present |
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |

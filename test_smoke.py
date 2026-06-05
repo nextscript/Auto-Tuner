@@ -362,9 +362,7 @@ def test_mtp_ud_quant_absent_suppresses_false_positive() -> None:
 def test_mtp_name_based_without_key() -> None:
     """No metadata key at all, but the tensor scan saw a nextn-named tensor
     (scan='found'). Detection must succeed without 'MTP' in the filename."""
-    md = _mtp_meta(
-        **{"general.architecture": "bailingmoe2", "__mtp_scan__": "found"}
-    )
+    md = _mtp_meta(**{"general.architecture": "bailingmoe2", "__mtp_scan__": "found"})
     assert metadata_has_embedded_mtp(md) is True
 
 
@@ -796,7 +794,8 @@ def test_priority_weighted_tensor_split(tmp_path) -> None:
     model = _fake_model(tmp_path, "Mistral-Medium-3.5-128B-UD-IQ3_XXS", size_gb=40.0)
     profile = match_profile(model.name, profiles)
     sys_info = _fake_dual_gpu_system_with_vk_order(
-        large_free=31, small_free=14,
+        large_free=31,
+        small_free=14,
     )
     prio = {
         "AMD Radeon AI PRO R9700": 2,
@@ -808,7 +807,7 @@ def test_priority_weighted_tensor_split(tmp_path) -> None:
     parts = [float(x) for x in cfg.tensor_split.split(",")]
     assert len(parts) == 2
     # Vulkan order: device 0 = 9070 XT (small_vk_idx=0), device 1 = R9700 (large_vk_idx=1)
-    xt_share = parts[0]   # 9070 XT
+    xt_share = parts[0]  # 9070 XT
     r97_share = parts[1]  # R9700
     # R9700 must get the lion's share — at least 75% (it has 2× priority
     # AND 2× the free VRAM). Pure VRAM-proportional would give only 67%.
@@ -835,7 +834,8 @@ def test_second_server_avoids_full_primary(tmp_path) -> None:
     profile = match_profile(model.name, profiles)
     # R9700 nearly full (1 GB free), 9070 XT mostly free (13 GB free).
     sys_info = _fake_dual_gpu_system_with_vk_order(
-        large_free=1, small_free=13,
+        large_free=1,
+        small_free=13,
     )
     # Even with the R9700 given a higher priority, free VRAM must win:
     prio = {
@@ -934,7 +934,9 @@ def test_resolver_finds_binary_in_sibling_llama_cpp(tmp_path, monkeypatch) -> No
     )
 
 
-def test_resolver_distinguishes_between_llama_and_1b_llama(tmp_path, monkeypatch) -> None:
+def test_resolver_distinguishes_between_llama_and_1b_llama(
+    tmp_path, monkeypatch
+) -> None:
     """The Bonsai-Ternary profile uses a relative path starting with the
     fork's directory name. The resolver must respect that and pick the
     1b_llama.cpp checkout, not the regular one sitting next to it."""
@@ -1537,4 +1539,43 @@ def test_dense_spread_stays_priority_weighted(tmp_path) -> None:
     # Priority×VRAM (2×32 vs 1×16) → R9700 ≥ ~0.75; 9070 XT ≤ ~0.25.
     assert r97_share > 0.70, f"dense split not priority-weighted: r97={r97_share:.3f}"
     assert xt_share < 0.30, f"dense split puts too much on the 9070 XT: {xt_share:.3f}"
+
+
+# ---------------------------------------------------------------------------
+# GPU pin dropdown — short-label derivation (qt_launcher._gpu_short_label)
+#
+# The GUI GPU pin dropdown persists a short, stable token (e.g. "R9700",
+# "9070") that compute_config(force_gpu=...) matches case-insensitively as a
+# substring of the full driver name. These tests pin that derivation so the
+# click-path keeps producing tokens the tuner actually resolves. The Qt import
+# is guarded: on a headless CI runner without PyQt6 the test simply skips.
+
+
+def test_gpu_short_label_derivation() -> None:
+    """Driver names must reduce to a distinctive, digit-bearing token that is
+    a case-insensitive substring of the original (so force_gpu matches)."""
+    pytest.importorskip("PyQt6")
+    from qt_launcher import MainWindow
+
+    cases = {
+        "AMD Radeon AI PRO R9700": "R9700",
+        "AMD Radeon RX 9070 XT": "9070",
+        "NVIDIA GeForce RTX 5090": "5090",
+        "Intel Arc A770": "A770",
+    }
+    for full_name, expected in cases.items():
+        token = MainWindow._gpu_short_label(full_name)
+        assert token == expected, f"{full_name!r} → {token!r}, expected {expected!r}"
+        # The whole point: the token must match the card name the way
+        # compute_config does (case-insensitive substring).
+        assert token.lower() in full_name.lower()
+
+
+def test_gpu_short_label_fallbacks() -> None:
+    """Names without a digit fall back to the last word; empty → stripped."""
+    pytest.importorskip("PyQt6")
+    from qt_launcher import MainWindow
+
+    assert MainWindow._gpu_short_label("Some Fancy GPU") == "GPU"
+    assert MainWindow._gpu_short_label("   ") == ""
     

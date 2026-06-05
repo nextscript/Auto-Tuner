@@ -54,7 +54,8 @@
     "Qwen3.6-35B-A3B-UD-Q8_K_XL": {
       "draft": true,
       "vision": true,
-      "prompt_cache": true
+      "prompt_cache": true,
+      "ngram": true
     },
     "Qwen3.6-27B-UD-Q6_K_XL": {
       "vision": true
@@ -71,6 +72,12 @@
     },
     "gemma-4-12b-it-BF16": {
       "ngram": false
+    },
+    "Ministral-3-14B-Reasoning-2512-Q6_K": {
+      "vision": true
+    },
+    "gemma-4-12b-it-UD-Q8_K_XL": {
+      "vision": false
     }
   },
   "mode": "chat",

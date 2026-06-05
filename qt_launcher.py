@@ -190,7 +190,9 @@ class _HwDetectWorker(QObject):
         if t.is_alive():
             # Detection timed out — emit with whatever partial result exists.
             # result[0] may still be None if detect_system() never returned.
-            self.finished.emit(result[0], "Hardware detection timed out (partial result).")
+            self.finished.emit(
+                result[0], "Hardware detection timed out (partial result)."
+            )
         elif result[1]:
             self.finished.emit(None, result[1])
         else:
@@ -1223,6 +1225,31 @@ class MainWindow(QMainWindow):
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         tb.addWidget(self._mode_combo)
 
+        # ── GPU pin (Auto / per-card) ──────────────────────────────────
+        # Hard-pins the next launch to a single card. This is the click-path
+        # equivalent of the CLI `--gpu <name>` flag and the `forced_gpu` key
+        # in autotuner_settings.json — all three feed the same
+        # app_settings.set_forced_gpu() / compute_config(force_gpu=...) path.
+        # The card entries are filled in once hardware detection finishes
+        # (see _populate_gpu_combo, called from _update_sysinfo_labels); until
+        # then only "Auto" is offered.
+        tb.addSeparator()
+        tb.addWidget(QLabel(" GPU:"))
+        self._gpu_combo = QComboBox()
+        self._gpu_combo.setMinimumWidth(110)
+        self._gpu_combo.setToolTip(
+            "Pin the next server to a single GPU:\n"
+            "  • Auto — free-VRAM-aware selection across all cards\n"
+            "  • <card> — boot exclusively on that card and hide the\n"
+            "             others (use for a 2nd server so it lands on the\n"
+            "             still-empty card instead of the full one)\n"
+            "Mirrors the CLI --gpu flag and the forced_gpu setting."
+        )
+        # Seed with Auto only; real cards are appended after detection.
+        self._gpu_combo.addItem("Auto", None)
+        self._gpu_combo.currentIndexChanged.connect(self._on_gpu_changed)
+        tb.addWidget(self._gpu_combo)
+
         tb.addSeparator()
         tb.addWidget(QLabel(" Font:"))
         for delta, label in ((-1, "A−"), (+1, "A+")):
@@ -1440,7 +1467,7 @@ class MainWindow(QMainWindow):
         self._log_panel.setMinimumSize(QSize(0, 0))
         top_split.setMinimumHeight(0)
         main_split.setCollapsible(0, False)  # top half: never collapse
-        main_split.setCollapsible(1, True)   # log panel: fully retractable
+        main_split.setCollapsible(1, True)  # log panel: fully retractable
         # A slightly wider handle makes the bottom edge easy to grab and drag
         # all the way down to nothing.
         main_split.setHandleWidth(6)
@@ -1473,7 +1500,9 @@ class MainWindow(QMainWindow):
         bl.addWidget(QLabel(" Offset:"))
         self._port_offset_combo = QComboBox()
         self._port_offset_combo.setFixedWidth(60)
-        self._port_offset_combo.setToolTip("Manual port offset added to base + running servers.")
+        self._port_offset_combo.setToolTip(
+            "Manual port offset added to base + running servers."
+        )
         for i in range(11):  # 0 to 10
             self._port_offset_combo.addItem(str(i))
         bl.addWidget(self._port_offset_combo)
@@ -1496,9 +1525,7 @@ class MainWindow(QMainWindow):
         self._btn_toggle_log.setFixedHeight(32)
         self._btn_toggle_log.setCheckable(True)
         self._btn_toggle_log.setChecked(True)
-        self._btn_toggle_log.setToolTip(
-            "Show / fully retract the bottom info panel."
-        )
+        self._btn_toggle_log.setToolTip("Show / fully retract the bottom info panel.")
         self._btn_toggle_log.clicked.connect(self._toggle_log_panel)
         bl.addWidget(self._btn_toggle_log)
 
@@ -1973,6 +2000,96 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._log(f"[Warning] Config refresh failed: {exc}")
 
+    # ------------------------------------------------------------------
+    # GPU pin (forced_gpu) selection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _gpu_short_label(name: str) -> str:
+        """Derive a short, stable pin token from a full driver name.
+
+        The token is what we persist via app_settings.set_forced_gpu() and
+        what compute_config(force_gpu=...) matches case-insensitively as a
+        substring of the card name. We want something distinctive yet stable
+        across driver-string changes, mirroring the CLI convention
+        (`--gpu 9070`, `--gpu R9700`).
+
+        Strategy: prefer a model-number-like token (contains a digit, e.g.
+        "R9700", "9070") from the tail of the name; otherwise fall back to
+        the last word, and finally to the whole (stripped) name.
+        """
+        words = name.split()
+        for w in reversed(words):
+            cleaned = w.strip("()[]")
+            if cleaned and any(ch.isdigit() for ch in cleaned):
+                return cleaned
+        if words:
+            return words[-1]
+        return name.strip()
+
+    def _populate_gpu_combo(self, s: SystemInfo) -> None:
+        """(Re)fill the GPU pin dropdown from detected cards.
+
+        Called whenever fresh hardware info arrives. Preserves the user's
+        current selection by token, falling back to the persisted forced_gpu
+        and finally to "Auto". Signals are blocked so repopulation never
+        triggers a spurious persist/refresh.
+        """
+        combo = getattr(self, "_gpu_combo", None)
+        if combo is None:
+            return
+
+        # Remember what is selected right now (token) so we can restore it.
+        prev_token = combo.currentData()
+        if prev_token is None:
+            prev_token = app_settings.get_forced_gpu()
+
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Auto", None)
+        seen: set[str] = set()
+        for g in s.gpus:
+            token = self._gpu_short_label(g.name)
+            # Guard against two cards collapsing to the same token.
+            if token.lower() in seen:
+                token = g.name
+            seen.add(token.lower())
+            combo.addItem(f"{token}  ({g.total_vram_gb:.0f} GB)", token)
+
+        # Restore selection: match persisted/previous token as a substring,
+        # case-insensitively, exactly like compute_config does.
+        target_idx = 0  # Auto
+        if prev_token:
+            needle = prev_token.strip().lower()
+            for i in range(1, combo.count()):
+                data = combo.itemData(i)
+                if isinstance(data, str) and needle in data.lower():
+                    target_idx = i
+                    break
+        combo.setCurrentIndex(target_idx)
+        combo.blockSignals(False)
+
+    def _on_gpu_changed(self, index: int) -> None:
+        """User picked a GPU pin — persist + refresh the preview.
+
+        Like the perf/mode handlers, this only recomputes the *config text*;
+        feature checkboxes (vision/draft/thinking) are never touched. The
+        persisted forced_gpu is read by both launch paths via
+        app_settings.get_forced_gpu().
+        """
+        token = self._gpu_combo.itemData(index)  # None for "Auto"
+        try:
+            app_settings.set_forced_gpu(token)
+        except Exception as exc:
+            self._log(f"[Warning] Could not save GPU pin: {exc}")
+        self._log(f"[GPU] pin → {token or 'Auto'}")
+        entry = getattr(self, "_current_entry", None)
+        if entry is not None and self._system is not None:
+            try:
+                profile = match_profile(entry.name, self._profiles)
+                self._update_config_text(entry, profile)
+            except Exception as exc:
+                self._log(f"[Warning] Config refresh failed: {exc}")
+
     def _resolve_perf_target_for_profile(self, profile: ModelProfile):
         """Combine GUI choice with profile-level recommendation.
 
@@ -2359,9 +2476,9 @@ class MainWindow(QMainWindow):
         self._populate_mmproj_combo(entry, ov)
 
         # ── Prompt caching (host RAM, -cram) ────────────────────────
-        # Traditionally, prompt caching was considered incompatible with the 
-        # multimodal/mtmd path. We now allow the user to toggle it anyway; 
-        # if the specific llama-server build refuses it, the server will 
+        # Traditionally, prompt caching was considered incompatible with the
+        # multimodal/mtmd path. We now allow the user to toggle it anyway;
+        # if the specific llama-server build refuses it, the server will
         # report an error in its terminal window.
         pc_state = ov["prompt_cache"] if "prompt_cache" in ov else True
         self._chk_prompt_cache.blockSignals(True)
@@ -2671,7 +2788,7 @@ class MainWindow(QMainWindow):
             lines.append(f"Draft   : {self._current_draft.name}  [{drf}]")
         if use_ngram:
             lines.append("n-gram  : ngram-mod (self-speculative)  [✓]")
-        
+
         lines.append(
             f"Prompt$ : host-RAM cache (-cram)  [{'✓' if use_prompt_cache else '✗'}]"
             + (" (may conflict with Vision)" if use_vision else "")
@@ -2986,6 +3103,9 @@ class MainWindow(QMainWindow):
             f"[SysInfo] CPU={s.cpu_name}, VRAM={s.free_vram_gb:.1f}/{s.total_vram_gb:.1f}GB, RAM={s.free_ram_gb:.1f}/{s.total_ram_gb:.1f}GB, GPU={[g.name for g in s.gpus]}"
         )
 
+        # Keep the GPU pin dropdown in sync with the detected cards.
+        self._populate_gpu_combo(s)
+
     # ------------------------------------------------------------------
     # Binary resolution
     # ------------------------------------------------------------------
@@ -3085,7 +3205,9 @@ class MainWindow(QMainWindow):
             if fresh is not None and fresh.gpus:
                 self._system = fresh
         except Exception as exc:
-            self._log(f"[Balance] Live GPU re-detect failed ({exc}); using cached info.")
+            self._log(
+                f"[Balance] Live GPU re-detect failed ({exc}); using cached info."
+            )
 
         sysinfo = self._system
         if sysinfo is None or not sysinfo.gpus:
@@ -3540,9 +3662,7 @@ class MainWindow(QMainWindow):
                 self._server_ready = bool(top.get("ready"))
                 self._btn_stop.setEnabled(True)
                 self._btn_stop_all.setEnabled(True)
-                self._status.showMessage(
-                    f"{len(self._servers)} server(s) running."
-                )
+                self._status.showMessage(f"{len(self._servers)} server(s) running.")
             else:
                 self._server = None
                 self._server_base_url = None
@@ -3563,9 +3683,7 @@ class MainWindow(QMainWindow):
             try:
                 import urllib.request
 
-                with urllib.request.urlopen(
-                    f"{base_url}/health", timeout=0.3
-                ) as resp:
+                with urllib.request.urlopen(f"{base_url}/health", timeout=0.3) as resp:
                     ready = resp.status == 200
             except Exception:
                 ready = False
@@ -3701,3 +3819,4 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+    
