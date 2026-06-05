@@ -80,9 +80,9 @@
       "vision": false
     }
   },
-  "mode": "chat",
-  "window_geometry": "AdnQywADAAAAAAC5AAAAegAABVgAAAS1AAAAuQAAAJkAAAVYAAAEtQAAAAAAAAAADXAAAAC5AAAAmQAABVgAAAS1",
-  "window_state": "AAAA/wAAAAD9AAAAAAAABKAAAAPoAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
+  "mode": "coding",
+  "window_geometry": "AdnQywADAAD///rzAAABbf///58AAAYW///68wAAAYz///+fAAAGFgAAAAEAAAAACHD///rzAAABjP///58AAAYW",
+  "window_state": "AAAA/wAAAAD9AAAAAAAABK0AAARWAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
   "fork_container_path": "H:\\LAB\\ai-local",
   "font_size": 10,
   "gpu_overrides": {
@@ -97,7 +97,7 @@
   },
   "splitter_states": {
     "top_split": "AAAA/wAAAAEAAAACAAACgQAAAnEA/////wEAAAABAA==",
-    "main_split": "AAAA/wAAAAEAAAACAAADqAAAAAAA/////wEAAAACAA=="
+    "main_split": "AAAA/wAAAAEAAAACAAAHdwAAAN0A/////wEAAAACAA=="
   },
   "mmproj_selection": {
     "Qwen3.6-35B-A3B-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-F32.gguf"
