@@ -645,7 +645,7 @@ class ExpertPanel(QWidget):
         _add(
             "Think budget",
             self._sp_think_budget,
-            "--think-budget N. -1 = unlimited (no flag), 0 = stop "
+            "--reasoning-budget N. -1 = unlimited (no flag), 0 = stop "
             "thinking immediately, N>0 = token budget for the "
             "thinking phase.",
         )
@@ -791,15 +791,16 @@ class ExpertPanel(QWidget):
     def _parse_reasoning_from_extras(
         extras: List[str],
     ) -> Tuple[str, int, List[str]]:
-        """Pull reasoning + think-budget out of a flat CLI-flags list.
+        """Pull reasoning + reasoning-budget out of a flat CLI-flags list.
 
         Returns (reasoning_value, think_budget_value, leftover_extras)
         where leftover_extras drops every flag we successfully decoded.
 
-        Recognises four shapes:
+        Recognises these shapes:
           * ``--reasoning off`` / ``--reasoning on`` / ``--reasoning auto``
           * ``--chat-template-kwargs '{"reasoning_effort":"high"}'``
-          * ``--think-budget N``
+          * ``--reasoning-budget N``  (b9625+ name)
+          * ``--think-budget N``  (legacy name, still read from old settings)
           * ``--think 0``  (synonym for budget=0)
         Anything we cannot parse is preserved verbatim in leftover.
         """
@@ -827,7 +828,7 @@ class ExpertPanel(QWidget):
                         leftover.extend([arg, extras[i + 1]])
                 i += 2
                 continue
-            if low == "--think-budget" and i + 1 < n:
+            if low in ("--reasoning-budget", "--think-budget") and i + 1 < n:
                 try:
                     budget = int(extras[i + 1])
                 except ValueError:
@@ -1010,7 +1011,7 @@ class ExpertPanel(QWidget):
           dropdown == anything else → --chat-template-kwargs
                                        '{"reasoning_effort":"<value>"}'
           spinbox  == -1        → no flag
-          spinbox  >=  0        → --think-budget <N>
+          spinbox  >=  0        → --reasoning-budget <N>
 
         We emit a SINGLE flat list. Duplicates are harmless because
         build_cmd de-dupes, but we still avoid emitting "auto" since
@@ -1029,7 +1030,11 @@ class ExpertPanel(QWidget):
 
         budget = int(self._sp_think_budget.value())
         if budget >= 0:
-            out += ["--think-budget", str(budget)]
+            # llama.cpp renamed --think-budget → --reasoning-budget at
+            # b9625 (the old spelling is gone, not an alias). Emit the
+            # current name; the parser still reads the legacy one back
+            # from older persisted settings.
+            out += ["--reasoning-budget", str(budget)]
         return out
 
 
@@ -1491,11 +1496,9 @@ class MainWindow(QMainWindow):
         self._port_edit = QLineEdit("1234")
         self._port_edit.setFixedWidth(60)
         self._port_edit.setToolTip(
-            "Requested port for the NEXT launch. If that port is already\n"
-            "used by an AutoTuner server (or another app), the launcher\n"
-            "walks upward to the next free port. This lets you run e.g.\n"
-            "a main server on 8080 and then set this field to 1235 for\n"
-            "the chatbot server."
+            "Base port for the FIRST server. Each additional concurrent\n"
+            "server gets the next free port (1234, 1235, 1236…). Stopping\n"
+            "a server frees its port for reuse."
         )
         bl.addWidget(self._port_edit)
 
@@ -1503,7 +1506,7 @@ class MainWindow(QMainWindow):
         self._port_offset_combo = QComboBox()
         self._port_offset_combo.setFixedWidth(60)
         self._port_offset_combo.setToolTip(
-            "Manual port offset added to the requested next-launch port."
+            "Manual port offset added to base + running servers."
         )
         for i in range(11):  # 0 to 10
             self._port_offset_combo.addItem(str(i))
@@ -3149,18 +3152,6 @@ class MainWindow(QMainWindow):
                 live.append(s)
         self._servers = live
 
-    def _requested_start_port(self, base: int, offset: int) -> int:
-        """Return the user-requested port for the next launch.
-
-        The old multi-server code added ``len(self._servers)`` here. That was
-        fine when the base stayed at 1234, but broke mixed-port setups: after
-        launching a main server on 8080, changing the field to 1235 for the
-        chatbot still produced 1236 because the launcher treated it as
-        "server #2". The port text field is now authoritative for the next
-        launch; collision handling lives in ``_next_free_port``.
-        """
-        return base + offset
-
     def _next_free_port(self, host: str, base: int) -> int:
         """Return the lowest base+N not used by a live server or another app.
 
@@ -3192,25 +3183,6 @@ class MainWindow(QMainWindow):
                 return port
             port += 1
         return base  # give up gracefully — caller still tries
-
-    def _active_forced_gpu(self) -> Tuple[Optional[object], Optional[str]]:
-        """Resolve the GUI's manual GPU pin against the current SystemInfo.
-
-        Returns ``(gpu, token)``. ``gpu`` is None when the dropdown is on Auto
-        or when the persisted token no longer matches a detected card. The
-        token is returned too so callers can log a useful warning.
-        """
-        token = app_settings.get_forced_gpu()
-        if not token:
-            return None, None
-        sysinfo = self._system
-        if sysinfo is None or not sysinfo.gpus:
-            return None, token
-        needle = token.strip().lower()
-        if not needle:
-            return None, None
-        gpu = next((g for g in sysinfo.gpus if needle in g.name.lower()), None)
-        return gpu, token
 
     def _choose_gpu_for_launch(
         self, cfg: TunedConfig, entry: ModelEntry
@@ -3256,11 +3228,7 @@ class MainWindow(QMainWindow):
             + float(cfg.draft_vram_gb)
         )
         # A little breathing room so we don't fill a card to the last MB.
-        # 0.5 GB is deliberately tight: llama-server reports true free VRAM
-        # via --list-devices, so we don't need a large fudge factor on top.
-        # For MoE this matters — a model whose experts spill into free RAM
-        # should not be refused over a conservative GPU margin.
-        SAFETY_GB = 0.5
+        SAFETY_GB = 1.0
         need = footprint_gb + SAFETY_GB
 
         # Single GPU: just check it fits; let existing logic place it.
@@ -3269,7 +3237,7 @@ class MainWindow(QMainWindow):
             if g.free_vram_gb < need:
                 return None, (
                     f"Not enough free VRAM on {g.name}: needs ≈{need:.1f} GB "
-                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.1f} GB headroom), "
+                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom), "
                     f"only {g.free_vram_gb:.1f} GB free.\n\n"
                     "Stop a running server to free memory, or pick a smaller "
                     "model / lower context."
@@ -3296,7 +3264,7 @@ class MainWindow(QMainWindow):
         return None, (
             f"No GPU has enough free VRAM for this model.\n"
             f"Needs ≈{need:.1f} GB on one card "
-            f"(model {footprint_gb:.1f} + {SAFETY_GB:.1f} GB headroom).\n\n"
+            f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom).\n\n"
             f"Current GPU usage:\n{usage}\n\n"
             "Stop one of the running servers to free memory, or choose a "
             "smaller model / lower context. (Splitting one model across both "
@@ -3369,24 +3337,6 @@ class MainWindow(QMainWindow):
 
         profile = match_profile(entry.name, self._profiles)
 
-        # When a server is already running, refresh live VRAM BEFORE building
-        # the config. Otherwise compute_config (and its MoE expert-offload
-        # decision) would use the stale startup snapshot and might keep too
-        # many expert layers on the GPU — placing them in RAM is exactly what
-        # frees the card for a concurrent model. _choose_gpu_for_launch also
-        # re-detects, but that runs after the config is already built, so the
-        # offload split must be informed here.
-        if self._servers:
-            try:
-                fresh = detect_system()
-                if fresh is not None and fresh.gpus:
-                    self._system = fresh
-            except Exception as exc:
-                self._log(
-                    f"[Balance] Pre-config VRAM re-detect failed ({exc}); "
-                    "using cached info."
-                )
-
         # When Expert mode is open we use the panel's current config
         # (Manual mode = literal widget values; Auto mode = the last
         # cascaded result the user can see in the panel). Otherwise we
@@ -3419,23 +3369,10 @@ class MainWindow(QMainWindow):
         # ── Load-balancing across GPUs for a 2nd/3rd concurrent model ──
         # When at least one server is already running, re-check live VRAM
         # and steer this model onto the emptier card — or refuse outright
-        # if nothing has room. A MANUAL GPU dropdown choice wins over this
-        # auto-balancer; compute_config(force_gpu=...) has already emitted
-        # the visibility env vars for that exact card.
-        forced_gpu, forced_token = self._active_forced_gpu()
-        if forced_token and forced_gpu is None:
-            self._log(
-                f"[Balance] GPU pin {forced_token!r} did not match a detected card; "
-                "falling back to Auto."
-            )
-
-        if forced_gpu is not None:
-            self._last_pinned_gpu = getattr(forced_gpu, "name", forced_token)
-            self._log(
-                f"[Balance] Manual GPU pin active → {getattr(forced_gpu, 'name', forced_token)}; "
-                "skipping auto-balancer."
-            )
-        elif self._servers:
+        # if nothing has room. The first server (none running yet) keeps the
+        # AutoTuner's own placement so single-model multi-GPU splits still
+        # work as before.
+        if self._servers:
             chosen_gpu, refusal = self._choose_gpu_for_launch(cfg, entry)
             if refusal is not None:
                 self._log(f"[Balance] Launch refused — {refusal.splitlines()[0]}")
@@ -3461,11 +3398,9 @@ class MainWindow(QMainWindow):
                 )
 
         host = self._host_edit.text().strip() or "127.0.0.1"
-        # Auto-assign the port: start from the user-requested port and skip
-        # anything already taken. This keeps the default sequence
-        # 1234 → 1235 → 1236 when the field stays at 1234, but also allows
-        # mixed-port setups (e.g. first launch 8080, second launch 1235) by
-        # simply changing the field before pressing Launch again.
+        # Auto-assign the port: base + offset + number of live servers, skipping any
+        # port already taken. The Port field shows the *base*; the actual
+        # port used is computed here so 0 servers → 1234, 1 → 1235, etc.
         try:
             base_port = int(self._port_edit.text().strip())
         except ValueError:
@@ -3477,7 +3412,7 @@ class MainWindow(QMainWindow):
         except (ValueError, AttributeError):
             offset = 0
 
-        start_port = self._requested_start_port(base_port, offset)
+        start_port = base_port + offset + len(self._servers)
         port = self._next_free_port(host, start_port)
 
         server_binary = self._resolve_binary(profile, use_draft, entry.name)
@@ -3889,3 +3824,4 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
+    

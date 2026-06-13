@@ -340,7 +340,7 @@ that only make sense with persistent state:
       `medium` / `high` / `extra_high`
   - SpinBox "Think budget": `-1` = off, `0` = stop immediately, `N` =
       token budget
-  The values are translated into `--reasoning`, `--think-budget` and
+  The values are translated into `--reasoning`, `--reasoning-budget` and
   `--chat-template-kwargs` in `cfg.extra_cli_flags`.
 
 ### Useful flags
@@ -537,7 +537,7 @@ notes: >
 Profiles with empty `patterns:` become the fallback when nothing else
 matches. See `settings/_default.yaml`.
 
-**Profiles bundled as of b9500** (arch string read from GGUF metadata):
+**Profiles bundled as of b9625** (arch string read from GGUF metadata):
 
 | Profile file | Models | llama.cpp arch |
 |--------------|--------|----------------|
@@ -670,7 +670,7 @@ cmake -B build -DGGML_HIP=ON -DAMDGPU_TARGETS="gfx1200;gfx1201" -DCMAKE_BUILD_TY
 cmake --build build --config Release -j $(nproc)
 ```
 
-## Server features (as of b9500)
+## Server features (as of b9625)
 
 The following `llama-server` features are supported (from `tools/server/README.md`):
 
@@ -682,7 +682,7 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--metrics` | ✅ Prometheus endpoint `GET /metrics` on the same host:port (see "Monitoring") |
 | `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391). Auto-on (`-1`, unlimited) for every **non-vision** model, switchable off via GUI checkbox. **Forced `0` for vision models** (incompatible with the mtmd path) |
 | `--reasoning on/off/auto` | ✅ Via dropdown |
-| `--think-budget N` | ✅ Via spin-box |
+| `--reasoning-budget N` | ✅ Via spin-box. **Renamed from `--think-budget` at b9625** (the old spelling is gone, not an alias); AutoTuner emits the new name and still reads the legacy one back from older persisted settings |
 | `--chat-template-kwargs ...` | ✅ The dropdown produces this automatically |
 | `--jinja` | ✅ Ticked visibly |
 | `--mlock` / `--no-mmap` | ✅ Windows guard; manually overridable |
@@ -701,7 +701,39 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
 
-### Review b9442 → b9500 (58 commits)
+### Review b9500 → b9625
+
+Reviewed the range up to **b9625**. Every server flag and `--spec-type`
+value in use was verified against the b9625 `common/arg.cpp` and
+`common/speculative.cpp`. **One breaking change affected the AutoTuner and
+is fixed this round:**
+
+- **`--think-budget` renamed to `--reasoning-budget` (CLI).** At b9625 the
+  reasoning token-budget flag is `{"--reasoning-budget"} "N"` (`-1`
+  unrestricted / `0` immediate end / `N>0` budget); the old `--think-budget`
+  spelling is **gone — not kept as an alias** (the env var stays
+  `LLAMA_ARG_THINK_BUDGET`, and the short reasoning toggle gained a `-rea`
+  alias). The Expert panel's spin-box now emits `--reasoning-budget`, and
+  `_parse_reasoning_from_extras` reads **both** the new and the legacy name
+  so older `autotuner_settings.json` files still restore the spin-box
+  correctly. A sibling `--reasoning-budget-message MESSAGE` was also added
+  (text injected before the end-of-thinking tag when the budget is
+  exhausted) — not emitted by AutoTuner.
+
+Everything else AutoTuner emits is **unchanged and still valid at b9625**,
+re-confirmed against the source: `--fit [on|off]`, `-fa [on|off|auto]`,
+`--cache-ram`/`-cram` (`-1` no-limit / `0` disable), `--metrics`,
+`--n-cpu-moe`/`-ncmoe`, `--tensor-split`, `--main-gpu`, `--rope-scaling
+yarn` + `--rope-scale`, `--numa`, `--mlock`/`--no-mmap`,
+`--no-context-shift`, `--parallel`, `--jinja`, `--reasoning`/`-rea`,
+`--chat-template-kwargs`, `--mmproj`, the sampler flags, and the full
+speculative set — `--spec-type` with the tokens `draft-mtp`, `ngram-mod`,
+`ngram-map-k`, `ngram-map-k4v`, `ngram-simple`, `ngram-cache`, plus
+`--spec-draft-ngl/-n-max/-p-min`, `--spec-ngram-mod-n-match/-n-min/-n-max`,
+and `--spec-ngram-map-k4v-size-n/-size-m/-min-hits`. The `-md` external
+drafter still enables the draft path without an explicit `--spec-type`.
+
+
 
 Full review of all 58 commits between b9442 and b9500. **Result: no
 functional AutoTuner changes to existing flags needed** — every server flag
