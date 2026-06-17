@@ -1898,4 +1898,222 @@ def test_filename_pattern_beats_arch_fallback() -> None:
     # the pattern match must take precedence over any arch fallback.
     p = match_profile("gpt-oss-20b-UD-Q6_K_XL.gguf", profiles, "some-other-arch")
     assert p.display_name == "gpt-oss (OpenAI)"
-    
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for diffusion-LLM support (Dream/LLaDA/RND1/DiffusionGemma)
+# ---------------------------------------------------------------------------
+
+
+def test_diffusion_architecture_detection() -> None:
+    """Diffusion archs (mainline + fork) are detected; autoregressive aren't."""
+    from scanner import metadata_is_diffusion_architecture
+
+    for arch in (
+        "dream",
+        "llada",
+        "llada-moe",
+        "rnd1",
+        "diffusion-gemma",
+        "diffusiongemma",
+    ):
+        assert (
+            metadata_is_diffusion_architecture({"general.architecture": arch}) is True
+        ), f"{arch} should be detected as diffusion"
+
+    for arch in ("gemma4", "qwen35moe", "llama", "gpt-oss"):
+        assert (
+            metadata_is_diffusion_architecture({"general.architecture": arch}) is False
+        ), f"{arch} must NOT be detected as diffusion"
+
+
+def test_model_entry_is_diffusion_property() -> None:
+    """ModelEntry.is_diffusion reflects the architecture."""
+    from scanner import ModelEntry
+
+    diff = ModelEntry(
+        path=Path("/m/diffusiongemma-26B.gguf"),
+        name="diffusiongemma-26B",
+        group=".",
+        size_bytes=1,
+        metadata={"general.architecture": "diffusion-gemma"},
+    )
+    assert diff.is_diffusion is True
+
+    normal = ModelEntry(
+        path=Path("/m/gemma-4-12b.gguf"),
+        name="gemma-4-12b",
+        group=".",
+        size_bytes=1,
+        metadata={"general.architecture": "gemma4"},
+    )
+    assert normal.is_diffusion is False
+
+
+def test_diffusion_algorithm_normalization() -> None:
+    """Algorithm names and ints map to the CLI integer; junk → None."""
+    from tuner import _diffusion_algorithm_value
+
+    assert _diffusion_algorithm_value("confidence") == 4
+    assert _diffusion_algorithm_value("entropy") == 1
+    assert _diffusion_algorithm_value("margin") == 2
+    assert _diffusion_algorithm_value("random") == 3
+    assert _diffusion_algorithm_value("origin") == 0
+    assert _diffusion_algorithm_value(0) == 0
+    assert _diffusion_algorithm_value(4) == 4
+    assert _diffusion_algorithm_value("3") == 3
+    # out of range / junk / bool
+    assert _diffusion_algorithm_value(7) is None
+    assert _diffusion_algorithm_value("nope") is None
+    assert _diffusion_algorithm_value(None) is None
+    assert _diffusion_algorithm_value("") is None
+    assert _diffusion_algorithm_value(True) is None
+
+
+def _fake_diffusion_config():
+    from tuner import TunedConfig
+
+    return TunedConfig(
+        ctx=8192,
+        ngl=99,
+        threads=8,
+        batch_threads=8,
+        batch=2048,
+        ubatch=512,
+        cache_k="q8_0",
+        cache_v="q8_0",
+        flash_attn=True,
+    )
+
+
+def _fake_diffusion_model():
+    from scanner import ModelEntry
+
+    return ModelEntry(
+        path=Path("/models/diffusiongemma-26B-A4B-it-Q8_0.gguf"),
+        name="diffusiongemma-26B-A4B-it-Q8_0",
+        group=".",
+        size_bytes=20 * 1024**3,
+        metadata={
+            "general.architecture": "diffusion-gemma",
+            "diffusion-gemma.block_count": 48,
+            "diffusion-gemma.context_length": 262144,
+        },
+    )
+
+
+def test_build_diffusion_command_mainline_flags() -> None:
+    """The diffusion command uses llama-diffusion-cli with mainline b9672
+    flags and NO server flags (host/port/fit)."""
+    from tuner import build_diffusion_command
+
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile("diffusiongemma-26B-A4B-it-Q8_0.gguf", profiles)
+    cmd = build_diffusion_command(
+        _fake_diffusion_model(),
+        _fake_diffusion_config(),
+        profile,
+        diffusion_binary="d_b96/llama-diffusion-cli",
+        prompt="hello",
+    )
+
+    assert cmd[0] == "d_b96/llama-diffusion-cli"
+    assert "-m" in cmd
+    assert "--diffusion-steps" in cmd
+    assert "--diffusion-algorithm" in cmd
+    # confidence → 4
+    assert cmd[cmd.index("--diffusion-algorithm") + 1] == "4"
+    assert "-p" in cmd
+
+    # No server-only flags must leak into the diffusion command.
+    for forbidden in ("--host", "--port", "--fit", "--metrics", "--jinja"):
+        assert forbidden not in cmd, f"{forbidden} must not be in a diffusion cmd"
+
+
+def test_build_diffusion_command_eps_xor_block_length() -> None:
+    """eps and block_length are mutually exclusive; block_length wins if
+    both are set, and a profile with only eps emits --diffusion-eps."""
+    from tuner import build_diffusion_command
+    from settings_loader import ModelProfile
+
+    base_model = _fake_diffusion_model()
+    cfg = _fake_diffusion_config()
+
+    # Only eps → --diffusion-eps present, block-length absent.
+    p_eps = ModelProfile(display_name="x", diffusion={"steps": 128, "eps": 0.001})
+    cmd = build_diffusion_command(base_model, cfg, p_eps)
+    assert "--diffusion-eps" in cmd
+    assert "--diffusion-block-length" not in cmd
+
+    # Both → block-length wins, eps dropped.
+    p_both = ModelProfile(
+        display_name="x", diffusion={"eps": 0.001, "block_length": 32}
+    )
+    cmd = build_diffusion_command(base_model, cfg, p_both)
+    assert "--diffusion-block-length" in cmd
+    assert "--diffusion-eps" not in cmd
+
+
+def test_build_diffusion_command_fork_args_passthrough() -> None:
+    """Fork-only flags in diffusion.fork_args are appended verbatim."""
+    from tuner import build_diffusion_command
+    from settings_loader import ModelProfile
+
+    p = ModelProfile(
+        display_name="x",
+        diffusion={
+            "steps": 64,
+            "fork_args": ["--diffusion-eb", "--diffusion-kv-cache"],
+        },
+    )
+    cmd = build_diffusion_command(_fake_diffusion_model(), _fake_diffusion_config(), p)
+    assert "--diffusion-eb" in cmd
+    assert "--diffusion-kv-cache" in cmd
+
+
+def test_diffusion_gemma_profile_loads_with_runner() -> None:
+    """The shipped diffusion-gemma profile sets the diffusion runner."""
+    profiles = load_profiles(SETTINGS_DIR)
+    p = match_profile("diffusiongemma-26B-A4B-it-Q8_0.gguf", profiles)
+    assert p.runner == "llama-diffusion-cli"
+    assert p.display_name.startswith("DiffusionGemma")
+    # Diffusion block carries the expected keys.
+    assert p.diffusion.get("steps") == 256
+    assert "block_length" in p.diffusion
+
+
+def test_diffusion_runner_does_not_affect_server_profiles() -> None:
+    """Normal profiles keep runner == '' (server path)."""
+    profiles = load_profiles(SETTINGS_DIR)
+    for name in (
+        "gpt-oss-20b-UD-Q6_K_XL.gguf",
+        "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+        "gemma-4-12b-it-BF16.gguf",
+    ):
+        p = match_profile(name, profiles)
+        assert p.runner == "", f"{name} should use the server path, got {p.runner!r}"
+
+
+def test_diffusion_gemma_profile_has_no_hardcoded_binary() -> None:
+    """The diffusion-gemma profile must NOT hard-code a server_binary path.
+
+    The diffusion binary is resolved from the fork selected in the GUI
+    dropdown (LLAMA_CPP_DIR), so a daily-rebuilt fork needs no code/profile
+    edits. A pinned server_binary would override that choice.
+    """
+    profiles = load_profiles(SETTINGS_DIR)
+    p = match_profile("diffusiongemma-26B-A4B-it-Q8_0.gguf", profiles)
+    assert p.server_binary is None, (
+        "diffusion-gemma must not pin server_binary; it relies on the fork "
+        f"dropdown / LLAMA_CPP_DIR. Got: {p.server_binary!r}"
+    )
+
+
+def test_diffusion_binary_request_falls_through_without_pin() -> None:
+    """With no server_binary pin, the diffusion request defaults to the bare
+    'llama-diffusion-cli' name — which the resolver then searches for inside
+    the selected fork. This is the indirection that avoids hard-coding."""
+    profiles = load_profiles(SETTINGS_DIR)
+    p = match_profile("diffusiongemma-26B-A4B-it-Q8_0.gguf", profiles)
+    request = p.server_binary or "llama-diffusion-cli"
+    assert request == "llama-diffusion-cli"

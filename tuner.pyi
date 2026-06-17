@@ -133,3 +133,11 @@ def build_command(
     enable_prompt_cache: bool = ...,
     prompt_cache_ram_mib: int = ...,
 ) -> List[str]: ...
+def build_diffusion_command(
+    model: ModelEntry,
+    config: TunedConfig,
+    profile: ModelProfile,
+    diffusion_binary: str = ...,
+    prompt: Optional[str] = ...,
+    extra_args: Optional[List[str]] = ...,
+) -> List[str]: ...

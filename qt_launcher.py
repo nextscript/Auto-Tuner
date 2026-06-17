@@ -14,6 +14,7 @@ import base64
 import copy
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -68,9 +70,13 @@ import app_settings
 
 def _get_fork_tools():
     """Lazy import — never triggers auto_tuner.main()."""
-    from auto_tuner import _discover_llama_forks, _resolve_server_binary
+    from auto_tuner import (
+        _discover_llama_forks,
+        _resolve_diffusion_binary,
+        _resolve_server_binary,
+    )
 
-    return _discover_llama_forks, _resolve_server_binary
+    return _discover_llama_forks, _resolve_server_binary, _resolve_diffusion_binary
 
 
 def _default_settings_path() -> Path:
@@ -1774,7 +1780,7 @@ class MainWindow(QMainWindow):
         )
 
         try:
-            discover, _ = _get_fork_tools()
+            discover, _, _ = _get_fork_tools()
             self._forks = discover()
         except Exception as exc:
             self._log(f"[Warning] Fork discovery failed: {exc}")
@@ -3144,7 +3150,7 @@ class MainWindow(QMainWindow):
         # ik_llama.cpp is only required for Gemma 4 with an *external* sibling drafter.
         # Integrated MTP (Qwen3.6-MTP) uses --spec-type draft-mtp and works in mainline b9190+.
         try:
-            _, resolve = _get_fork_tools()
+            _, resolve, _ = _get_fork_tools()
         except Exception:
             return "llama-server"
         if (
@@ -3401,6 +3407,16 @@ class MainWindow(QMainWindow):
         # for static checkers (Pylance / mypy) that cannot prove this.
         assert cfg is not None
 
+        # ── Diffusion models: different runner entirely ──────────────────
+        # Dream/LLaDA/RND1 (mainline) and DiffusionGemma (fork) are NOT
+        # served by llama-server — they run single-shot via
+        # llama-diffusion-cli. No port, no /health, no server registry. The
+        # binary is found in the SELECTED fork (the fork dropdown already
+        # points LLAMA_CPP_DIR at it), so nothing is hard-coded.
+        if entry.is_diffusion or profile.runner == "llama-diffusion-cli":
+            self._launch_diffusion(entry, cfg, profile)
+            return
+
         # ── Load-balancing across GPUs for a 2nd/3rd concurrent model ──
         # When at least one server is already running, re-check live VRAM
         # and steer this model onto the emptier card — or refuse outright
@@ -3532,6 +3548,108 @@ class MainWindow(QMainWindow):
         self._status.showMessage(
             f"Loading model — PID {pid} — {base_url}  "
             f"({len(self._servers)} server(s) running)"
+        )
+
+    def _launch_diffusion(
+        self, entry: ModelEntry, cfg: TunedConfig, profile: ModelProfile
+    ) -> None:
+        """Run a diffusion text model via llama-diffusion-cli (single-shot).
+
+        Unlike the server path this does not open a port, has no /health
+        and is not added to the server registry — llama-diffusion-cli takes
+        a prompt, denoises, prints the result and exits. The binary is
+        resolved from the fork currently selected in the toolbar dropdown
+        (which has already pointed LLAMA_CPP_DIR at it), so no path is
+        hard-coded: build a new diffusion-capable fork, pick it in the
+        dropdown, done.
+        """
+        from tuner import build_diffusion_command
+
+        # Resolve llama-diffusion-cli. A profile's server_binary may still
+        # name a specific fork (fork/inner form); otherwise we look for
+        # llama-diffusion-cli inside the selected LLAMA_CPP_DIR fork.
+        try:
+            _, _, resolve_diffusion = _get_fork_tools()
+        except Exception as exc:
+            self._log(f"[Diffusion] Could not load resolver: {exc}")
+            QMessageBox.warning(
+                self,
+                "Diffusion unavailable",
+                f"Could not import the diffusion binary resolver:\n{exc}",
+            )
+            return
+
+        request = profile.server_binary or "llama-diffusion-cli"
+        diffusion_bin = resolve_diffusion(request)
+        self._log(f"[Diffusion] binary: {request!r} → {diffusion_bin}")
+
+        if not Path(diffusion_bin).is_file() and not shutil.which(diffusion_bin):
+            self._log(f"[Diffusion] Binary not found: {diffusion_bin}")
+            QMessageBox.warning(
+                self,
+                "llama-diffusion-cli not found",
+                "Diffusion models need llama-diffusion-cli, which is not in "
+                "the selected build.\n\n"
+                "Pick a diffusion-capable fork in the toolbar dropdown "
+                "(the one containing llama-diffusion-cli), or set "
+                "LLAMA_CPP_DIR to it.",
+            )
+            return
+
+        # llama-diffusion-cli is single-shot — it needs a prompt. Ask for
+        # one (multi-line). Cancel aborts the launch.
+        prompt, ok = QInputDialog.getMultiLineText(
+            self,
+            "Diffusion prompt",
+            f"Prompt for {_clean_model_name(entry.name)} "
+            f"(llama-diffusion-cli runs once and prints the result):",
+            "",
+        )
+        if not ok:
+            self._log("[Diffusion] Launch cancelled (no prompt).")
+            return
+        if not prompt.strip():
+            QMessageBox.information(
+                self,
+                "Empty prompt",
+                "A diffusion run needs a non-empty prompt.",
+            )
+            return
+
+        cmd = build_diffusion_command(
+            model=entry,
+            config=cfg,
+            profile=profile,
+            diffusion_binary=diffusion_bin,
+            prompt=prompt,
+        )
+
+        self._log("\n" + "─" * 60)
+        self._log(f"Diffusion: {' '.join(cmd)}")
+        if cfg.env_overrides:
+            for k, v in cfg.env_overrides.items():
+                self._log(f"Env     : {k}={v}")
+
+        # Run in a terminal window like the server path, but do NOT register
+        # it as a server (no port / health / switcher entry). It exits on
+        # its own when generation finishes.
+        proc = _TerminalProcess(cmd, env_overrides=cfg.env_overrides)
+        try:
+            proc.start()
+        except FileNotFoundError:
+            self._log(f"[Error] Binary not found: {cmd[0]}")
+            self._log("  → Check fork selection or set LLAMA_CPP_DIR")
+            return
+
+        pid = proc.proc.pid if proc.proc else "?"
+        self._log(f"[Diffusion] Started — PID: {pid}")
+        self._log("[Diffusion] Output → separate terminal window")
+        self._log(
+            "[Diffusion] Single-shot run; the process exits when generation completes."
+        )
+        self._status.showMessage(
+            f"Diffusion generation running — PID {pid} "
+            f"({_clean_model_name(entry.name)})"
         )
 
     def _stop_server(self) -> None:
@@ -3861,4 +3979,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-    

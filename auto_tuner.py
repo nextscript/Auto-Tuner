@@ -34,7 +34,7 @@ from hardware import detect_system, format_system, SystemInfo
 from launcher import launch
 from scanner import scan_models, group_entries, ModelEntry
 from settings_loader import load_profiles, match_profile, ModelProfile
-from tuner import build_command, compute_config, TunedConfig
+from tuner import build_command, build_diffusion_command, compute_config, TunedConfig
 from performance_target import (
     resolve_performance_target,
     list_target_names,
@@ -327,6 +327,18 @@ _SERVER_SUBPATHS = [
     "llama-server",
 ]
 
+# Diffusion models run through the single-shot llama-diffusion-cli example
+# binary, not llama-server. Same build tree, different target name.
+_DIFFUSION_SUBPATHS = [
+    "build/bin/Release/llama-diffusion-cli.exe",
+    "build/bin/Debug/llama-diffusion-cli.exe",
+    "build/bin/llama-diffusion-cli.exe",
+    "build/bin/llama-diffusion-cli",
+    "build/llama-diffusion-cli",
+    "llama-diffusion-cli.exe",
+    "llama-diffusion-cli",
+]
+
 
 def _candidate_search_roots() -> List[Path]:
     """Folders to look in for a llama.cpp / 1b_llama.cpp checkout."""
@@ -470,6 +482,40 @@ def _resolve_server_binary(user_value: str) -> str:
 
     _debug_print(f"Defaulting to user value: {user_value}")
     return user_value
+
+
+def _resolve_diffusion_binary(user_value: str) -> str:
+    """Resolve the llama-diffusion-cli binary (fork or mainline build).
+
+    A diffusion model needs llama-diffusion-cli, which lives in the same
+    build tree as llama-server. We reuse _resolve_server_binary's search
+    logic (it already builds ``build/bin/...{name}`` candidates for any
+    non-server binary name and resolves ``fork/inner`` paths), then fall
+    back to a direct scan over _DIFFUSION_SUBPATHS in every candidate root.
+
+    ``user_value`` may be:
+      * a bare name ("llama-diffusion-cli") — searched in all known roots,
+      * a fork-relative path ("d_b96.../llama-diffusion-cli") — the fork is
+        matched by name like any other server_binary,
+      * an absolute path — used as-is if it exists.
+    """
+    resolved = _resolve_server_binary(user_value)
+    # If the generic resolver already found a real file, use it.
+    if Path(resolved).is_file():
+        return resolved
+    # Otherwise scan the diffusion-specific subpaths across all roots.
+    for root in _candidate_search_roots():
+        for sub in _DIFFUSION_SUBPATHS:
+            candidate = root / sub
+            if candidate.is_file():
+                _debug_print(f"Found diffusion binary: {candidate}")
+                return str(candidate)
+    # Last resort: a bare name might be on PATH.
+    name = Path(user_value).name or "llama-diffusion-cli"
+    which = shutil.which(name)
+    if which:
+        return which
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -787,6 +833,15 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "persisted forced_gpu setting; omit to use auto selection.",
     )
     p.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help=(
+            "Prompt text for diffusion models (llama-diffusion-cli is "
+            "single-shot and needs a prompt). Ignored for server models."
+        ),
+    )
+    p.add_argument(
         "--",
         dest="passthrough",
         nargs=argparse.REMAINDER,
@@ -1102,46 +1157,104 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             # Default: let _resolve_server_binary find it in LLAMA_CPP_DIR
             return args.server
 
-        raw_server = profile.server_binary or args.server
-        effective_server = resolve_specialized_binary(profile, use_draft, model.name)
-        server = _resolve_server_binary(effective_server)
-
-        if server != raw_server:
-            print(f"[AutoTuner] Found server binary: {server}")
-        elif not Path(server).is_file() and not shutil.which(server):
-            print(f"[AutoTuner] Warning: server binary '{server}' not found.")
-            print("  Pass --server /path/to/llama-server, set LLAMA_SERVER, or")
-            print("  set LLAMA_CPP_DIR to your llama.cpp checkout.")
-
-        # ── Build command ────────────────────────────────────────────────
-        extra = args.passthrough or []
-        cmd = build_command(
-            model=model,
-            config=cfg,
-            profile=profile,
-            draft_model=effective_draft,
-            server_binary=server,
-            host=args.host,
-            port=args.port,
-            extra_args=extra,
-            use_thinking=use_thinking,
-            # --nodraft disables all draft-based speculative decoding, including
-            # embedded MTP (which has no external file and so isn't covered by
-            # effective_draft=None alone). n-gram is independent (--ngram).
-            enable_speculative=not args.nodraft,
-            enable_ngram=use_ngram,
-            enable_prompt_cache=not getattr(args, "no_prompt_cache", False),
+        # ── Runner selection: diffusion vs server ────────────────────────
+        # Diffusion text models (Dream/LLaDA/RND1 mainline; DiffusionGemma
+        # fork) are NOT served by llama-server — they run single-shot via
+        # llama-diffusion-cli with --diffusion-* flags and no /health/API.
+        # The scanner detects this from general.architecture; a profile may
+        # also force it with `runner: llama-diffusion-cli`.
+        is_diffusion_run = model.is_diffusion or (
+            profile.runner == "llama-diffusion-cli"
         )
 
+        extra = args.passthrough or []
+
+        if is_diffusion_run:
+            # Resolve the diffusion binary. A profile's server_binary field
+            # can point at the fork (e.g. "d_b96.../llama-diffusion-cli");
+            # otherwise we search for llama-diffusion-cli in the build tree.
+            diff_request = profile.server_binary or "llama-diffusion-cli"
+            diffusion_bin = _resolve_diffusion_binary(diff_request)
+
+            if Path(diffusion_bin).is_file():
+                print(f"[AutoTuner] Found diffusion binary: {diffusion_bin}")
+            elif not shutil.which(diffusion_bin):
+                print(
+                    f"[AutoTuner] Warning: diffusion binary "
+                    f"'{diffusion_bin}' not found."
+                )
+                print(
+                    "  Diffusion models need llama-diffusion-cli (build it from "
+                    "your diffusion-capable llama.cpp/fork checkout)."
+                )
+                print(
+                    "  Point the profile's server_binary at it, e.g. "
+                    'server_binary: "d_b96xxx/llama-diffusion-cli".'
+                )
+
+            diff_prompt = getattr(args, "prompt", None)
+            cmd = build_diffusion_command(
+                model=model,
+                config=cfg,
+                profile=profile,
+                diffusion_binary=diffusion_bin,
+                prompt=diff_prompt,
+                extra_args=extra,
+            )
+        else:
+            # ── Binary resolution (server path) ──────────────────────────
+            raw_server = profile.server_binary or args.server
+            effective_server = resolve_specialized_binary(
+                profile, use_draft, model.name
+            )
+            server = _resolve_server_binary(effective_server)
+
+            if server != raw_server:
+                print(f"[AutoTuner] Found server binary: {server}")
+            elif not Path(server).is_file() and not shutil.which(server):
+                print(f"[AutoTuner] Warning: server binary '{server}' not found.")
+                print("  Pass --server /path/to/llama-server, set LLAMA_SERVER, or")
+                print("  set LLAMA_CPP_DIR to your llama.cpp checkout.")
+
+            # ── Build command (server path) ──────────────────────────────
+            cmd = build_command(
+                model=model,
+                config=cfg,
+                profile=profile,
+                draft_model=effective_draft,
+                server_binary=server,
+                host=args.host,
+                port=args.port,
+                extra_args=extra,
+                use_thinking=use_thinking,
+                # --nodraft disables all draft-based speculative decoding,
+                # including embedded MTP (which has no external file and so
+                # isn't covered by effective_draft=None alone). n-gram is
+                # independent (--ngram).
+                enable_speculative=not args.nodraft,
+                enable_ngram=use_ngram,
+                enable_prompt_cache=not getattr(args, "no_prompt_cache", False),
+            )
+
         if args.dry_run:
-            print("[AutoTuner] --dry-run — not starting the server.")
-            print("Command:")
-            print("  " + " ".join(cmd))
-            _print_client_settings(args.host, args.port, cfg.ctx, model)
+            if is_diffusion_run:
+                print("[AutoTuner] --dry-run — not starting diffusion generation.")
+                print("Command:")
+                print("  " + " ".join(cmd))
+            else:
+                print("[AutoTuner] --dry-run — not starting the server.")
+                print("Command:")
+                print("  " + " ".join(cmd))
+                _print_client_settings(args.host, args.port, cfg.ctx, model)
             return 0
 
         try:
-            launch_now = args.yes or _confirm("Launch llama-server now?")
+            prompt_label = (
+                "Run diffusion generation now?"
+                if is_diffusion_run
+                else "Launch llama-server now?"
+            )
+            launch_now = args.yes or _confirm(prompt_label)
         except KeyboardInterrupt:
             print("\n[AutoTuner] Aborted by user.")
             return 0
@@ -1151,14 +1264,29 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             first_iteration = False
             continue
 
-        _print_client_settings(args.host, args.port, cfg.ctx, model)
-        print(
-            f"\n[AutoTuner] Web UI will be available at "
-            f"http://{args.host}:{args.port}\n"
-        )
+        if is_diffusion_run:
+            print(
+                "\n[AutoTuner] Running llama-diffusion-cli (single-shot). "
+                "Output prints below; the process exits when done.\n"
+            )
+            if not getattr(args, "prompt", None):
+                print(
+                    "[AutoTuner] Note: no --prompt given. llama-diffusion-cli "
+                    'needs a prompt; pass --prompt "..." or add -p via '
+                    "passthrough.\n"
+                )
+        else:
+            _print_client_settings(args.host, args.port, cfg.ctx, model)
+            print(
+                f"\n[AutoTuner] Web UI will be available at "
+                f"http://{args.host}:{args.port}\n"
+            )
 
         # ── Launch (terminal or GUI) ─────────────────────────────────────
-        if args.gui:
+        # The GUI log viewer is built around a long-running server (health
+        # state, chat endpoint). A diffusion run is single-shot CLI output,
+        # so it always uses the terminal path even under --gui.
+        if args.gui and not is_diffusion_run:
             # Lazy import: only when --gui is actually used.
             # This keeps the CI smoke-import clean even without PyQt6.
             try:
@@ -1177,6 +1305,11 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 window.show()
                 sys.exit(app.exec())
         else:
+            if args.gui and is_diffusion_run:
+                print(
+                    "[AutoTuner] --gui ignored for diffusion (single-shot CLI); "
+                    "running in terminal mode."
+                )
             last_exit_code = launch(cmd, env_overrides=cfg.env_overrides)
 
         print()
@@ -1197,4 +1330,3 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
 
 if __name__ == "__main__":
     sys.exit(main())
-    

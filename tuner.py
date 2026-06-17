@@ -1242,7 +1242,9 @@ def compute_config(
         #   RAM-Nutzung ~3 GB statt ~60 GB (bei n_parallel=4 ohne diesen Fix).
         kv_budget_per_slot_gb = kv_budget_gb / n_parallel
         if actual_per_tok_mb > 0:
-            max_fit_ctx = int((kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb)
+            max_fit_ctx = int(
+                (kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb
+            )
         else:
             max_fit_ctx = profile_max
 
@@ -1480,9 +1482,7 @@ def compute_config(
         # don't fit, MoE experts spill to CPU (--n-cpu-moe, computed against
         # this card's free VRAM above) rather than silently bleeding onto the
         # card the user wanted left alone.
-        pin_to_primary = (forced_gpu is not None) or (
-            model_footprint_gb <= primary_cap
-        )
+        pin_to_primary = (forced_gpu is not None) or (model_footprint_gb <= primary_cap)
 
         if pin_to_primary:
             if hip_known:
@@ -1559,7 +1559,9 @@ def compute_config(
                     for i, cap in enumerate(caps):
                         if alloc[i] < cap and remaining > 0.01:
                             space = cap - alloc[i]
-                            take = min(space, remaining * 0.5)  # give half to each available GPU
+                            take = min(
+                                space, remaining * 0.5
+                            )  # give half to each available GPU
                             alloc[i] += take
                             remaining -= take
 
@@ -1763,6 +1765,176 @@ def _has_integrated_mtp(model: ModelEntry) -> bool:
     return model.has_embedded_mtp
 
 
+# Diffusion algorithm names → llama.cpp's integer --diffusion-algorithm
+# values (examples/diffusion/README.md, b9672):
+#   0 ORIGIN, 1 ENTROPY_BASED, 2 MARGIN_BASED, 3 RANDOM, 4 CONFIDENCE_BASED
+_DIFFUSION_ALGORITHMS = {
+    "origin": 0,
+    "entropy": 1,
+    "entropy_based": 1,
+    "margin": 2,
+    "margin_based": 2,
+    "random": 3,
+    "confidence": 4,
+    "confidence_based": 4,
+}
+
+
+def _diffusion_algorithm_value(raw: Any) -> Optional[int]:
+    """Normalise a profile ``algorithm:`` value to the CLI integer.
+
+    Accepts either the integer (0..4) or a friendly name
+    ("confidence", "entropy", …). Returns None when unset/invalid so the
+    builder simply omits the flag and lets the CLI use its own default
+    (4 = confidence-based)."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):  # guard: bool is an int subclass
+        return None
+    if isinstance(raw, int):
+        return raw if 0 <= raw <= 4 else None
+    name = str(raw).strip().lower()
+    if name.isdigit():
+        v = int(name)
+        return v if 0 <= v <= 4 else None
+    return _DIFFUSION_ALGORITHMS.get(name)
+
+
+def build_diffusion_command(
+    model: ModelEntry,
+    config: TunedConfig,
+    profile: ModelProfile,
+    diffusion_binary: str = "llama-diffusion-cli",
+    prompt: Optional[str] = None,
+    extra_args: Optional[List[str]] = None,
+) -> List[str]:
+    """Build a ``llama-diffusion-cli`` command line for a diffusion LLM.
+
+    Diffusion text models (Dream, LLaDA, LLaDA-MoE, RND1 in mainline;
+    DiffusionGemma in a fork) are NOT served by ``llama-server`` — as of
+    b9672 the server has no diffusion path. They run through the single-
+    shot ``llama-diffusion-cli`` example binary: it takes a prompt, runs a
+    fixed number of denoising steps, prints the result and exits. There is
+    no /health endpoint, no OpenAI API, no port.
+
+    Flags emitted are mainline b9672 (examples/diffusion/README.md):
+      -m / -p / -c / -ngl / -b / -ub  — standard load + batch knobs
+      --diffusion-steps N             — denoising steps (profile, def 256)
+      --diffusion-algorithm 0..4      — token-selection algorithm
+      --diffusion-eps F  XOR  --diffusion-block-length N  — schedule
+      --diffusion-visual              — live visualisation (optional)
+      -n / --predict N                — max tokens (profile n_predict)
+    plus any verbatim ``fork_args`` from the profile's ``diffusion`` block
+    for fork-only flags mainline doesn't have (e.g. --diffusion-eb,
+    --diffusion-kv-cache). User ``extra_args`` (CLI passthrough) come last.
+
+    ``prompt`` is optional: when omitted the caller is expected to add a
+    ``-p`` itself or run interactively. We keep KV-quant / tensor-split out
+    of the command on purpose — the diffusion example binary does not parse
+    those server-side flags.
+    """
+    diff = profile.diffusion or {}
+
+    cmd: List[str] = [
+        diffusion_binary,
+        "-m",
+        str(model.path),
+        "-c",
+        str(config.ctx),
+        "-ngl",
+        str(config.ngl),
+        "-b",
+        str(config.batch),
+        "-ub",
+        str(config.ubatch),
+    ]
+
+    # ---- max tokens to generate (-n / --predict) ----------------------
+    n_predict = diff.get("n_predict")
+    if n_predict is not None:
+        try:
+            n = int(n_predict)
+            if n > 0:
+                cmd += ["-n", str(n)]
+        except (TypeError, ValueError):
+            pass
+
+    # ---- denoising steps ----------------------------------------------
+    steps = diff.get("steps")
+    if steps is not None:
+        try:
+            s = int(steps)
+            if s > 0:
+                cmd += ["--diffusion-steps", str(s)]
+        except (TypeError, ValueError):
+            pass
+
+    # ---- token-selection algorithm ------------------------------------
+    alg = _diffusion_algorithm_value(diff.get("algorithm"))
+    if alg is not None:
+        cmd += ["--diffusion-algorithm", str(alg)]
+
+    # ---- scheduling: eps XOR block-length -----------------------------
+    # The CLI takes one or the other. If a profile (mistakenly) sets both,
+    # prefer block-length and warn — silently dropping one would hide a
+    # config error.
+    eps = diff.get("eps")
+    block_length = diff.get("block_length")
+    if eps is not None and block_length is not None:
+        print(
+            "[AutoTuner] diffusion profile sets BOTH eps and block_length; "
+            "using block_length (pick one to silence this)."
+        )
+        eps = None
+    if block_length is not None:
+        try:
+            bl = int(block_length)
+            if bl > 0:
+                cmd += ["--diffusion-block-length", str(bl)]
+        except (TypeError, ValueError):
+            pass
+    elif eps is not None:
+        try:
+            cmd += ["--diffusion-eps", str(float(eps))]
+        except (TypeError, ValueError):
+            pass
+
+    # ---- live visualisation (optional) --------------------------------
+    if bool(diff.get("visual", False)):
+        cmd += ["--diffusion-visual"]
+
+    # ---- sampling temperature (CLI uses --temp) -----------------------
+    # Diffusion-cli honours --temp / --top-k / --top-p; pull temperature
+    # from the profile's chat sampling if present (kept minimal — the
+    # other samplers are rarely meaningful for diffusion decoding).
+    chat_sampling = profile.sampling.get("chat") or profile.sampling or {}
+    if isinstance(chat_sampling, dict):
+        temp = chat_sampling.get("temperature")
+        if temp is not None:
+            try:
+                cmd += ["--temp", str(float(temp))]
+            except (TypeError, ValueError):
+                pass
+
+    # ---- prompt -------------------------------------------------------
+    if prompt:
+        cmd += ["-p", prompt]
+
+    # ---- fork-only flags (verbatim passthrough) -----------------------
+    # Mainline b9672 has no --diffusion-eb / --diffusion-kv-cache; the
+    # DiffusionGemma fork does. Keeping them in a profile list means the
+    # same schema serves both — mainline profiles just leave fork_args out.
+    fork_args = diff.get("fork_args") or []
+    if isinstance(fork_args, list):
+        cmd += [str(a) for a in fork_args]
+
+    # ---- user CLI passthrough (highest precedence) --------------------
+    if extra_args:
+        cmd += [str(a) for a in extra_args]
+
+    return cmd
+
+
 def build_command(
     model: ModelEntry,
     config: TunedConfig,
@@ -1932,9 +2104,7 @@ def build_command(
     # lives inside the same GGUF as the main model; llama.cpp loads it as part
     # of the same graph so there is no second-model-load conflict.
     use_integrated = (
-        enable_speculative
-        and _has_integrated_mtp(model)
-        and draft_model is None
+        enable_speculative and _has_integrated_mtp(model) and draft_model is None
     )
 
     # ---- Draftless ("ngram") method selection (b9334) ------------------

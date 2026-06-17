@@ -77,6 +77,32 @@ class ModelProfile:
     # "throughput". Unknown values are ignored.
     performance_target: str = ""
 
+    # ---- Diffusion-LLM support ----------------------------------------
+    # Runner selection. "" / "llama-server" → the normal OpenAI-compatible
+    # server path (default, unchanged for every existing profile).
+    # "llama-diffusion-cli" → single-shot diffusion generation: the tuner
+    # builds a diffusion command instead of a server command and the
+    # launcher does NOT expect a /health endpoint or chat API. Normally you
+    # don't need to set this by hand — the scanner detects diffusion
+    # architectures (dream / llada / rnd1 / diffusion-gemma) and the
+    # launcher switches automatically; the field is here so a profile can
+    # force it (e.g. for an arch mainline doesn't recognise yet).
+    runner: str = ""
+    # Diffusion generation parameters (only consulted on the diffusion
+    # path). Mainline b9672 flags map as:
+    #   steps         -> --diffusion-steps        (default 256)
+    #   algorithm     -> --diffusion-algorithm    (0..4; 4=confidence)
+    #   eps           -> --diffusion-eps          (timestep schedule)
+    #   block_length  -> --diffusion-block-length (block schedule; pick ONE
+    #                    of eps / block_length, not both)
+    #   visual        -> --diffusion-visual       (live token visualisation)
+    #   n_predict     -> -n / --predict           (max tokens to generate)
+    # Fork-only extras (NOT in mainline b9672 — DiffusionGemma build) are
+    # passed through verbatim from the ``fork_args`` list, e.g.
+    #   fork_args: ["--diffusion-eb", "--diffusion-kv-cache"]
+    # so the same profile schema works for both mainline and your fork.
+    diffusion: Dict[str, Any] = field(default_factory=dict)
+
 
 # The draftless --spec-type methods llama.cpp accepts as of b9334. Used to
 # validate the profile-level ngram_method so a typo in YAML fails loudly at
@@ -142,6 +168,20 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
             )
             perf_target_raw = ""
 
+        # Runner override (optional). Soft-validate: only the two known
+        # values are honoured; anything else falls back to the server path.
+        runner_raw = str(data.get("runner", "") or "").lower().strip()
+        if runner_raw not in ("", "llama-server", "llama-diffusion-cli"):
+            print(
+                f"[AutoTuner] {yml.name}: unknown runner '{runner_raw}', "
+                f"ignoring (using llama-server)."
+            )
+            runner_raw = ""
+
+        diffusion_cfg = data.get("diffusion") or {}
+        if not isinstance(diffusion_cfg, dict):
+            diffusion_cfg = {}
+
         profiles.append(
             ModelProfile(
                 display_name=str(data.get("display_name", yml.stem)),
@@ -176,6 +216,8 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
                 else 1048576,
                 rope_scale_factor=rope_scale_factor,
                 performance_target=perf_target_raw,
+                runner=runner_raw,
+                diffusion=diffusion_cfg,
             )
         )
     return profiles

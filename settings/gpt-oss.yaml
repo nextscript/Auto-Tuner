@@ -80,4 +80,3 @@ notes: >
   für Endnutzer gedacht. Native Tool-/Function-Calling-Fähigkeiten vorhanden.
   Quant-Stufen ändern beim MXFP4-MoE fast nichts an der Dateigröße — die
   Experten liegen immer in MXFP4; q8_0/F16 betreffen nur Embeddings/Attention.
-  

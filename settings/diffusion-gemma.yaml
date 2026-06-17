@@ -1,0 +1,92 @@
+display_name: "DiffusionGemma (diffusion LLM)"
+patterns:
+  - diffusiongemma
+  - diffusion-gemma
+
+# Architektur-Fallback: greift wenn KEIN Pattern oben matcht. Die
+# general.architecture dieser GGUFs ist "diffusion-gemma" (fork-only,
+# NICHT in llama.cpp-Mainline b9672). Der Scanner erkennt sie ohnehin als
+# Diffusionsmodell (is_diffusion -> True) und der Launcher schaltet
+# automatisch auf llama-diffusion-cli um; der Fallback ist hier zur
+# Sicherheit, falls eine Variante einen unüblichen Dateinamen trägt.
+arch_fallback:
+  - diffusion-gemma
+  - diffusion_gemma
+  - diffusiongemma
+
+# WICHTIG — Runner: Diffusionsmodelle laufen NICHT über llama-server.
+# Stand b9672 hat der Server keinerlei Diffusions-Codepfad. Generierung
+# erfolgt single-shot über llama-diffusion-cli (Prompt rein -> Text raus ->
+# Prozess endet). Kein /health, keine OpenAI-API, kein Port, kein Chat-UI.
+# Der Scanner erkennt die Architektur automatisch; dieses Feld macht es
+# explizit (und erlaubt das Erzwingen, falls die Auto-Erkennung mal nicht
+# greift).
+runner: llama-diffusion-cli
+
+# Binary: KEIN server_binary/Pfad hier eintragen. llama-diffusion-cli wird
+# automatisch in dem llama.cpp-Build gesucht, den du im Fork-Dropdown der
+# GUI auswählst (bzw. unter LLAMA_CPP_DIR). Wähle einfach deinen
+# diffusionsfähigen Build (z.B. "d_b9654_llama.cpp") im Dropdown — der
+# AutoTuner findet darin build/bin/[Release/]llama-diffusion-cli. So musst
+# du bei jedem neuen Compile NICHTS am Code/Profil ändern.
+#
+# Nur falls du einen Diffusions-Build an einen FESTEN, vom Dropdown
+# abweichenden Ort zwingen willst, kannst du optional server_binary auf
+# "<fork-ordnername>/llama-diffusion-cli" setzen — normalerweise NICHT nötig.
+
+# Native Kontextlänge: wird via GGUF-Metadata automatisch gecappt; hier der
+# Familien-Maximalwert (diffusiongemma-26B-A4B-it).
+max_context: 262144
+
+# Diffusions-Parameter (nur auf dem Diffusionspfad ausgewertet). Mapping auf
+# die b9672-Mainline-Flags:
+#   steps        -> --diffusion-steps        (Anzahl Denoising-Schritte)
+#   algorithm    -> --diffusion-algorithm    (0..4; "confidence" = 4 = Default)
+#   eps          -> --diffusion-eps          (Timestep-Scheduling)
+#   block_length -> --diffusion-block-length (Block-Scheduling; ENTWEDER eps
+#                   ODER block_length, nicht beides)
+#   visual       -> --diffusion-visual       (Live-Visualisierung der Tokens)
+#   n_predict    -> -n                       (max. zu generierende Tokens)
+diffusion:
+  steps: 256
+  algorithm: confidence   # 0=origin 1=entropy 2=margin 3=random 4=confidence
+  block_length: 32        # Block-Scheduling (Gemma-Diffusion nutzt Blöcke)
+  visual: false
+  n_predict: 2048
+
+  # Fork-only Extras: NICHT in mainline b9672. Der DiffusionGemma-Fork kennt
+  # zusätzliche Flags (entropy-bounding, KV-Cache für Diffusion). Werden
+  # verbatim ans CLI angehängt. Auskommentiert lassen, wenn dein Fork sie
+  # nicht unterstützt — sonst bricht der Start mit "unknown argument" ab.
+  # Einkommentieren, sobald dein d_b96...-Build sie hat:
+  # fork_args:
+  #   - --diffusion-eb
+  #   - --diffusion-kv-cache
+
+# Sampling: Diffusion-CLI honoriert --temp (und --top-k/--top-p). Für
+# Gemma-Diffusion ist eine moderate Temperatur sinnvoll; der Builder zieht
+# temperature aus dem chat-Block.
+sampling:
+  chat:
+    temperature: 0.7
+  coding:
+    temperature: 0.3
+
+notes: >
+  DiffusionGemma ist ein Diffusions-Textmodell (kein autoregressives GGUF
+  für llama-server). Es läuft NUR über llama-diffusion-cli aus einem
+  diffusionsfähigen llama.cpp-Build. Wähle deinen Diffusions-Build im
+  Fork-Dropdown der GUI (z.B. "d_b9654_llama.cpp") — der AutoTuner findet
+  llama-diffusion-cli automatisch darin, kein Pfad muss hartcodiert werden.
+  Mainline b9672 kennt die Architektur "diffusion-gemma" nicht; der
+  AutoTuner erkennt sie trotzdem (is_diffusion) und baut automatisch einen
+  llama-diffusion-cli-Befehl statt eines Server-Starts. Generierung ist
+  single-shot: Prompt rein, Text raus, Prozess endet — kein /health, keine
+  OpenAI-API, kein Chat-UI. In der GUI fragt ein Dialog nach dem Prompt; im
+  Terminal via `--prompt "..."`. Scheduling: ENTWEDER --diffusion-eps ODER
+  --diffusion-block-length, nicht beides (DiffusionGemma nutzt
+  Block-Scheduling). Fork-spezifische Flags (--diffusion-eb,
+  --diffusion-kv-cache) sind NICHT in mainline und müssen über
+  diffusion.fork_args zugeschaltet werden, falls dein Build sie kennt.
+  Mainline-Diffusionsmodelle (Dream/LLaDA/RND1) werden ebenso automatisch
+  erkannt und brauchen kein eigenes Profil.

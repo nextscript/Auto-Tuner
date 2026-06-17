@@ -494,6 +494,49 @@ def metadata_is_hybrid_architecture(md: Dict[str, Any]) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Diffusion-LLM detection
+#
+# Diffusion text models (Dream, LLaDA, LLaDA-MoE, RND1 in llama.cpp
+# mainline; DiffusionGemma in a dedicated fork) are NOT served by
+# ``llama-server``. As of b9672 the server has no diffusion code path at
+# all — these run only through the single-shot ``llama-diffusion-cli``
+# example binary (prompt in → text out → exit), with their own
+# ``--diffusion-*`` flags and no OpenAI API / /health endpoint.
+#
+# llama.cpp's own classifier ``llm_arch_is_diffusion()`` returns true for
+# dream / llada / llada-moe / rnd1. ``diffusion-gemma`` is fork-only (not
+# in mainline's arch table) so we add it explicitly — the runtime arch
+# string is what the fork's converter wrote into general.architecture.
+_DIFFUSION_ARCHS = frozenset(
+    {
+        "dream",
+        "llada",
+        "llada-moe",
+        "llada_moe",
+        "rnd1",
+        "diffusion-gemma",  # fork-only (Unsloth DiffusionGemma build)
+        "diffusion_gemma",
+        "diffusiongemma",
+    }
+)
+
+
+def metadata_is_diffusion_architecture(md: Dict[str, Any]) -> bool:
+    """Detect a diffusion-LLM from GGUF metadata.
+
+    A diffusion model must be launched with ``llama-diffusion-cli`` and a
+    set of ``--diffusion-*`` flags rather than ``llama-server``; the caller
+    uses this to switch the runner and command builder. Detection is by
+    architecture name (the only reliable signal — diffusion GGUFs carry no
+    distinctive KV key the way SSM hybrids carry ``*.ssm.*``).
+    """
+    if not md:
+        return False
+    arch = str(md.get("general.architecture", "") or "").lower().strip()
+    return arch in _DIFFUSION_ARCHS
+
+
 def metadata_attention_layer_count(md: Dict[str, Any]) -> int:
     """Return the number of layers that actually carry KV cache.
 
@@ -857,6 +900,13 @@ class ModelEntry:
     def is_hybrid(self) -> bool:
         """True for Mamba/Transformer hybrids (Nemotron-H, Jamba, …)."""
         return metadata_is_hybrid_architecture(self.metadata)
+
+    @property
+    def is_diffusion(self) -> bool:
+        """True for diffusion text models (Dream, LLaDA, RND1,
+        DiffusionGemma). These must run via ``llama-diffusion-cli``, not
+        ``llama-server`` — the launcher routes on this flag."""
+        return metadata_is_diffusion_architecture(self.metadata)
 
     @property
     def n_attention_layers(self) -> int:
