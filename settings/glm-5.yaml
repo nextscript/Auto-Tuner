@@ -1,0 +1,72 @@
+display_name: "GLM-5 / 5.1 / 5.2 (Z.ai)"
+patterns:
+  - glm-5
+  - glm5
+  - glm-5.1
+  - glm-5.2
+
+# Architektur-Fallback: GLM-5-Familie trägt general.architecture "glm5"
+# (Loader-Graph: GLM_DSA -> läuft Stand b9739 über den deepseek2-MLA-Pfad,
+# der DSA-"lightning indexer" ist geladen-aber-ungenutzt, siehe notes).
+# Fängt Re-Quants/Merges mit unüblichem Dateinamen. NICHT deepseek2 als
+# Fallback nehmen (das würde DeepSeek-V3/Kimi/GLM-4.7-Flash mitfangen).
+arch_fallback:
+  - glm5
+
+# GLM-5 / GLM-5.2: 744B MoE / ~40B aktiv, MIT-Lizenz, agentisches Coding +
+# Reasoning. GLM-5.1 ebenso. Native 200k Input (DSA-Long-Context, offiziell
+# "128K+ via DSA", HLE-Tool-Setup bis 202752). Wird via GGUF-Metadata
+# automatisch je Variante gecappt; hier der Familien-Maximalwert.
+max_context: 202752
+# Datacenter-Klasse: Q2/IQ2 ~220-240 GB, Q4 ~376 GB. Auf Multi-GPU-Clustern
+# (8x) voll lauffähig; auf Einzel-Workstation nur mit viel RAM + --n-cpu-moe.
+recommended_kv_quant: q8_0
+
+# MoE: is_moe wird über expert_count>1 erkannt; Tuner verteilt Experten
+# GPU/CPU. Auf großen Clustern lohnt Tensor-Parallelität (mehr dazu in den
+# llama.cpp-TP-Flags); "throughput" als neutraler Default fürs KV-Budget.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Z.ai/Unsloth-Empfehlung (GLM-5 HF-Card, llama-server-Beispiel):
+    # temp=1.0, top_p=0.95, min_p=0.01. HLE-Eval-Setup nutzt ebenfalls
+    # temp=1.0/top_p=0.95. GLM mag KEINE Repeat-Penalty (1.0 = aus).
+    temperature: 1.0
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.01
+    repeat_penalty: 1.0
+  coding:
+    # Wie bei GLM-4.7: deterministischer für stabile Tool-Calls und
+    # reproduzierbaren Code. 0.6 erhält Reasoning-Qualität, ist aber
+    # weniger sprunghaft als der 1.0-Chat-Default.
+    temperature: 0.6
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.01
+    repeat_penalty: 1.0
+
+extra_args:
+  # Pflicht: GLM-Chat-Template (Interleaved/Preserved Thinking) braucht
+  # --jinja, sonst landen die Thinking-Blöcke im content statt sauber als
+  # reasoning_content. (Wie bei GLM-4.7.)
+  - --jinja
+
+notes: >
+  Z.ai GLM-5 / GLM-5.1 / GLM-5.2 — 744B MoE (~40B aktiv), MIT-Lizenz,
+  Flaggschiff für agentisches Coding + Reasoning, ~200k Kontext via DSA.
+  Architektur "glm5"/GLM_DSA. WICHTIG (Stand b9739): GLM-5.x läuft über den
+  DENSEN deepseek2-MLA-Attention-Pfad statt der intendierten
+  GLM-DSA-Sparse/Indexer-Attention — der DSA-"lightning indexer" wird
+  geladen, aber nicht ausgeführt (Indexer-Runtime noch nicht implementiert).
+  Folge: voll funktionsfähig, aber kein Sparse-Attention-Speedup; bei
+  KALTEM Prefill von ~120k+ Tokens am Stück gibt es einen bekannten
+  Crash/Gibberish-Bug (llama.cpp #23574) — Kontext schrittweise aufbauen
+  statt einen riesigen Prompt cold zu schicken. Sampling = Z.ai/Unsloth
+  (temp 1.0 / top_p 0.95 / min_p 0.01) im Chat; Coding deterministischer
+  (0.6). --jinja Pflicht. Datacenter-Klasse: Q2 ~220-240 GB, Q4 ~376 GB —
+  auf 8-GPU-Clustern voll, auf Workstation nur mit sehr viel RAM +
+  --n-cpu-moe. Für GLM-4.7/4.7-Flash bleibt glm-4_7.yaml zuständig
+  (eigene, kleinere Architektur).

@@ -2186,3 +2186,116 @@ def test_diffusion_binary_request_falls_through_without_pin() -> None:
     p = match_profile("diffusiongemma-26B-A4B-it-Q8_0.gguf", profiles)
     request = p.server_binary or "llama-diffusion-cli"
     assert request == "llama-diffusion-cli"
+
+
+def test_large_and_special_model_profiles_route_correctly() -> None:
+    """The big/special model profiles (GLM-5, Seed-OSS, Qwen3-VL,
+    Hunyuan-A13B, ERNIE, Ling/Ring, dots1, Kimi-K2, Grok-2, SmolLM3,
+    Ling-2.6 fork) each match their model — via filename pattern and, where
+    declared, via arch_fallback for unrecognised filenames."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    def dn(stem: str, arch: str | None = None) -> str:
+        return match_profile(stem, profiles, arch).display_name
+
+    # Filename-pattern matches.
+    assert "GLM-5" in dn("GLM-5-UD-IQ2_XXS-00001-of-00006.gguf")
+    assert "Seed-OSS" in dn("Seed-OSS-36B-Instruct-Q4_K_M.gguf")
+    assert "Qwen3-VL" in dn("Qwen3-VL-32B-Instruct-Q8_0.gguf")
+    assert "Hunyuan-A13B" in dn("Hunyuan-A13B-Instruct-Q4_K_M.gguf")
+    assert "ERNIE" in dn("ERNIE-4.5-21B-A3B-Thinking-Q4_K_M.gguf")
+    assert "Ling / Ring" in dn("Ling-mini-2.0-Q4_K_M.gguf")
+    assert "dots.llm1" in dn("dots.llm1.inst-Q4_K_M.gguf")
+    assert "Kimi-K2" in dn("Kimi-K2-Instruct-Q2_K_XL-00001-of-00008.gguf")
+    assert "Grok-2" in dn("grok-2-Q4_K_M-00001-of-00010.gguf")
+    assert "SmolLM3" in dn("SmolLM3-3B-Q8_0.gguf")
+    assert "Ling-2.6-flash" in dn("inclusionAI__Ling-2.6-flash-IQ2_XS.gguf")
+
+    # arch_fallback matches (unrecognised filename, known arch).
+    assert "GLM-5" in dn("weird-glm-requant.gguf", "glm5")
+    assert "Seed-OSS" in dn("random-name.gguf", "seed_oss")
+    assert "Qwen3-VL" in dn("vl-merge.gguf", "qwen3vlmoe")
+    assert "Hunyuan-A13B" in dn("hy-moe-merge.gguf", "hunyuan_moe")
+    assert "ERNIE" in dn("baidu-moe-requant.gguf", "ernie4_5-moe")
+    assert "Ling / Ring" in dn("bailing-requant.gguf", "bailingmoe2")
+    assert "dots.llm1" in dn("dots-requant.gguf", "dots1")
+    assert "Grok-2" in dn("grok-requant.gguf", "grok")
+
+
+def test_deepseek2_family_does_not_collide() -> None:
+    """DeepSeek-V3/R1, GLM-4.7-Flash and Kimi-K2 ALL carry
+    general.architecture 'deepseek2'. Each must route to its own profile via
+    filename pattern, and none may declare arch_fallback: deepseek2 (which
+    would hijack the others)."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    def dn(stem: str) -> str:
+        # arch hint is deepseek2 for all three — only the filename disambiguates
+        return match_profile(stem, profiles, "deepseek2").display_name
+
+    assert "DeepSeek" in dn("DeepSeek-V3.2-Q4_K_M.gguf")
+    assert "DeepSeek" in dn("DeepSeek-R1-Q4_K_M.gguf")
+    assert "GLM-4.7" in dn("GLM-4.7-Flash-UD-Q6_K_XL.gguf")
+    assert "GLM-4.7" in dn("GLM-4.7-Flash-REAP-23B-A3B-UD-Q8_K_XL.gguf")
+    assert "Kimi-K2" in dn("Kimi-K2-Instruct-0905-Q2_K.gguf")
+
+    # No profile may claim deepseek2 as an arch_fallback (that would make the
+    # disambiguation order-dependent and fragile).
+    for p in profiles:
+        assert "deepseek2" not in p.arch_fallback, (
+            f"{p.source_file} must not declare arch_fallback: deepseek2"
+        )
+
+
+def test_hunyuan_dense_vs_moe_split() -> None:
+    """Hunyuan-MT (dense, translation, top_p 0.6) and Hunyuan-A13B (MoE,
+    chat, top_p 0.8) must use different profiles. The dense profile must no
+    longer swallow the MoE model."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    mt = match_profile("Hy-MT2-7B-UD-Q8_K_XL.gguf", profiles, "hunyuan-dense")
+    assert "Hunyuan-MT" in mt.display_name
+    # dense MT profile keeps the translation sampling (top_p 0.6)
+    assert mt.sampling["chat"]["top_p"] == 0.6
+
+    a13b = match_profile("Hunyuan-A13B-Instruct-Q4_K_M.gguf", profiles, "hunyuan_moe")
+    assert "A13B" in a13b.display_name
+    # MoE chat profile uses top_p 0.8 (NOT the translation 0.6)
+    assert a13b.sampling["chat"]["top_p"] == 0.8
+
+
+def test_ling_2_0_mainline_vs_2_6_fork() -> None:
+    """Ling/Ring 2.0 (bailingmoe2, mainline) and Ling-2.6-flash
+    (bailingmoe2.5/bailing_hybrid, fork) must use different profiles."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    v20 = match_profile("Ling-flash-2.0-Q4_K_M.gguf", profiles, "bailingmoe2")
+    assert "Ling / Ring" in v20.display_name
+
+    v26 = match_profile(
+        "inclusionAI__Ling-2.6-flash-IQ2_XS.gguf", profiles, "bailing_hybrid"
+    )
+    assert "Ling-2.6-flash" in v26.display_name
+    # the fork profile must NOT claim the mainline arch
+    assert "bailingmoe2" not in v26.arch_fallback
+
+
+def test_new_big_profiles_have_jinja_where_required() -> None:
+    """Profiles for chat-template / tool-call / thinking models must emit
+    --jinja (GLM-5, Seed-OSS, Qwen3-VL, Hunyuan-A13B, ERNIE, Ling/Ring,
+    Kimi-K2, SmolLM3)."""
+    profiles = load_profiles(SETTINGS_DIR)
+    by_file = {p.source_file: p for p in profiles}
+    for fname in (
+        "glm-5.yaml",
+        "seed-oss.yaml",
+        "qwen3-vl.yaml",
+        "hunyuan-moe.yaml",
+        "ernie-4_5.yaml",
+        "ling-ring.yaml",
+        "kimi-k2.yaml",
+        "smollm3.yaml",
+        "bailingmoe2-5.yaml",
+    ):
+        assert fname in by_file, f"{fname} not loaded"
+        assert "--jinja" in by_file[fname].extra_args, f"{fname} missing --jinja"

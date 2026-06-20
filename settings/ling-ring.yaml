@@ -1,0 +1,73 @@
+display_name: "Ling / Ring 2.x (InclusionAI, BailingMoE)"
+patterns:
+  - ling-mini
+  - ling-flash
+  - ling-1t
+  - ling-2
+  - ring-mini
+  - ring-flash
+  - ring-1t
+  - ring-2
+  - bailing
+
+# Architektur-Fallback: general.architecture "bailingmoe2" (Ling/Ring 2.0,
+# in llama.cpp-Mainline via PR #16063). Fängt Re-Quants/Merges mit
+# abweichendem Dateinamen. ACHTUNG: Ling-2.6-flash nutzt das NEUERE
+# "bailingmoe2.5" und braucht einen Fork — dafür separates
+# bailingmoe2-5.yaml.
+arch_fallback:
+  - bailingmoe2
+
+# InclusionAI (Ant Group) Ling = Instruct/General-MoE, Ring = Reasoning-MoE
+# (aus Ling abgeleitet). Größen: mini-2.0 (~17B-A1.4B, lokal), flash, sowie
+# 1T (Ling-2.5-1T / Ring-1T, 1T total / ~63B aktiv, Datacenter/Cluster).
+# Native Kontext bis 131072 (256k via YaRN bei den 1T-Modellen). Wird via
+# GGUF-Metadata automatisch gecappt; hier der Familien-Maximalwert.
+max_context: 131072
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+# mini-2.0 (1.4B aktiv) läuft locker auf der R9700; 1T nur auf Clustern.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Offizielle Empfehlung (inclusionAI/Ling-V2 GitHub, vLLM-Beispiel):
+    # temperature=0.7, top_p=0.8, repetition_penalty=1.05.
+    temperature: 0.7
+    top_k: 0
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.05
+  coding:
+    # Deterministischer für Code; Ring (Reasoning) profitiert von --jinja
+    # zum Trennen der Denk-Kette. Leicht abgesenkte Temperatur.
+    temperature: 0.5
+    top_k: 0
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.05
+
+extra_args:
+  # --jinja für Chat-Template (und reasoning_content bei den Ring-Modellen).
+  - --jinja
+
+# Speculative decoding: kein integrierter MTP-Head. Draftless ngram-mod.
+# MoE profitiert eher von längeren Drafts — Defaults belassen, auf
+# Vulkan draft_max=2.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  InclusionAI (Ant Group) Ling / Ring 2.x — MoE-Familie, Architektur
+  "bailingmoe2" (Mainline via PR #16063). Ling = Instruct/General, Ring =
+  Reasoning (aus Ling abgeleitet, <think>-Ketten). Größen: Ling/Ring-mini-2.0
+  (~17B / 1.4B aktiv, lokal gut lauffähig), -flash, und die 1T-Flaggschiffe
+  (Ling-2.5-1T / Ring-1T, 1T total / ~63B aktiv, hybride Linear-Attention,
+  bis 1M Kontext — reine Datacenter/Cluster-Modelle, Q4 ~500 GB). Sampling =
+  InclusionAI-Empfehlung temp=0.7 / top_p=0.8 / rep=1.05; Coding
+  deterministischer. --jinja für Template/Reasoning. WICHTIG: Ling-2.6-flash
+  nutzt das neuere "bailingmoe2.5" und läuft NICHT auf Vanilla-llama.cpp —
+  dafür bailingmoe2-5.yaml (Fork).

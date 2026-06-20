@@ -1,0 +1,65 @@
+display_name: "Hunyuan-A13B (Tencent, MoE)"
+patterns:
+  - hunyuan-a13b
+  - hunyuan_a13b
+  - hunyuan-moe
+  - hunyuan-large
+
+# Architektur-Fallback: general.architecture "hunyuan_moe". Fängt
+# A13B-Re-Quants/Merges mit abweichendem Dateinamen. Klar getrennt von
+# der dichten Übersetzungsarchitektur "hunyuan-dense" (hunyuan.yaml).
+arch_fallback:
+  - hunyuan_moe
+  - hunyuan-moe
+
+# Hunyuan-A13B-Instruct (Juni 2025), Tencent. Fine-grained MoE: 80B total /
+# 13B aktiv. Hybrid Reasoning (Fast/Slow Thinking, CoT umschaltbar).
+# Native 256k Kontext. Wird via GGUF-Metadata automatisch gecappt; hier der
+# native Wert. Auf der R9700 mit --n-cpu-moe lauffähig (13B aktiv).
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Offizielle Werte (Tencent GitHub / Unsloth-GGUF-Doc):
+    # temp=0.7, top_k=20, top_p=0.8, repeat-penalty=1.05. Das ist die
+    # CHAT-Empfehlung des MoE-Modells — bewusst anders als die
+    # Hunyuan-MT-Übersetzerwerte (dort top_p 0.6).
+    temperature: 0.7
+    top_k: 20
+    top_p: 0.8
+    min_p: 0.05
+    repeat_penalty: 1.05
+  coding:
+    # Deterministischer für Code/Tool-Calls; Tencent gibt keine separaten
+    # Coding-Werte vor, daher leicht reduzierte Temperatur.
+    temperature: 0.4
+    top_k: 20
+    top_p: 0.8
+    min_p: 0.05
+    repeat_penalty: 1.05
+
+extra_args:
+  # Pflicht: Hybrid-Reasoning (Fast/Slow Thinking) + Chat-Template über
+  # --jinja. Ohne --jinja greift die Thinking-Umschaltung nicht sauber.
+  - --jinja
+
+# Speculative decoding: kein integrierter MTP-Head. Draftless ngram-mod.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Tencent Hunyuan-A13B-Instruct — fine-grained MoE, 80B total / 13B aktiv,
+  Architektur "hunyuan_moe" (NICHT "hunyuan-dense"!). Hybrid Reasoning
+  (Fast/Slow Thinking, CoT-Tiefe dynamisch), nativer 256k-Kontext. Sampling
+  = Tencents offizielle CHAT-Werte temp=0.7 / top_k=20 / top_p=0.8 /
+  rep=1.05 — bewusst getrennt vom Hunyuan-MT-Übersetzerprofil (top_p 0.6),
+  das für ein A13B-Chat-Modell falsch wäre. --jinja Pflicht. Mit 13B aktiven
+  Parametern auf einer 32-GB-Karte + --n-cpu-moe gut lauffähig. Hinweis:
+  einige frühe GGUF-Quants hatten eine kaputt hohe Perplexity — auf
+  geprüfte Quants (z.B. Unsloth Dynamic) achten.

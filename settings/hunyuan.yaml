@@ -1,7 +1,17 @@
 display_name: "Hunyuan / Hunyuan-MT (Tencent)"
 patterns:
-  - hunyuan
+  - hunyuan-mt
+  - hunyuan_mt
   - hy-mt
+
+# Architektur-Fallback: nur die DENSE-Übersetzungsarchitektur. So fängt
+# dieses Profil keine MoE-Chat-Modelle mehr (Hunyuan-A13B = "hunyuan_moe"
+# -> eigenes hunyuan-moe.yaml). Früher stand hier das breite Pattern
+# "hunyuan", das fälschlich auch A13B-MoE mit den Übersetzer-Settings
+# (top_p 0.6) gefangen hätte.
+arch_fallback:
+  - hunyuan-dense
+  - hunyuan_dense
 
 # Hunyuan-MT-7B (Sept 2025) und HY-MT2-7B sind dichte Übersetzungs-Modelle
 # (general.architecture = "hunyuan-dense"). Die hunyuan-dense-Architektur ist

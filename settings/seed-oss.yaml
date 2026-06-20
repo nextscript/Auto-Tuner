@@ -1,0 +1,68 @@
+display_name: "Seed-OSS 36B (ByteDance)"
+patterns:
+  - seed-oss
+  - seed_oss
+
+# Architektur-Fallback: general.architecture "seed_oss". Fängt
+# Re-Quants/Merges mit abweichendem Dateinamen.
+arch_fallback:
+  - seed_oss
+  - seed-oss
+
+# Seed-OSS-36B-Instruct (Aug 2025), ByteDance Seed Team, Apache-2.0.
+# DENSE 36B mit GQA, optimiert für Long-Context, Reasoning, Agentic.
+# Besonderheit: steuerbares "Thinking Budget" (CoT-Länge dynamisch).
+# Native Kontext: 512k (524288). Wird via GGUF-Metadata automatisch
+# gecappt; hier der native Wert. Auf der R9700 passt 36B quantisiert
+# (Q4_K_M ~20-22 GB Weights), Kontext durch KV-Budget begrenzt.
+max_context: 524288
+recommended_kv_quant: q8_0
+
+# Dense 36B → kein MoE-Offload-Trick nötig. "balanced" als neutraler
+# Default; die Cascade regelt den ctx bei zu großem Fenster automatisch.
+performance_target: balanced
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Offizielle Empfehlung (ByteDance-Seed GitHub + HF-Card):
+    # "We recommend sampling with temperature=1.1 and top_p=0.95."
+    # Ungewöhnlich HOCH (1.1) — bewusst so vom Hersteller. Kein top_k
+    # vorgegeben → aus.
+    temperature: 1.1
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Für strukturierte/agentische Tasks nennt Seed selbst Taubench mit
+    # temp=1.0/top_p=0.7. Als deterministischeres Coding-Profil hier
+    # temp=1.0/top_p=0.8 (zwischen Taubench und Chat) — niedriger als 1.1,
+    # aber das Reasoning-Budget bleibt nutzbar.
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # Thinking-Budget + CoT laufen über das Chat-Template (seed:think /
+  # seed:cot_budget_reflect-Tokens). --jinja für saubere Trennung.
+  - --jinja
+
+# Speculative decoding: kein integrierter MTP-Head, kein Draft-Sibling.
+# Draftless ngram-mod (Default). draft_max als Vulkan-Grenze.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  ByteDance Seed-OSS-36B-Instruct — dichtes 36B-Reasoning/Agentic-Modell,
+  Apache-2.0, nativer 512k-Kontext, Architektur "seed_oss". Besonderheit:
+  steuerbares Thinking-Budget (CoT-Länge frei wählbar, 512 Tokens bis
+  unbegrenzt) — bei harten Tasks (AIME, LiveCodeBench) steigt der Score mit
+  größerem Budget. Sampling = ByteDance-Empfehlung temp=1.1 (!) /
+  top_p=0.95 im Chat — die hohe Temperatur ist Absicht des Herstellers;
+  Coding-Profil etwas konservativer (temp 1.0 / top_p 0.8, vgl. Taubench
+  1.0/0.7). --jinja für das Thinking-Template. Dense → kein MoE-Offload,
+  passt quantisiert gut auf eine 32-GB-Karte.

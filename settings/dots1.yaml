@@ -1,0 +1,45 @@
+display_name: "dots.llm1 (rednote-hilab)"
+patterns:
+  - dots.llm1
+  - dots-llm1
+  - dots1
+
+# Architektur-Fallback: general.architecture "dots1". Fängt
+# Re-Quants/Merges mit abweichendem Dateinamen.
+arch_fallback:
+  - dots1
+
+# rednote-hilab dots.llm1 (Juni 2025): MoE, 142B total / 14B aktiv.
+# Leistung vergleichbar mit Qwen2.5-72B. Native Kontext bis 32768. Wird via
+# GGUF-Metadata automatisch gecappt; hier der native Wert. Mit 14B aktiv +
+# --n-cpu-moe auf der R9700 lauffähig.
+max_context: 32768
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# rednote veröffentlicht keine explizite llama.cpp-Sampler-Empfehlung in der
+# Modell-Card; konservativ-mittige Defaults (Standard-Chat-Profil).
+sampling:
+  chat:
+    temperature: 0.7
+    top_k: 40
+    top_p: 0.9
+    min_p: 0.05
+    repeat_penalty: 1.05
+  coding:
+    temperature: 0.3
+    top_k: 40
+    top_p: 0.9
+    min_p: 0.05
+    repeat_penalty: 1.05
+
+notes: >
+  rednote-hilab dots.llm1 — MoE, 142B total / 14B aktiv (Instruct +
+  Base), Architektur "dots1", nativer 32k-Kontext, Leistung auf
+  Qwen2.5-72B-Niveau. rednote nennt in der Card keine explizite
+  Sampler-Empfehlung, daher konservativ-mittige Defaults (temp 0.7 chat /
+  0.3 coding) — bei Bedarf an die generation_config anpassen. Mit nur 14B
+  aktiven Parametern + --n-cpu-moe auf einer 32-GB-Karte gut lauffähig.

@@ -1,0 +1,45 @@
+display_name: "Grok-2 (xAI)"
+patterns:
+  - grok-2
+  - grok2
+  - grok
+
+# Architektur-Fallback: general.architecture "grok". Fängt
+# Re-Quants/Merges mit abweichendem Dateinamen.
+arch_fallback:
+  - grok
+
+# xAI Grok-2 (Open-Weights-Release 2025): großes MoE. In llama.cpp-Mainline
+# unterstützt (PR). Native Kontext bis 131072. Wird via GGUF-Metadata
+# automatisch gecappt; hier der native Wert. Datacenter/Cluster-Klasse
+# (großes Modell, mehrere 100 GB je nach Quant).
+max_context: 131072
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# xAI veröffentlicht keine prominente llama.cpp-Sampler-Empfehlung;
+# konservativ-mittige Defaults (Standard-Chat-Profil).
+sampling:
+  chat:
+    temperature: 0.7
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.3
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+
+notes: >
+  xAI Grok-2 — großes MoE, Open-Weights, Architektur "grok" (in
+  llama.cpp-Mainline). Native Kontext bis 131072. xAI nennt keine prominente
+  llama.cpp-Sampler-Empfehlung, daher konservativ-mittige Defaults (temp 0.7
+  chat / 0.3 coding) — bei Bedarf anpassen. Datacenter/Cluster-Klasse
+  (mehrere 100 GB je nach Quant); auf einer einzelnen Workstation nur mit
+  sehr viel RAM + --n-cpu-moe.

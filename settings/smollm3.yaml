@@ -1,0 +1,48 @@
+display_name: "SmolLM3 (HuggingFace)"
+patterns:
+  - smollm3
+  - smollm-3
+
+# KEIN arch_fallback: SmolLM3 nutzt general.architecture "smollm3", aber
+# der Match über den eindeutigen Dateinamen genügt; ein Arch-Fallback würde
+# keinen Mehrwert bringen und nur das Risiko erhöhen, ungewollt Varianten
+# zu fangen.
+
+# HuggingFace SmolLM3-3B (2025): dichtes 3B-Modell mit Dual-Mode-Reasoning
+# (Think / No-Think über das Chat-Template, /think bzw. /no_think). Apache-2.0.
+# Native Kontext 65536 (128k via YaRN). Wird via GGUF-Metadata automatisch
+# gecappt; hier der native Wert.
+max_context: 65536
+recommended_kv_quant: q8_0
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Empfohlene Werte (HF-Modell-Card / generation_config):
+    # temperature=0.6, top_p=0.95, top_k=40.
+    temperature: 0.6
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Etwas deterministischer für Code; SmolLM3 gibt keine separaten
+    # Coding-Werte vor.
+    temperature: 0.4
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # --jinja für das Chat-Template (Think/No-Think-Umschaltung + saubere
+  # Trennung der Reasoning-Kette).
+  - --jinja
+
+notes: >
+  HuggingFace SmolLM3-3B — dichtes 3B-Modell, Apache-2.0, Architektur
+  "smollm3", Dual-Mode-Reasoning (Think/No-Think über /think bzw. /no_think
+  im Chat-Template), nativer 64k-Kontext (128k via YaRN). Sampling = HF-Card
+  temp=0.6 / top_p=0.95 / top_k=40; Coding leicht deterministischer. --jinja
+  für Template + Reasoning-Trennung. Klein und schnell — gut als Draft-Modell
+  oder für leichte Edge-Workloads.

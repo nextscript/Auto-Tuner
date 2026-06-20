@@ -1,0 +1,74 @@
+display_name: "Qwen3-VL (Alibaba, vision)"
+patterns:
+  - qwen3-vl
+  - qwen3vl
+
+# Architektur-Fallback: Qwen3-VL gibt es als Dense (arch "qwen3vl") und
+# MoE (arch "qwen3vlmoe"). Beide hier, damit Re-Quants/Merges mit
+# unüblichem Dateinamen dieses VL-Profil statt _default bekommen.
+# (Qwen3.5/3.6 nutzen "qwen35"/"qwen35moe" und bleiben bei qwen3_5-3_6.yaml.)
+arch_fallback:
+  - qwen3vl
+  - qwen3vlmoe
+
+# Qwen3-VL (Okt 2025): Vision-Language, Dense (2B/4B/8B/32B) + MoE
+# (30B-A3B / 235B-A22B), Instruct- und Thinking-Editionen. Braucht eine
+# mmproj-Datei für den Vision-Encoder (Scanner erkennt sie; in der GUI als
+# mmproj zuordnen). Native Kontext bis 262144; via GGUF-Metadata gecappt.
+max_context: 262144
+recommended_kv_quant: q5_0
+
+# Throughput-Default wie bei den anderen Qwen-MoE-Profilen (greift für die
+# A3B/A22B-MoE-Varianten; Dense ignoriert den MoE-Offload ohnehin).
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# Qwen3-VL hat — wie Qwen3.5/3.6 — UNTERSCHIEDLICHE Empfehlungen für
+# Instruct vs. Thinking (Qwen-HF-Cards / Unsloth-Doc):
+#   Instruct: temp=0.7, top_k=20, top_p=0.8, presence_penalty=1.5
+#   Thinking: temp=1.0, top_k=20, top_p=0.95, presence_penalty=0.0
+# Mapping: "chat" = Instruct-Defaults (der häufigere Fall), "coding" =
+# Thinking-Defaults (deliberate Reasoning für Code/Agentik). presence_penalty
+# bei Instruct trotz Qwen-Empfehlung (1.5) KONSERVATIV auf 0.0 — 1.5 erzeugt
+# beim Tool-Calling reproduzierbar Schleifen (gleiche Problematik wie bei
+# Qwen3.6, siehe qwen3_5-3_6.yaml). Wer reine Bild-Beschreibung ohne Tools
+# fährt, kann beim Start `-- --presence-penalty 1.5` setzen.
+sampling:
+  chat:
+    temperature: 0.7
+    top_k: 20
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    # Thinking-Edition-Settings (temp 1.0 / top_p 0.95).
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+extra_args:
+  # --jinja für sauberes Chat-Template + (bei Thinking) reasoning_content.
+  - --jinja
+
+# Speculative decoding: kein integrierter MTP-Head bei Qwen3-VL. Draftless
+# ngram-mod (Default). draft_max als Vulkan-Grenze.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Alibaba Qwen3-VL — Vision-Language-Modelle, Dense (2B/4B/8B/32B) und MoE
+  (30B-A3B / 235B-A22B), Instruct + Thinking, Architektur "qwen3vl" bzw.
+  "qwen3vlmoe" (beide in llama.cpp-Mainline). Braucht eine mmproj-Datei für
+  den Vision-Encoder — in der GUI als mmproj zuordnen; ohne mmproj läuft nur
+  der Text-Pfad. Sampling unterscheidet Instruct (chat: temp 0.7 / top_p 0.8)
+  und Thinking (coding: temp 1.0 / top_p 0.95), analog zu Qwen3.5/3.6.
+  presence_penalty steht auf 0.0 statt Qwens 1.5, weil 1.5 Tool-Calling-
+  Schleifen erzeugt; für reine Bildbeschreibung ohne Tools:
+  `-- --presence-penalty 1.5`. Hinweis: Bei Vulkan/ROCm wurde berichtet, dass
+  Qwen3-VL die GPU nicht voll auslastet (~80%) und etwas langsamer ist als
+  das reine Qwen3-Textmodell (llama.cpp #16895) — kein Fehler dieses Profils.

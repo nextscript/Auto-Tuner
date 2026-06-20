@@ -1,0 +1,69 @@
+display_name: "Kimi-K2 (Moonshot AI)"
+patterns:
+  - kimi-k2
+  - kimi_k2
+  - kimi-k2.5
+  - kimi-k2.6
+  - kimi-k2.7
+
+# KEIN arch_fallback: Kimi-K2 trägt general.architecture "deepseek2" (es ist
+# ein DeepSeek-V3-artiges MLA-MoE). "deepseek2" als Fallback zu beanspruchen
+# würde DeepSeek-V3/V3.2 UND GLM-4.7-Flash (ebenfalls deepseek2-Arch)
+# fälschlich auf dieses Kimi-Profil ziehen. Match daher bewusst nur über den
+# Dateinamen "kimi".
+
+# Moonshot Kimi-K2 (2025/26): 1T total / 32B aktiv MoE, MLA-Attention.
+# Varianten: K2-Instruct(-0905), K2.5/K2.6 (Vision via mmproj, in Mainline),
+# K2.7-Code. Native Kontext bis 256k (K2-0905). Wird via GGUF-Metadata
+# automatisch gecappt; hier der Familien-Maximalwert. Datacenter-Klasse:
+# Q2 ~250-380 GB, Q4 ~620 GB — 8-GPU-Cluster oder Workstation mit sehr viel
+# RAM + --n-cpu-moe (mit 16 GB VRAM + 256 GB RAM ~5-10 tok/s).
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+sampling:
+  chat:
+    # Offizielle/Unsloth-Empfehlung: temperature=0.6 (reduziert Repetition
+    # und Inkohärenz), min_p=0.01. (Die "thinking"/K2.7-Pfade nutzen 1.0/0.95
+    # — siehe coding-Block.) top_p moderat 0.95.
+    temperature: 0.6
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.01
+    repeat_penalty: 1.0
+  coding:
+    # Thinking-Defaults (K2.5+/K2.7-Code, Moonshot-API): temp=1.0,
+    # top_p=0.95, thinking aktiv. Für Code/Agentik der vom Hersteller für
+    # den Thinking-Modus vorgesehene Wert.
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.01
+    repeat_penalty: 1.0
+
+extra_args:
+  # --jinja für Chat-Template + Tool-Calls (Kimi nutzt einen eigenen
+  # Tool-Call-Parser; --jinja ist die llama.cpp-Voraussetzung dafür).
+  - --jinja
+
+# Speculative decoding: kein offizieller Draft-Sibling. Draftless ngram-mod.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Moonshot Kimi-K2 — 1T total / 32B aktiv MoE mit MLA, Architektur
+  "deepseek2" (DeepSeek-V3-artig). Daher KEIN arch_fallback: würde sonst
+  DeepSeek-V3/V3.2 und GLM-4.7-Flash mitfangen — Match nur über Dateiname
+  "kimi". Varianten: K2-Instruct(-0905, Text), K2.5/K2.6 (Vision via mmproj,
+  in Mainline gemerged), K2.7-Code. Sampling: chat = Moonshot/Unsloth
+  temp=0.6 / min_p=0.01 (gegen Repetition); coding = Thinking-Defaults
+  temp=1.0 / top_p=0.95 (K2.5+/K2.7 nutzen Thinking, "instant" wird dort
+  nicht unterstützt). --jinja Pflicht (Tool-Calls). Datacenter-Klasse:
+  Q2 ~250-380 GB, Q4 ~620 GB — Cluster oder Workstation mit sehr viel RAM.
+  Hinweis: einige ubergarm/ik-Quants brauchen den ik_llama.cpp-Fork; die
+  Standard-Unsloth/bartowski-Quants laufen auf Mainline.

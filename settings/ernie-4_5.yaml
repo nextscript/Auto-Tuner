@@ -1,0 +1,62 @@
+display_name: "ERNIE 4.5 MoE (Baidu)"
+patterns:
+  - ernie-4.5
+  - ernie4.5
+  - ernie-4_5
+  - ernie
+
+# Architektur-Fallback: general.architecture "ernie4_5-moe". Fängt
+# Re-Quants/Merges mit abweichendem Dateinamen.
+arch_fallback:
+  - ernie4_5-moe
+  - ernie4_5_moe
+
+# ERNIE 4.5 (Baidu, 2025): MoE-Familie. Groß: 300B-A47B; klein/lokal:
+# 21B-A3B (auch eine Thinking-Variante). Apache-2.0. Native Kontext bis
+# 131072. Wird via GGUF-Metadata automatisch je Variante gecappt; hier der
+# Familien-Maximalwert. 21B-A3B passt mit --n-cpu-moe gut auf die R9700;
+# 300B-A47B ist Datacenter/Cluster-Klasse.
+max_context: 131072
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# Baidu gibt in den Modell-Cards keine prominente, einheitliche
+# llama.cpp-Sampler-Empfehlung; die generation_config der Instruct-Modelle
+# liegt um temp=0.8/top_p=0.8. Konservativ-mittige Defaults:
+sampling:
+  chat:
+    temperature: 0.8
+    top_k: 0
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Deterministischer für Code; bei der Thinking-Variante (21B-A3B-Thinking)
+    # darf die Reasoning-Kette über --jinja sauber getrennt werden.
+    temperature: 0.6
+    top_k: 0
+    top_p: 0.8
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # --jinja für Chat-Template (und reasoning_content bei der Thinking-Variante).
+  - --jinja
+
+# Speculative decoding: kein integrierter MTP-Head. Draftless ngram-mod.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Baidu ERNIE 4.5 — MoE-Familie, Apache-2.0, Architektur "ernie4_5-moe".
+  Varianten: 300B-A47B (Datacenter/Cluster) und 21B-A3B (lokal, auch als
+  Thinking-Edition), nativer Kontext bis 131072. Sampling konservativ-mittig
+  (temp 0.8 / top_p 0.8 chat, 0.6 coding), da Baidu keine prominente
+  einheitliche llama.cpp-Empfehlung veröffentlicht — bei Bedarf an die
+  generation_config der konkreten Variante anpassen. --jinja für das
+  Chat-Template / Thinking-Trennung. 21B-A3B (3B aktiv) läuft mit
+  --n-cpu-moe gut auf einer 32-GB-Karte.
