@@ -2299,3 +2299,45 @@ def test_new_big_profiles_have_jinja_where_required() -> None:
     ):
         assert fname in by_file, f"{fname} not loaded"
         assert "--jinja" in by_file[fname].extra_args, f"{fname} missing --jinja"
+
+
+def test_agentworld_overrides_qwen35_chat_settings() -> None:
+    """Qwen-AgentWorld carries arch 'qwen35moe' (it is Qwen3.5-35B-A3B
+    retrained as a world model). The qwen3_5-3_6 profile declares
+    arch_fallback [qwen35, qwen35moe], so without a dedicated profile
+    AgentWorld would inherit the generic Qwen3.5 chat/coder sampling. The
+    'agentworld' filename pattern must win (longest-substring beats
+    arch_fallback) and apply AgentWorld's own world-model sampling
+    (temp=0.6, top_p=0.95, top_k=20) in both modes."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    def p(stem: str):
+        # arch hint is qwen35moe — the same arch the qwen3.5 profile claims
+        return match_profile(stem, profiles, "qwen35moe")
+
+    aw = p("Qwen-AgentWorld-35B-A3B-UD-Q8_K_XL.gguf")
+    assert "AgentWorld" in aw.display_name
+    # world-model sampling, NOT the qwen3.5 thinking temp 1.0
+    for mode in ("chat", "coding"):
+        assert aw.sampling[mode]["temperature"] == 0.6
+        assert aw.sampling[mode]["top_p"] == 0.95
+        assert aw.sampling[mode]["top_k"] == 20
+    assert "--jinja" in aw.extra_args
+    # No arch_fallback: arch qwen35moe is shared with regular Qwen3.5/3.6, so
+    # claiming it would collide with qwen3_5-3_6.yaml (order-dependent). The
+    # filename pattern is the only intended match.
+    assert aw.arch_fallback == []
+
+    # The 397B-A17B variant routes to AgentWorld too (filename pattern).
+    assert "AgentWorld" in p("Qwen-AgentWorld-397B-A17B-IQ2_XXS.gguf").display_name
+
+    # Regular Qwen3.5/3.6 with the SAME arch must still go to the qwen3.5
+    # profile (AgentWorld must not swallow them).
+    assert "Qwen3.5 / Qwen3.6" in p("Qwen3.5-35B-A3B-UD-Q6_K.gguf").display_name
+    assert "Qwen3.5 / Qwen3.6" in p("Qwen3.6-35B-A3B-Q4_K_M.gguf").display_name
+
+    # An AgentWorld requant WITHOUT 'agentworld' in the name is
+    # indistinguishable from plain Qwen3.5-A3B and correctly lands on the
+    # qwen3.5 profile via its arch_fallback — not on AgentWorld.
+    assert "Qwen3.5 / Qwen3.6" in p("some-a3b-moe-requant.gguf").display_name
+    

@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "H:\\LAB\\ai-local\\b9700_llama.cpp",
+  "fork_path": "H:\\LAB\\ai-local\\b9781_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -55,7 +55,7 @@
       "draft": true,
       "vision": true,
       "prompt_cache": true,
-      "ngram": true
+      "ngram": false
     },
     "Qwen3.6-27B-UD-Q6_K_XL": {
       "vision": true
@@ -83,8 +83,8 @@
       "vision": true
     }
   },
-  "mode": "chat",
-  "window_geometry": "AdnQywADAAAAAAHQAAAAVQAABnoAAASJAAAB0AAAAHQAAAZ6AAAEiQAAAAAAAAAADXAAAAHQAAAAdAAABnoAAASJ",
+  "mode": "coding",
+  "window_geometry": "AdnQywADAAAAAAdFAAAAcgAAC+8AAASmAAAHRQAAAJEAAAvvAAAEpgAAAAAAAAAADXAAAAdFAAAAkQAAC+8AAASm",
   "window_state": "AAAA/wAAAAD9AAAAAAAABKsAAAPhAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
   "fork_container_path": "H:\\LAB\\ai-local",
   "font_size": 10,
@@ -99,10 +99,11 @@
     }
   },
   "splitter_states": {
-    "top_split": "AAAA/wAAAAEAAAACAAACgQAAAnEA/////wEAAAABAA==",
+    "top_split": "AAAA/wAAAAEAAAACAAACVgAAAkgA/////wEAAAABAA==",
     "main_split": "AAAA/wAAAAEAAAACAAADMAAAAAAA/////wEAAAACAA=="
   },
   "mmproj_selection": {
-    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-F32.gguf"
+    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-MTP-BF16.gguf",
+    "Qwen3.6-27B-UD-Q6_K_XL": "mmproj-Qwen3.6-27B-BF16.gguf"
   }
 }

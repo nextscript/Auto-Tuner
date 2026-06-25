@@ -1,0 +1,102 @@
+display_name: "Qwen-AgentWorld (Alibaba, world model)"
+patterns:
+  - agentworld
+  - agent-world
+  - qwen-agentworld
+
+# KEIN arch_fallback: Qwen-AgentWorld ist KEINE eigene Architektur — es ist
+# Qwen3.5-35B-A3B (bzw. die 397B-A17B-Variante) WEITERTRAINIERT als World
+# Model (CPT+SFT+RL auf Environment-Simulation). general.architecture ist
+# daher "qwen35moe" (Hybrid: GatedDeltaNet + Full-Attention, 256 Experten /
+# 8+1, 40 Layer = 10x[3 linear + 1 attn]) — exakt dieselbe Arch wie reguläre
+# Qwen3.5/3.6-A3B-Modelle. Würde dieses Profil "qwen35moe" als arch_fallback
+# beanspruchen, gäbe es ZWEI Profile mit demselben Fallback (hier +
+# qwen3_5-3_6.yaml), und welches gewinnt, hinge an der alphabetischen
+# Ladereihenfolge ("qwen-agentworld" < "qwen3_5-3_6") — d.h. AgentWorld würde
+# generische qwen35moe-Re-Quants fälschlich als World Model behandeln. Daher
+# bewusst nur Filename-Match: AgentWorld-GGUFs tragen immer "agentworld" im
+# Namen (spezifisches Qwen-Release), das Pattern oben genügt. Re-Quants ohne
+# "agentworld" im Namen sind faktisch nicht von normalem Qwen3.5-A3B zu
+# unterscheiden und sollen dann korrekt bei qwen3_5-3_6.yaml landen.
+
+# Qwen-AgentWorld-35B-A3B (Juni 2026), Alibaba, Apache-2.0. Erstes
+# Language World Model über 7 Agent-Domänen (MCP/Tool, Search, Terminal, SWE,
+# Android, Web, OS): sagt den nächsten Environment-State nach einer
+# Agent-Aktion voraus, via langer CoT-Reasoning-Kette. Nutzt Thinking-Mode
+# per Default (<think>...</think>) zum Durchdenken des State-Übergangs vor
+# der vorhergesagten Observation.
+#
+# Native Kontext: 262144 (qwen35moe.context_length). Wird via GGUF-Metadata
+# automatisch gecappt (min(max_context, native_ctx)); hier der native Wert.
+# Qwen rät ausdrücklich, mindestens ~128k Kontext zu fahren, weil AgentWorld
+# für die Multi-Turn-Environment-Simulation auf langen Kontext angewiesen ist
+# — bei OOM also eher KV quantisieren als unter 128k gehen. Auf der R9700
+# (32 GB) mit 3B aktiv + --n-cpu-moe gut lauffähig; der Hybrid-KV-Cache
+# betrifft ohnehin nur die 10 Attention-Layer (Scanner zählt das via
+# recurrent_layers korrekt).
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# MoE → is_moe über expert_count>1; Tuner verteilt Experten GPU/CPU.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# AgentWorld hat EIGENE, einheitliche Empfehlung (Qwen-Card / GitHub):
+# "We recommend temperature=0.6, top_p=0.95, top_k=20 for world model
+# inference." Gilt für die Environment-Simulation generell — daher BEIDE
+# Modi auf diese Werte (kein temp=1.0-Thinking wie bei Qwen3.5-Coder; ein
+# World Model soll konsistente, faktentreue State-Übergänge liefern, nicht
+# kreativ samplen). Reasoning läuft trotzdem über den <think>-Block.
+sampling:
+  chat:
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # Bewusst IDENTISCH zu chat: Qwen nennt nur den einen Satz für "world
+    # model inference"; SWE/Terminal/OS sind genau die Domänen, für die
+    # diese Werte gedacht sind. Kein Absenken — das würde die trainierte
+    # Simulations-Treue nicht verbessern.
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # Pflicht: Thinking-Mode + Chat-Template. AgentWorld nutzt den
+  # qwen3-Reasoning-Parser (<think>-Trennung); --jinja aktiviert das
+  # eingebettete Template, damit reasoning_content sauber getrennt wird.
+  - --jinja
+
+# Speculative decoding: AgentWorld erbt KEINEN MTP-Head aus dem
+# Post-Training (anders als die regulären Qwen3.6-MTP-GGUFs). Konservativ
+# draftless ngram-mod (Default). draft_max als Vulkan-Grenze. Hinweis: Der
+# __mtp_scan__ im Scanner ist hier maßgeblich — falls eine MTP-Variante von
+# AgentWorld auftaucht, erkennt der Tensor-Scan den nextn-Head und der Tuner
+# schaltet automatisch auf Path B (integriertes MTP) um.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Alibaba Qwen-AgentWorld-35B-A3B — erstes Language World Model (CPT+SFT+RL
+  auf Environment-Simulation über 7 Domänen: MCP/Tool, Search, Terminal, SWE,
+  Android, Web, OS), Apache-2.0. KEINE eigene Architektur: es ist
+  Qwen3.5-35B-A3B weitertrainiert, general.architecture "qwen35moe" (Hybrid
+  GatedDeltaNet + Attention, 256 Experten / 8+1, nativer 262k-Kontext). Eigenes
+  Profil per Filename-Pattern "agentworld" (KEIN arch_fallback, weil die Arch
+  identisch zu regulärem Qwen3.5/3.6-A3B ist und ein doppelter qwen35moe-
+  Fallback ordnungsabhängig würde), weil die AgentWorld-Sampling-Empfehlung (temp=0.6 / top_p=0.95
+  / top_k=20, in BEIDEN Modi) bewusst von den generischen Qwen3.5-Coder/Chat-
+  Settings (temp 1.0 Thinking) abweicht — ein World Model soll konsistente,
+  faktentreue State-Übergänge simulieren. Thinking-Mode per Default (<think>),
+  qwen3-Reasoning-Parser, --jinja Pflicht. Qwen rät zu >=128k Kontext (bei OOM
+  KV quantisieren statt Kontext unter 128k senken); empfohlene Output-Länge
+  32k. Domänen-spezifische System-Prompts liegen im GitHub-Repo (prompts/) —
+  AgentWorld als Environment-Simulator braucht diese System-Prompts, um
+  sinnvolle Observations zu liefern. Mit 3B aktiv + --n-cpu-moe gut auf einer
+  32-GB-Karte lauffähig; läuft auf Mainline-llama-server (kein Fork). Für
+  reguläre Qwen3.5/3.6-Modelle bleibt qwen3_5-3_6.yaml zuständig.
