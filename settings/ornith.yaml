@@ -1,0 +1,123 @@
+display_name: "Ornith 1.0 (DeepReinforce, agentic coder)"
+patterns:
+  - ornith
+
+# KEIN arch_fallback. Ornith ist KEINE eigene Architektur — die GGUFs laden
+# unter general.architecture "qwen35" (9B/31B Dense) bzw. "qwen35moe" (35B-A3B
+# / 397B-A17B MoE). Beides ist exakt die Qwen3.5/3.6-Familie (Hybrid:
+# GatedDeltaNet + Full-Attention), und der Scanner zählt den KV-Cache bereits
+# korrekt über recurrent_layers. Würde dieses Profil "qwen35"/"qwen35moe" als
+# arch_fallback beanspruchen, kollidierte es mit qwen3_5-3_6.yaml (das genau
+# diese beiden Strings als Fallback führt) — welches gewänne, hinge an der
+# alphabetischen Ladereihenfolge ("ornith" < "qwen3_5-3_6"), d.h. Ornith würde
+# generische Qwen3.5-Re-Quants fälschlich als Ornith behandeln. Daher bewusst
+# nur Filename-Match: Ornith-GGUFs tragen IMMER "ornith" im Namen
+# (deepreinforce-ai/Ornith-1.0-*). Re-Quants ohne "ornith" im Namen sind von
+# normalem Qwen3.5-Dense/-MoE faktisch nicht zu unterscheiden und sollen dann
+# korrekt bei qwen3_5-3_6.yaml landen.
+#
+# Der EINZIGE Grund, warum Ornith trotz identischer Arch ein eigenes Profil
+# statt nur den qwen3_5-3_6-arch_fallback bekommt, ist das abweichende
+# Sampling (siehe unten): Ornith hat EINE einheitliche Empfehlung
+# (temp=0.6) für ALLE Tasks, während das generische Qwen3.5-Profil im
+# Chat-Modus temp=1.0 fährt.
+
+# Ornith 1.0 (DeepReinforce, Juni 2026), MIT-Lizenz. Self-improving
+# Modell-Familie spezialisiert auf agentisches Coding (Terminal-Bench 2.1,
+# SWE-Bench, NL2Repo, OpenClaw). Post-trained auf Qwen-3.5-Basis. Varianten:
+#   9B-Dense  -> arch qwen35     (40 Layer, GQA 16/2, native 262144)
+#   31B-Dense -> arch qwen35
+#   35B-MoE   -> arch qwen35moe  (256 Experten / 8 aktiv, 3B aktiv, native 262144)
+#   397B-MoE  -> arch qwen35moe  (17B aktiv)
+# Alle sind Reasoning-Modelle: der Assistant-Turn öffnet per Default mit
+# einem <think>...</think>-Block vor der eigentlichen Antwort, und das Modell
+# emittiert <tool_call>-Blöcke für OpenAI-style tool_calls.
+#
+# Native Kontext 262144 (qwen35[moe].context_length). Wird via GGUF-Metadata
+# automatisch gecappt (min(max_context, native_ctx)); hier der native Wert.
+max_context: 262144
+
+# KV-Quant. Wie bei qwen3_5-3_6.yaml: q5_0 ist für die A3B-MoE-Variante der
+# Sweet-Spot (mehr VRAM bleibt für Expert-Layer übrig). Für das 9B-Dense ist
+# der Unterschied auf der 32-GB-R9700 folgenlos — es passt mit vollem KV @
+# q5_0 ebenso wie @ q8_0 locker rein; wer für das Dense-Modell maximale
+# KV-Qualität will, kann q8_0 im Expert-Panel pinnen. Einheitlich q5_0 als
+# konservativer, MoE-tauglicher Default. (AMD/Vulkan: MoE-KV MUSS komplett
+# im VRAM liegen — der Tuner reserviert das ohnehin nie aus dem RAM.)
+recommended_kv_quant: q5_0
+
+# RoPE-Scaling (YaRN). Gleiche Basis wie Qwen3.5/3.6 — 262144 nativ reicht
+# für nahezu alle Coding-Sessions; YaRN nur bei Bedarf in der GUI aktivieren.
+rope_scale:
+  enabled: false        # Standard aus — User kann in GUI aktivieren
+  max_context: 1010000  # ~1M tokens mit YaRN (Qwen3.5/3.6-Basis)
+  scale_factor: 4.0     # YaRN scaling factor (4x, wie Qwen3.5/3.6)
+
+# Performance-Target. throughput hält das KV-Budget klein (32k), sodass beim
+# 35B-A3B-MoE möglichst viele Expert-Layer im VRAM bleiben (--n-cpu-moe lagert
+# den Rest aus). Für das 9B-Dense, das komplett in die 32 GB passt, ist die
+# Wahl weitgehend folgenlos; wer regelmäßig >32k Kontext braucht, in der GUI
+# auf "balanced"/"safe" wechseln — die GUI-Wahl gewinnt immer.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# Ornith gibt EINE einheitliche Empfehlung (Modell-Card, beide Größen):
+#   "Recommended sampling parameters: temperature=0.6, top_p=0.95, top_k=20
+#    (use temperature=1.0 to reproduce the reported benchmark setup)."
+# Das ClawEval-Setup (der einzige agentische Coding-Bench der NICHT auf
+# temp=1.0 läuft) bestätigt temp=0.6 für reale Coding-Tasks. Daher BEIDE
+# Modi auf temp=0.6 — anders als beim generischen Qwen3.5-Profil, das im
+# Chat temp=1.0 fährt. temp=1.0 ist hier nur der Bench-Reproduktionswert,
+# nicht die Nutzungs-Empfehlung; wer Benchmarks nachstellen will:
+#   -- --temp 1.0
+# Reasoning läuft in beiden Modi über den <think>-Block.
+sampling:
+  chat:
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    # presence_penalty bewusst NICHT gesetzt (= 0.0). Ornith ist primär ein
+    # Tool-Calling-Coding-Agent; ein presence_penalty > 0 bestraft die in
+    # jedem Tool-Call nötigen identischen Tokens (JSON-Keys, Tool-Namen) und
+    # ist eine bekannte Loop-Quelle. Reine Chat-Nutzung ohne Tools verträgt
+    # bei Wiederholungen ggf. `-- --presence-penalty 1.0`.
+  coding:
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+# MTP / speculative decoding.
+# Ornith-GGUFs bringen KEINEN eigenen MTP/nextn-Draft-Head mit (reine
+# Qwen3.5-Dense/-MoE-Konvertierung ohne nextn-Tensoren). draft_max/draft_p_min
+# gelten daher nur, falls in der GUI ein EXTERNES Draft-Modell (Path A)
+# gewählt wird — z.B. Ornith-1.0-9B als Drafter für das 35B-MoE. Werte wie
+# bei Qwen3.5/3.6: 2 Tokens ist der Vulkan/ROCm-Sweet-Spot (Token 3 brächte
+# bei ~85% Acceptance nur ~0.61 und der Extra-Kernel-Overhead auf Vulkan
+# überwiegt); p_min=0.75 = mainline-Default (verhindert konstanten
+# D2H-Overhead bei unsicherem Draft).
+draft_max: 2
+draft_p_min: 0.75
+
+notes: >
+  Ornith 1.0 (DeepReinforce, Juni 2026, MIT) — self-improving Modell-Familie
+  für agentisches Coding, post-trained auf Qwen-3.5-Basis. GGUF-Arch ist
+  "qwen35" (9B/31B Dense) bzw. "qwen35moe" (35B-A3B / 397B-A17B MoE) — exakt
+  die Qwen3.5/3.6-Hybrid-Familie (GatedDeltaNet + Full-Attention), der Scanner
+  zählt den KV-Cache korrekt über recurrent_layers. Dieses Profil greift nur
+  per Filename-Pattern ("ornith"); Re-Quants ohne "ornith" im Namen landen
+  korrekt bei qwen3_5-3_6.yaml.
+  Reasoning-Modell: Antwort öffnet per Default mit <think>...</think>. Beim
+  Start `--jinja` als Extra-Arg setzen, damit der <think>-Block sauber ins
+  reasoning_content-Feld getrennt und <tool_call>-Blöcke als OpenAI-style
+  tool_calls geparst werden (Ornith ist primär ein Tool-Calling-Agent):
+    -- --jinja
+  Sampling: einheitlich temp=0.6 / top_p=0.95 / top_k=20 für Chat UND Coding
+  (Ornith-Empfehlung); temp=1.0 ist nur der Bench-Reproduktionswert
+  (-- --temp 1.0). Anders als generisches Qwen3.5 (Chat temp=1.0) — das ist
+  der Grund für dieses eigene Profil trotz identischer Architektur.
+  Tipp: das 9B-Dense eignet sich als externes Draft-Modell (Path A) für das
+  35B-MoE; die GGUFs selbst bringen keinen integrierten MTP-Head mit.
