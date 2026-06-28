@@ -10,19 +10,13 @@ patterns:
 arch_fallback:
   - cohere2moe
 
-# WICHTIG — Build: "cohere2moe" ist Stand llama.cpp b9739 NOCH NICHT in
-# Mainline (PR #24260 "Add arch support for cohere2-MoE" ist offen). Ein
-# Mainline-llama-server lädt die Datei NICHT ("unknown architecture
-# 'cohere2moe'"). Du brauchst einen Build vom PR-Branch:
-#     git fetch origin pull/24260/head:cohere2-moe
-#     git checkout cohere2-moe
-#     cmake -B build -DGGML_VULKAN=ON && cmake --build build --config Release
-# Wähle diesen Build im Fork-Dropdown der GUI (z.B. "c2_b9739_llama.cpp") —
-# der AutoTuner findet llama-server darin über LLAMA_CPP_DIR. KEIN
-# server_binary hier hartcodieren (gleiche Logik wie bei den anderen
-# Forks: ~5 neue Builds/Tag). Die GGUF deklariert bereits
-# general.architecture=cohere2moe, läuft also OHNE Re-Download auf
-# Mainline, sobald der PR gemerged ist.
+# Build: "cohere2moe" ist seit b9626 in llama.cpp-Mainline (PR #24260 "Add
+# arch support for cohere2-MoE" gemerged). Auf Stand b9829 lädt ein ganz
+# normaler Mainline-llama-server die Datei direkt — KEIN Fork/PR-Branch mehr
+# nötig. (Historie: bis ~b9626 war die Arch fork-only; ältere Builds vor
+# b9626 brauchen den PR-Branch-Build, neuere nicht.) Einfach deinen
+# aktuellen Mainline-Build im Dropdown wählen; der AutoTuner findet
+# llama-server darin über LLAMA_CPP_DIR. KEIN server_binary hartcodieren.
 #
 # Im Gegensatz zu diffusion-gemma ist das ein NORMALES autoregressives
 # Modell: llama-server, OpenAI-API, /health, Chat-UI — kein
@@ -93,11 +87,9 @@ notes: >
   Coding (Tool-Use, Repo-Tasks, Browser-Automation), Apache-2.0,
   Architektur "cohere2moe" (cohere2-iSWA-Attention + glm4moe-Style
   Sigmoid-Gating, 1 leading-dense + 48 MoE-Layer, 128 Experten / 8 aktiv).
-  ACHTUNG: cohere2moe ist Stand b9739 NICHT in llama.cpp-Mainline —
-  PR #24260 ist offen. Build vom PR-Branch nötig (siehe Kommentar oben)
-  und im Fork-Dropdown auswählen; die GGUF deklariert bereits
-  general.architecture=cohere2moe und läuft ohne Re-Download auf Mainline,
-  sobald der PR landet. Normales autoregressives Server-Modell (kein
+  HINWEIS: cohere2moe ist seit b9626 in llama.cpp-Mainline (PR #24260) —
+  auf b9829 also ohne Fork/PR-Branch lauffähig; nur Builds vor b9626
+  brauchen noch den PR-Branch. Normales autoregressives Server-Modell (kein
   Diffusionspfad). Sampling = Cohere/Unsloth-Empfehlung (temp 1.0 /
   top_p 0.95) im Chat; Coding-Profil deterministischer (0.6) für stabile
   Tool-Calls. --jinja ist Pflicht (Chat-Template + Tool-Parsing).

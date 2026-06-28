@@ -22,11 +22,15 @@ sampling:
     min_p: 0.05
     repeat_penalty: 1.0
   coding:
-    # DeepSeek-R1 / V3.2 für Coding profitieren von niedrigerer
-    # Temperatur — die Reasoning-Kette darf "kreativ" sein, der
-    # finale Code soll deterministisch werden. 0.6 ist der von
-    # DeepSeek im Coder-Setup verwendete Wert.
-    temperature: 0.6
+    # DeepSeek-V3.2 / R1 fürs reine Code-Editing profitieren von deutlich
+    # niedrigerer Temperatur als die Reasoning-Kette: der <think>-Block darf
+    # "kreativ" sein, der finale Code soll deterministisch werden. 0.3 ist
+    # der praktische Sweet-Spot für agentisches Code-Editing (näher an den
+    # üblichen Coder-Werten 0.1–0.2). DeepSeeks eigener Coder-Setup nennt
+    # zwar 0.6, das ist aber für längere Reasoning-Antworten gemeint; für
+    # stabile Diffs/Tool-Calls ist 0.6 zu sprunghaft. Wer die volle
+    # Reasoning-Tiefe will, im Chat-Modus bleiben oder per CLI hochsetzen.
+    temperature: 0.3
     top_k: 50
     top_p: 0.95
     min_p: 0.05
@@ -40,7 +44,7 @@ extra_args:
 notes: >
   DeepSeek-V3.2 (671B MoE / 37B aktiv) mit DSA für effiziente long-context
   attention, oder R1 (Reasoning). Die R1- und V3.2-Modelle nutzen
-  <think>-Tags für Chain-of-Thought. Coding-Profil mit temp=0.6 (vs. 1.0
+  <think>-Tags für Chain-of-Thought. Coding-Profil mit temp=0.3 (vs. 1.0
   chat) für deterministischeren finalen Code; Reasoning-Kette bleibt
   "kreativ". ACHTUNG: Speciale-Variante (V3.2-Speciale) unterstützt
   KEIN Tool-Calling.

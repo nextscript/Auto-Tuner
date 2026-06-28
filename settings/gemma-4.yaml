@@ -66,6 +66,28 @@ sampling:
 draft_max: 2
 draft_p_min: 0.75
 
+# Sampler-Reihenfolge explizit setzen. Bei Gemma 4 zählt die Reihenfolge
+# der Sampler-Anwendung — die Community-Empfehlung (Unsloth-GGUF-Doc /
+# HF-Diskussion zu gemma-4-26B-A4B/31B) ist ausdrücklich:
+#   --samplers "temperature;top_p;top_k"
+# statt llama-servers Default-Chain
+# (penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature).
+# Wirkung:
+#   * Nur temperature/top_p/top_k laufen — exakt die drei Sampler, für die
+#     dieses Profil Werte vorgibt. Die im Tuner ohnehin als No-Op gesetzten
+#     min_p (0.0) und repeat_penalty (1.0) werden aus der aktiven Chain
+#     entfernt; ebenso die Default-Stages penalties/dry/top_n_sigma/xtc, die
+#     Gemma nicht will und die u.a. mit dem hohen Coding-temp=1.5
+#     interferieren würden.
+#   * Die vom Tuner emittierten --temp/--top-p/--top-k binden weiterhin an
+#     ihre Sampler in dieser Chain — nur min_p/repeat_penalty laufen leer,
+#     was bei Gemma korrekt ist (beide sind hier bewusst deaktiviert).
+# Hinweis: --samplers nimmt die Kette als EINEN Token, durch ';' getrennt;
+# als argv also zwei Listen-Einträge (kein Shell-Quoting nötig).
+extra_args:
+  - --samplers
+  - temperature;top_p;top_k
+
 notes: >
   Gemma ist empfindlich gegenüber repeat_penalty > 1.0.
   Multimodalität nach Größe: E2B/E4B = Text+Bild+Audio, 12B = Text+Bild+Audio
@@ -81,3 +103,7 @@ notes: >
   die zeigen, dass Gemma 4 für Coding mit höherer Temperatur kreativere
   und korrektere Lösungen liefert — bei Bedarf mit `-- --temp 1.0`
   überschreiben falls die höhere Temperatur in deinem Workflow stört.
+  Sampler-Reihenfolge wird über extra_args explizit als
+  "temperature;top_p;top_k" gesetzt (Gemma-4-Empfehlung; siehe Kommentar
+  oben) — wichtig, weil die Default-Sampler-Chain die hohe Coding-Temp
+  sonst verfälscht.
