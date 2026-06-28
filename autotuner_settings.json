@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "H:\\LAB\\ai-local\\b9789_llama.cpp",
+  "fork_path": "H:\\LAB\\ai-local\\d_b9781_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -11,21 +11,21 @@
       "vision": false
     },
     "gemma-4-26B-A4B-it-UD-Q8_K_XL": {
-      "vision": true,
+      "vision": false,
       "draft": false
     },
     "Qwen3.6-27B-UD-Q3_K_XL": {
-      "vision": true
+      "vision": false
     },
     "Mistral-Medium-3.5-128B-UD-IQ3_XXS": {
       "vision": false
     },
     "gemma-4-E4B-it-UD-Q8_K_XL": {
       "draft": false,
-      "vision": true
+      "vision": false
     },
     "Qwen3.6-35B-A3B-UD-Q6_K": {
-      "vision": true,
+      "vision": false,
       "thinking": true
     },
     "Qwen3.6-27B-MTP-UD-Q3_K_XL": {
@@ -33,19 +33,19 @@
       "draft": true
     },
     "gemma-4-31B-it-Q3_K_S": {
-      "draft": true,
-      "vision": true
+      "draft": false,
+      "vision": false
     },
     "Qwen3.6-27B-MTP-IQ4_XS": {
-      "vision": true,
+      "vision": false,
       "draft": true
     },
     "Qwen3.6-35B-A3B-UD-MTP-Q6_K": {
-      "vision": true,
+      "vision": false,
       "draft": true
     },
     "Qwen3.5-122B-A10B-UD-Q3_K_XL": {
-      "vision": true
+      "vision": false
     },
     "gemma-4-31B-it-UD-Q8_K_XL": {
       "draft": false,
@@ -53,38 +53,104 @@
     },
     "Qwen3.6-35B-A3B-UD-Q8_K_XL": {
       "draft": true,
-      "vision": true,
+      "vision": false,
       "prompt_cache": true,
       "ngram": false
     },
     "Qwen3.6-27B-UD-Q6_K_XL": {
-      "vision": true
+      "vision": false
     },
     "Qwen3.6-27B-MTP-UD-Q6_K_XL": {
       "vision": false,
       "draft": true
     },
     "gemma-4-31B-it-UD-Q6_K_XL": {
-      "draft": false
+      "draft": false,
+      "vision": false
     },
     "qwen3.6-35b-a3b-mxfp4_moe": {
-      "ngram": false
+      "ngram": false,
+      "vision": false
     },
     "gemma-4-12b-it-BF16": {
-      "ngram": false
+      "ngram": false,
+      "vision": false
     },
     "Ministral-3-14B-Reasoning-2512-Q6_K": {
       "vision": true
     },
     "gemma-4-12b-it-UD-Q8_K_XL": {
-      "vision": true
+      "vision": false
     },
     "gemma-4-12b-it-UD-Q6_K_XL": {
-      "vision": true
+      "vision": false
+    },
+    "Qwythos-9B-Claude-Mythos-5-1M-MTP-BF16": {
+      "draft": false,
+      "vision": false
+    },
+    "Qwen3.6-27B-UD-MTP-Q6_K_XL": {
+      "draft": true,
+      "vision": false
+    },
+    "Qwen3.6-27B-NEO-CODE-HERE-2T-OT-HIGH-Q8_0": {
+      "vision": false
+    },
+    "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q8_K_P": {
+      "vision": false
+    },
+    "Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-Q6_K": {
+      "vision": false
+    },
+    "Qwen2.5-Omni-7B-BF16": {
+      "vision": false
+    },
+    "Qwen3.5-0.8B-Q8_0": {
+      "vision": false
+    },
+    "Qwen3.5-2B-Q8_0": {
+      "vision": false
+    },
+    "Qwen3.5-4B-Q8_0": {
+      "vision": false
+    },
+    "Qwen3.5-9B-MTP-UD-Q8_K_XL": {
+      "vision": false
+    },
+    "Qwen3.5-9B-Q8_0": {
+      "vision": false
+    },
+    "Qwen3.5-9B-UD-Q6_K_XL": {
+      "vision": false
+    },
+    "Qwen3.6-27B-MTP-UD-Q8_K_XL": {
+      "vision": false,
+      "draft": false
+    },
+    "AIDungeonTextAdventuresMistral.Q8_0": {
+      "vision": false
+    },
+    "Qwopus3.5-9B-coder-Exp-BF16": {
+      "vision": false
+    },
+    "Qwable-9B-Claude-Fable-5-bf16": {
+      "vision": false
+    },
+    "Qwopus3.5-9B-coder-Exp-Q8_0": {
+      "vision": false
+    },
+    "Qwythos-9B-Claude-Mythos-5-1M-BF16": {
+      "vision": false
+    },
+    "gemma-4-12b-it-qat-q4_0": {
+      "vision": false
+    },
+    "gemma-4-12B-it-qat-UD-Q4_K_XL": {
+      "vision": false
     }
   },
   "mode": "coding",
-  "window_geometry": "AdnQywADAAAAAACCAAAAyAAABSwAAAT8AAAAggAAAOcAAAUsAAAE/AAAAAAAAAAADXAAAACCAAAA5wAABSwAAAT8",
+  "window_geometry": "AdnQywADAAAAAAGZAAAAtwAABkMAAATrAAABmQAAANYAAAZDAAAE6wAAAAAAAAAADXAAAAGZAAAA1gAABkMAAATr",
   "window_state": "AAAA/wAAAAD9AAAAAAAABKsAAAPhAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
   "fork_container_path": "H:\\LAB\\ai-local",
   "font_size": 10,
@@ -103,7 +169,8 @@
     "main_split": "AAAA/wAAAAEAAAACAAADMAAAAAAA/////wEAAAACAA=="
   },
   "mmproj_selection": {
-    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-MTP-BF16.gguf",
-    "Qwen3.6-27B-UD-Q6_K_XL": "mmproj-Qwen3.6-27B-BF16.gguf"
+    "Qwen3.6-35B-A3B-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-F32.gguf",
+    "Qwen3.6-27B-UD-Q6_K_XL": "mmproj-Qwen3.6-27B-MTP-UD-F32.gguf",
+    "Qwen3.6-27B-MTP-UD-Q8_K_XL": "mmproj-Qwen3.6-27B-MTP-BF16.gguf"
   }
 }

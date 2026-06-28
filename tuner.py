@@ -2193,8 +2193,18 @@ def build_command(
             cmd += ["--spec-ngram-mod-n-max", str(ngram_max)]
         elif ngram_method == "ngram-map-k4v":
             # Key+value n-gram map — the method ggerganov's MTP clean-up
-            # (PR #23269) pairs with draft-mtp. Flag names/defaults from that
-            # PR's example (size-n 16, size-m 24, min-hits 1).
+            # (PR #23269) pairs with draft-mtp. The values below are
+            # AutoTuner's own calibrated defaults (16 / 24 / 1), emitted
+            # explicitly so they are authoritative regardless of upstream
+            # drift. For reference, verified against b9829 source:
+            #   - mainline runtime struct default (common.h,
+            #     common_params_speculative_ngram_map, shared by k4v):
+            #     size_n 12, size_m 48, min_hits 1
+            #   - the commented --spec-default reference config (arg.cpp):
+            #     size_n 8, size_m 24, min_hits 2
+            # We deliberately don't track either of those moving targets —
+            # the profile value wins. Override per-profile via
+            # ngram_k4v_size_n / ngram_k4v_size_m / ngram_k4v_min_hits.
             size_n = getattr(profile, "ngram_k4v_size_n", 16) or 16
             size_m = getattr(profile, "ngram_k4v_size_m", 24) or 24
             min_hits = getattr(profile, "ngram_k4v_min_hits", 1) or 1
