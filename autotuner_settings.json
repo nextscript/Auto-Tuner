@@ -154,6 +154,9 @@
     },
     "Devstral-Small-2-24B-Instruct-2512-UD-Q4_K_XL": {
       "vision": false
+    },
+    "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": {
+      "vision": false
     }
   },
   "mode": "coding",
@@ -185,7 +188,9 @@
     "Qwen3.6-27B-NEO-CODE-HERE-2T-OT-HIGH-Q8_0": "<none>",
     "Qwopus3.5-9B-coder-Exp-Q8_0": "<none>",
     "gemma-4-12b-it-BF16": "<none>",
-    "Qwen3.6-35B-A3B-UD-Q6_K": "<none>"
+    "Qwen3.6-35B-A3B-UD-Q6_K": "<none>",
+    "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": "<none>",
+    "Qwen3.6-35B-A3B-UD-MTP-Q6_K": "<none>"
   },
   "draft_selection": {
     "gemma-4-12B-it-qat-UD-Q4_K_XL": "<none>",

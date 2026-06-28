@@ -3481,16 +3481,35 @@ class MainWindow(QMainWindow):
         SAFETY_GB = 1.0
         need = footprint_gb + SAFETY_GB
 
-        # Single GPU: just check it fits; let existing logic place it.
+        # Single GPU: let the AutoTuner's own placement decide. compute_config
+        # has ALREADY guaranteed the footprint fits within free VRAM (minus its
+        # mode-specific safety band), so a flat +1 GB refusal here only
+        # double-counts headroom and — worse — flips on low-VRAM cards (e.g. an
+        # 8 GB 3060 Ti): throughput/balanced pack more expert layers onto the
+        # GPU than safe does, producing a larger footprint that trips the flat
+        # 1 GB margin even though the tuner planned a perfectly runnable
+        # hybrid config. The paradoxical result was that the most aggressive
+        # modes got blocked hardest on exactly the small GPUs that need them.
+        #
+        # We therefore only hard-refuse in the ONE case that would actually
+        # crash llama-server: a FULLY-offloaded model whose GPU footprint
+        # exceeds free VRAM (→ OOM, no CPU fallback). For any hybrid/offloaded
+        # config (MoE with CPU-resident experts via --n-cpu-moe, or a dense
+        # model with partial -ngl) the server spills the overflow to CPU and
+        # runs fine — that graceful fallback IS the whole point of the tuner's
+        # placement pass, so refusing it here would defeat it.
         if len(sysinfo.gpus) == 1:
             g = sysinfo.gpus[0]
-            if g.free_vram_gb < need:
+            full_off = bool(getattr(cfg, "full_offload", False))
+            if full_off and g.free_vram_gb < need:
                 return None, (
                     f"Not enough free VRAM on {g.name}: needs ≈{need:.1f} GB "
-                    f"(model {footprint_gb:.1f} + {SAFETY_GB:.0f} GB headroom), "
-                    f"only {g.free_vram_gb:.1f} GB free.\n\n"
+                    f"(model {footprint_gb:.1f} fully on GPU + "
+                    f"{SAFETY_GB:.0f} GB headroom), only "
+                    f"{g.free_vram_gb:.1f} GB free.\n\n"
                     "Stop a running server to free memory, or pick a smaller "
-                    "model / lower context."
+                    "model / lower context, or lower the context in Expert "
+                    "mode so some layers spill to CPU."
                 )
             return None, None
 
