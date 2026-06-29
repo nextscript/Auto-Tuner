@@ -26,10 +26,34 @@ if (Test-Path .\$dir) { Remove-Item .\$dir -Recurse -Force }
 Rename-Item .\_tmp_2b_llama $dir
 Write-Host "==> Build-Verzeichnis: $dir  (Fork-Basis auf mainline $ver)"
 
-Push-Location .\$dir\tools\ui
-npm ci
-npm run build
-Pop-Location
+# --- UI: aus Source bauen wenn UI-Quellen vorhanden, sonst Prebuilt von HF ---
+# Vor b9174 (16.05.2026) lag die UI unter tools/server/webui/,
+# ab b9174 unter tools/ui/. Aeltere Forks (z.B. PrismML prism-Branch)
+# fuehren ggf. gar keine UI-Quellen mit -> dann Prebuilt von HF holen.
+$uiSrc = $null
+foreach ($cand in ("tools/ui", "tools/server/webui")) {
+    if (Test-Path .\$dir\$cand\package.json) { $uiSrc = $cand; break }
+}
+if ($uiSrc) {
+    Write-Host "==> UI aus Source bauen ($dir\$uiSrc)"
+    Push-Location .\$dir\$uiSrc
+    if (Test-Path package-lock.json) { npm ci } else { npm install }
+    npm run build
+    Pop-Location
+    $uiPrebuilt = "OFF"
+} else {
+    Write-Host "==> keine UI-Quellen in $dir — verwende Prebuilt-UI von HF"
+    $uiPrebuilt = "ON"
+}
+
+# LLAMA_OPENSSL=OFF: der prism-Branch basiert auf einer aelteren Mainline
+# (vor b9174) und vendort noch cpp-httplib 0.40.0. Dessen httplib.cpp:12574
+# weist X509_get_subject_name(cert) einer non-const Variablen zu; ab
+# OpenSSL 3.2 liefert diese Funktion aber const X509_NAME* -> C2440
+# ("Conversion loses qualifiers"). Fuer die lokale Nutzung auf 127.0.0.1
+# ist HTTPS ohnehin unnoetig, also SSL im Build deaktivieren.
+# Neuere Forks (tq_/d_/mainline b9840+) haben ein gefixtes cpp-httplib
+# und brauchen diesen Schalter nicht.
 
 # CMAKE_POLICY_DEFAULT_CMP0194=OLD + CMAKE_ASM_COMPILER=cl umgehen den
 # ASM-Compiler-Fehler (llama.cpp Issue #22100) bei neueren CMake-Versionen.
@@ -39,6 +63,7 @@ cmake -S .\$dir -B .\$dir\build `
   -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_POLICY_DEFAULT_CMP0194=OLD `
   -DCMAKE_ASM_COMPILER=cl `
+  -DLLAMA_OPENSSL=OFF `
   -DGGML_VULKAN=ON `
   -DGGML_NATIVE=OFF `
   -DGGML_AVX2=ON `
@@ -47,7 +72,7 @@ cmake -S .\$dir -B .\$dir\build `
   -DBUILD_SHARED_LIBS=OFF `
   -DLLAMA_BUILD_SERVER=ON `
   -DLLAMA_BUILD_UI=ON `
-  -DLLAMA_USE_PREBUILT_UI=OFF `
+  -DLLAMA_USE_PREBUILT_UI=$uiPrebuilt `
   -DLLAMA_CURL=OFF `
   -DGGML_CCACHE=OFF `
   -DGGML_VULKAN_CHECK_RESULTS=OFF `

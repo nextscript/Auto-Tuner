@@ -250,6 +250,30 @@ def metadata_is_standalone_drafter(md: Dict[str, Any]) -> bool:
     return arch.endswith("-assistant") or arch.endswith("_assistant")
 
 
+# Architecture strings that mark a GGUF as a *standalone drafter* file — i.e.
+# not runnable as a target model on its own, but loaded via ``-md`` next to a
+# target. Used by the scan reclassification so such files are paired to a
+# target instead of appearing in the chooser. Covers the Gemma 4 MTP
+# assistant heads AND the EAGLE-3 / DFlash draft models (PR #18039 / #22105).
+_DRAFTER_ARCHS = frozenset({"eagle3", "dflash"})
+
+
+def metadata_is_drafter_file(md: Dict[str, Any]) -> bool:
+    """True if *md* marks a standalone speculative-draft GGUF of ANY kind.
+
+    This is the union of :func:`metadata_is_standalone_drafter` (Gemma 4
+    MTP ``*-assistant`` heads) and the EAGLE-3 / DFlash draft architectures
+    (``general.architecture == 'eagle3'`` / ``'dflash'``). All of these are
+    attached to a target via ``-md`` and never listed as a choosable model.
+    """
+    if not md:
+        return False
+    if metadata_is_standalone_drafter(md):
+        return True
+    arch = str(md.get("general.architecture", "") or "").lower().strip()
+    return arch in _DRAFTER_ARCHS
+
+
 def metadata_has_embedded_mtp(md: Dict[str, Any]) -> bool:
     """Return True iff the GGUF contains an integrated MTP/draft-head.
 
@@ -1043,6 +1067,33 @@ class ModelEntry:
         return metadata_is_standalone_drafter(self.metadata)
 
     @property
+    def drafter_spec_type(self) -> Optional[str]:
+        """The ``--spec-type`` token this drafter needs, or ``None``.
+
+        ``None``    — not a drafter, OR a plain sibling drafter that mainline
+                     auto-detects from ``-md`` (no explicit ``--spec-type``
+                     token emitted).
+        ``"mtp"``  — standalone MTP head (Gemma 4 ``gemma4-assistant``),
+                     launched as ``-md`` + ``--spec-type draft-mtp``.
+        ``"eagle3"``— EAGLE-3 draft model (arch ``eagle3``), reads the
+                     target's hidden states; ``-md`` + ``--spec-type
+                     draft-eagle3`` (PR #18039, merged; Qwen3.5/3.6 support
+                     in PR #24593 since b9723).
+        ``"dflash"``— DFlash block-diffusion draft model (arch ``dflash``),
+                     ``-md`` + ``--spec-type draft-dflash`` (PR #22105).
+        """
+        if not self.metadata:
+            return None
+        arch = str(self.metadata.get("general.architecture", "") or "").lower().strip()
+        if arch.endswith("-assistant") or arch.endswith("_assistant"):
+            return "mtp"
+        if arch == "eagle3":
+            return "eagle3"
+        if arch == "dflash":
+            return "dflash"
+        return None
+
+    @property
     def has_speculative_draft(self) -> bool:
         """True when any form of speculative decoding is available.
 
@@ -1240,7 +1291,17 @@ def _find_mmproj_candidates(model: Path, candidates: List[Path]) -> List[Path]:
 # This is only the cheap filename pre-filter; the authoritative signal for
 # Gemma-4-style drafters is the architecture (see
 # :func:`metadata_is_standalone_drafter`), applied after the metadata read.
-_DRAFT_FILENAME_TOKENS = ("assistant", "draft", "mtp")
+_DRAFT_FILENAME_TOKENS = (
+    "assistant",
+    "draft",
+    "mtp",
+    # EAGLE-3 / DFlash draft models ship as separate GGUFs named
+    # ``…-eagle3`` / ``…-dflash``; treat them as drafts so they pair to a
+    # target via -md instead of showing up as choosable models.
+    "eagle3",
+    "eagle",
+    "dflash",
+)
 
 # Maximum size for a GGUF to be treated as a standalone draft head based on
 # its filename alone. Real draft/assistant/MTP heads are tiny — a Gemma 4
@@ -1277,7 +1338,7 @@ _QUANT_CORE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _DRAFT_MARKER_RE = re.compile(
-    r"(?:^|[-_.])(?:assistant|draft|mtp)(?=[-_.]|$)", re.IGNORECASE
+    r"(?:^|[-_.])(?:assistant|draft|mtp|eagle3|eagle|dflash)(?=[-_.]|$)", re.IGNORECASE
 )
 
 
@@ -1560,7 +1621,10 @@ def scan_models(
         except OSError:
             continue
         md = read_gguf_metadata(m) if read_metadata else {}
-        if md and metadata_is_standalone_drafter(md):
+        if md and metadata_is_drafter_file(md):
+            # Standalone drafter (Gemma 4 MTP assistant head, EAGLE-3, or
+            # DFlash) — reclassify into the draft pool so phase 2 pairs it
+            # to its target via -md instead of listing it as a model.
             if m not in drafts:
                 drafts.append(m)
             continue

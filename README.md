@@ -700,10 +700,23 @@ cmake --build .\SPIRV-Headers\build --config Release
 cmake --install .\SPIRV-Headers\build --config Release
 
 git clone https://github.com/ggml-org/llama.cpp.git
-Push-Location .\llama.cpp\tools\ui
-npm ci
-npm run build
-Pop-Location
+# --- UI: aus Source bauen wenn UI-Quellen vorhanden, sonst Prebuilt von HF ---
+# Vor b9174 (16.05.2026) lag die UI unter tools/server/webui/,
+# ab b9174 unter tools/ui/. Aeltere Forks fuehren ggf. gar keine
+# UI-Quellen mit -> dann Prebuilt von HF holen.
+$uiSrc = $null
+foreach ($cand in ("tools/ui", "tools/server/webui")) {
+    if (Test-Path .\llama.cpp\$cand\package.json) { $uiSrc = $cand; break }
+}
+if ($uiSrc) {
+    Push-Location .\llama.cpp\$uiSrc
+    if (Test-Path package-lock.json) { npm ci } else { npm install }
+    npm run build
+    Pop-Location
+    $uiPrebuilt = "OFF"
+} else {
+    $uiPrebuilt = "ON"   # CMake laedt die fertige UI von HF
+}
 
 cmake -S .\llama.cpp -B .\llama.cpp\build `
   -G "Visual Studio 18 2026" `
@@ -717,7 +730,7 @@ cmake -S .\llama.cpp -B .\llama.cpp\build `
   -DBUILD_SHARED_LIBS=OFF `
   -DLLAMA_BUILD_SERVER=ON `
   -DLLAMA_BUILD_UI=ON `
-  -DLLAMA_USE_PREBUILT_UI=OFF `
+  -DLLAMA_USE_PREBUILT_UI=$uiPrebuilt `
   -DLLAMA_CURL=OFF `
   -DGGML_CCACHE=OFF `
   -DGGML_VULKAN_CHECK_RESULTS=OFF `
@@ -757,6 +770,47 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--rope-scaling yarn` | ✅ Already present |
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
+
+### Review b9625 → b9840
+
+Reviewed the range up to **b9840**. Every server flag and `--spec-type`
+value in use was verified against the current `tools/server/README.md`
+(`--help` table) and `docs/speculative.md`. **No existing flag was removed
+or renamed** — the AutoTuner's flag surface is unchanged and still valid.
+Changes this round are AutoTuner-side additions and fork-build fixes:
+
+- **EAGLE-3 speculative decoding (PR #18039; Qwen3.5/3.6 since PR #24593 /
+  b9723).** `--spec-type draft-eagle3` is now emitted automatically when the
+  paired drafter GGUF declares `general.architecture = eagle3` (a one-layer
+  transformer that reads the target's hidden states — higher acceptance
+  than a plain draft of the same size). Sibling files named `*-eagle3*` are
+  auto-paired like any draft; `scanner.py` reclassifies an `eagle3`-arch GGUF
+  into the draft pool (never listed as a choosable model).
+- **DFlash speculative decoding (PR #22105).** `--spec-type draft-dflash` is
+  emitted when the paired drafter declares `general.architecture = dflash`
+  (block-diffusion; emits a whole block per step).
+- **Fork discovery hardened.** Versioned fork dirs (`2b_b8840_llama.cpp`,
+  `tq_b9632_llama.cpp`, …) now resolve correctly — a profile hint like
+  `2b_llama/llama-server` matches the on-disk `2b_b8840_llama.cpp` after
+  normalizing the `_b<NUM>` version segment. The 1-bit (`1b_`) and
+  2-bit/Ternary (`2b_`) Bonsai families stay distinct. Forks that match the
+  name pattern but have no built `llama-server` binary are now reported in
+  the `llama_cpp` debug category (instead of vanishing silently), and the
+  terminal launcher now finds `H:/LAB/ai-local` (the documented workspace)
+  even without `LLAMA_CPP_DIR` set.
+- **`bonsai-ternary.yaml`** corrected: `server_binary` now points to
+  `2b_llama` (2-bit/Ternary fork), not `1b_llama` (1-bit Bonsai).
+- **Build scripts** (`*_build.txt`) now probe BOTH UI layouts — pre-b9174
+  `tools/server/webui/` and post-b9174 `tools/ui/` — and fall back to the
+  HF prebuilt UI when neither exists. The Bonsai (b8840-basis) build adds
+  `-DLLAMA_OPENSSL=OFF` to work around the cpp-httplib 0.40.0 / OpenSSL 3.2+
+  `C2440` const error.
+
+Everything else AutoTuner emits is **unchanged and still valid at b9840**:
+`--fit [on|off]`, `-fa [on|off|auto]`, `--cache-ram`/`-cram`, `--metrics`,
+`--n-cpu-moe`/`-ncmoe`, `--tensor-split`, `--main-gpu`, YaRN, KV-cache types,
+`--reasoning`/`-rea`, `--reasoning-budget`, `--chat-template-kwargs`,
+`--jinja`, `--mlock`/`--no-mmap`, and the full speculative set.
 
 ### Review b9500 → b9625
 
@@ -806,7 +860,9 @@ valid. Specifically re-confirmed present at b9500: `--spec-type`,
   no longer auto-enables a `draft-simple` path; the `common/arg.cpp` diff was
   whitespace-only (no flag renamed/removed). **No impact** — AutoTuner always
   emits `--spec-type` explicitly and never relied on auto-enabling. A new
-  `draft-eagle3` spec-type also exists now (EAGLE3 drafters); not emitted by
+  `draft-eagle3` spec-type also exists now (EAGLE3 drafters); AutoTuner now
+  emits it when an `eagle3`-arch drafter is paired (see b9625→b9840 review
+  below).
   AutoTuner.
 - **Gemma 4 "unified" runtime + 12B (#24077, #24082, #24088, #24025).**
   Vision/audio (mtmd) fixes for the encoder-free "unified" Gemma 4 and the

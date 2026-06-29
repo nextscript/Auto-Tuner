@@ -5,8 +5,13 @@ REM Nutzt das projekteigene .venv (pythonw.exe = kein Konsolenfenster).
 cd /d "%~dp0"
 
 REM -- Pfade anpassen (gleiche Einstellungen wie AutoTuner_Terminal.bat) -------
-set "AUTOTUNER_MODELS=C:\LAB\ai-local\models"
-set "LLAMA_CPP_DIR=C:\LAB\ai-local\llama.cpp"
+REM AUTOTUNER_MODELS = Ordner mit *.gguf Modellen
+REM LLAMA_CPP_DIR    = Container-Ordner mit allen *_llama.cpp Builds (NICHT
+REM                    ein einzelner Fork) - der AutoTuner findet darin alle
+REM                    Forks automatisch. Auf dieser Maschine: H:\LAB\ai-local
+REM                    (C:\LAB ist veraltet und existiert nicht mehr).
+set "AUTOTUNER_MODELS=H:\LAB\ai-local\models"
+set "LLAMA_CPP_DIR=H:\LAB\ai-local"
 
 REM -- venv-Interpreter bevorzugen, sonst auf globales pythonw zurueckfallen --
 set "PYW=%~dp0.venv\Scripts\pythonw.exe"

@@ -7,8 +7,9 @@ max_context: 65536
 recommended_kv_quant: q8_0
 
 # Braucht ebenfalls den PrismML-Fork - Q2_0 Format packt die 1.58-bit
-# Ternary-Gewichte hardware-freundlich in 2 bits.
-server_binary: "1b_llama/llama-server"
+# Ternary-Gewichte hardware-freundlich in 2 bits. Der 2-bit/Ternary-Fork
+# heisst 2b_ (Build: 2b_bXXXX_llama.cpp); 1b_ ist der 1-bit Bonsai-Fork.
+server_binary: "2b_llama/llama-server"
 
 # Sampling-Profile pro Modus.
 # Gleiche Empfehlung wie Bonsai 8B (PrismML README-Beispiel).
@@ -33,4 +34,4 @@ notes: >
   Zwischen 1-bit Bonsai und full-precision: ~9x kleiner, 5x schneller,
   besser auf Benchmarks als 1-bit Bonsai (avg +5 Punkte).
   Q2_0 ist die eingesetzte Speicher-Form (2-bit aligned für Metal/CUDA).
-  Braucht den PrismML 1b_llama.cpp-Fork für optimierte BitNet-Kerne.
+  Braucht den PrismML 2b_llama.cpp-Fork (Ternary-Kerne, 2-bit Q2_0).

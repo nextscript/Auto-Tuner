@@ -370,20 +370,45 @@ def _candidate_search_roots() -> List[Path]:
                     add(sibling)
         except (OSError, PermissionError):
             pass
+        # If env_dir is a CONTAINER (a parent holding several *_llama.cpp
+        # builds, e.g. H:/LAB/ai-local), enumerate its direct children so a
+        # profile hint like '2b_llama/llama-server' resolves to a versioned
+        # child dir like '2b_b8840_llama.cpp'. Without this the resolver only
+        # sees the container, not the forks inside it.
+        try:
+            for child in parent.iterdir():
+                if child.is_dir() and re.search(
+                    r"llama", child.name, re.IGNORECASE
+                ):
+                    add(child)
+        except (OSError, PermissionError):
+            pass
         add(parent.parent / "BitNet")
 
     bases = [Path(__file__).resolve().parent, Path.cwd()]
+    # Fork hint list — the on-disk names produced by the build scripts
+    # follow '{prefix}_b{NUM}_llama.cpp' (versioned) or '{prefix}_llama.cpp'
+    # (unversioned). The versioned form is NOT listed here because it varies
+    # per build; the fork discovery (_discover_llama_forks) finds those by
+    # directory walk + binary probe. These bare names are only hint anchors
+    # for the candidate-root search when a user still uses the unversioned
+    # naming. Prefixes: 1b_ = 1-bit Bonsai, 2b_ = 2-bit/Ternary Bonsai,
+    # tq_ = TurboQuant, ik_ = Gemma external drafter, d_ = Diffusion.
     common_subs = (
         "llama.cpp",
         "1b_llama.cpp",
+        "2b_llama.cpp",
         "ik_llama.cpp",
         "tq_llama.cpp",
         "atq_llama.cpp",
+        "d_llama.cpp",
         "BitNet",
         "ai-local/llama.cpp",
         "ai-local/1b_llama.cpp",
+        "ai-local/2b_llama.cpp",
         "ai-local/ik_llama.cpp",
         "ai-local/tq_llama.cpp",
+        "ai-local/d_llama.cpp",
     )
     for base in bases:
         chain = [base, *list(base.parents)[:5]]
@@ -391,6 +416,31 @@ def _candidate_search_roots() -> List[Path]:
             for sub in common_subs:
                 add(p / sub)
     return roots
+
+
+# Fork dir naming convention: '{prefix}_llama.cpp', '{prefix}_b{NUM}_llama.cpp',
+# or bare 'b{NUM}_llama.cpp' / 'llama.cpp'. To match a profile's fork hint
+# (e.g. "2b_llama") against the versioned dir actually on disk
+# (e.g. "2b_b8840_llama.cpp"), we normalize both to a family form by
+# stripping the '.cpp' suffix and any '_b<NUM>' / leading 'b<NUM>' version
+# segment:
+#     '2b_b8840_llama.cpp' -> '2b_llama'
+#     '2b_llama.cpp'       -> '2b_llama'
+#     'b9840_llama.cpp'    -> 'llama'
+#     'tq_b9625_llama.cpp' -> 'tq_llama'
+#     '1b_llama.cpp'       -> '1b_llama'
+# This keeps the 1-bit ('1b_') and 2-bit/Ternary ('2b_') families distinct
+# while tolerating both versioned and unversioned directory names.
+_FORK_VERSION_RE = re.compile(r"(?:^|_)b\d+(?=_|$)")
+
+
+def _fork_family(name: str) -> str:
+    """Normalize a fork dir/name to its family form for fuzzy matching."""
+    n = name.lower()
+    if n.endswith(".cpp"):
+        n = n[:-4]
+    n = _FORK_VERSION_RE.sub("", n).lstrip("_")
+    return n
 
 
 def _resolve_server_binary(user_value: str) -> str:
@@ -413,7 +463,15 @@ def _resolve_server_binary(user_value: str) -> str:
                 root_base = root.name.lower()
                 if root_base.endswith(".cpp"):
                     root_base = root_base[:-4]
-                if root_base.startswith(fork_name) or fork_name.startswith(root_base):
+                if (
+                    root_base.startswith(fork_name)
+                    or fork_name.startswith(root_base)
+                    # Fuzzy fallback: match after normalizing version
+                    # segments out of both names, so a profile hint '2b_llama'
+                    # resolves to an on-disk dir '2b_b8840_llama.cpp'.
+                    or _fork_family(root_base).startswith(_fork_family(fork_name))
+                    or _fork_family(fork_name).startswith(_fork_family(root_base))
+                ):
                     candidate = root / inner
                     if candidate.is_file():
                         _debug_print(f"Found candidate: {candidate}")
@@ -562,6 +620,30 @@ def _discover_llama_forks() -> List[Tuple[str, Path]]:
         for ancestor in [base, *list(base.parents)[:6]]:
             parents.append(ancestor)
 
+    # Documented workspace convention: the README and .bat launchers keep
+    # all *_llama.cpp builds side-by-side under '<drive>/ai-local' or
+    # '<drive>/LAB/ai-local'. Add those for every drive the script / cwd
+    # lives on so fork discovery works even without LLAMA_CPP_DIR set.
+    # (This is what makes the terminal launcher find H:/LAB/ai-local when
+    # run from H:/GitHub/Auto Tuner.)
+    _WORKSPACE_RELS = ("ai-local", "LAB/ai-local", "LAB\\ai-local")
+    drive_roots: set = set()
+    for base in (Path(__file__).resolve().parent, Path.cwd()):
+        try:
+            anchor = base.resolve()
+        except (OSError, RuntimeError):
+            continue
+        # Walk up to the drive root (Windows) or '/' (POSIX).
+        if anchor.drive:
+            drive_roots.add(Path(anchor.drive + os.sep))
+        else:
+            drive_roots.add(anchor.root if anchor.root else anchor)
+    for root in drive_roots:
+        for rel in _WORKSPACE_RELS:
+            cand = root / rel
+            if cand not in parents:
+                parents.append(cand)
+
     # Deduplicate while preserving order
     deduped: List[Path] = []
     for p in parents:
@@ -604,7 +686,17 @@ def _discover_llama_forks() -> List[Tuple[str, Path]]:
             # stale checkout or a source-only clone without a build.
             has_binary = any((rp / sub).is_file() for sub in _SERVER_SUBPATHS)
             if not has_binary:
+                # Debug aid: surface WHY a matching dir was skipped, so a
+                # missing fork in the menu is immediately diagnosable (e.g.
+                # build not finished yet, or a non-standard build layout).
+                debug_cat(
+                    "llama_cpp",
+                    f"fork-skip: {name} matched the name pattern but has "
+                    "no llama-server binary under any of: "
+                    + ", ".join(_SERVER_SUBPATHS),
+                )
                 continue
+            debug_cat("llama_cpp", f"fork-found: {name}")
             seen.add(rp)
             forks.append((name, rp))
 
@@ -1023,7 +1115,10 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             if required_fork:
                 selected_name = selected_fork_path.name.lower()
                 req_lower = required_fork.lower()
-                if selected_name != req_lower:
+                # Compare on the family form so a versioned fork dir
+                # (e.g. '2b_b8840_llama.cpp') is recognized as matching a
+                # profile requirement of '2b_llama.cpp'.
+                if _fork_family(selected_name) != _fork_family(req_lower):
                     print(
                         f"\n[AutoTuner] ⚠  Profile '{profile.display_name}' "
                         f"requires: {required_fork}"
@@ -1031,7 +1126,9 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                     print(f"             You selected:  {selected_fork_path.name}")
                     # Look for the required fork among already-discovered forks
                     matching = [
-                        (n, p) for n, p in discovered_forks if n.lower() == req_lower
+                        (n, p)
+                        for n, p in discovered_forks
+                        if _fork_family(n) == _fork_family(req_lower)
                     ]
                     if matching:
                         switch = _confirm(

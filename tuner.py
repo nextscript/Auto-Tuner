@@ -2110,6 +2110,15 @@ def build_command(
     external_is_mtp_head = use_external and bool(
         getattr(draft_model, "is_standalone_drafter", False)
     )
+    # The spec-type token an EXTERNAL drafter needs, if any. Plain sibling
+    # drafters (auto-detected from -md) need no token. Standalone MTP heads
+    # (Gemma 4 assistant) need "draft-mtp"; EAGLE-3 draft models need
+    # "draft-eagle3"; DFlash needs "draft-dflash" (PR #18039/#22105; Qwen3.5/
+    # 3.6 EAGLE-3 since PR #24593 / b9723). EAGLE-3 reads the target's hidden
+    # states for higher acceptance than a plain draft of the same size.
+    external_spec_type: Optional[str] = None
+    if use_external:
+        external_spec_type = getattr(draft_model, "drafter_spec_type", None)
     # Path B: integrated MTP (draft-mtp) — compatible with vision (--mmproj)
     # since mainline b9180 (PR #22673, merged 2026-05-16). The MTP draft head
     # lives inside the same GGUF as the main model; llama.cpp loads it as part
@@ -2161,6 +2170,14 @@ def build_command(
         # External standalone MTP head (Gemma 4 assistant) — needs the
         # explicit draft-mtp path; it is not auto-detected from -md.
         spec_types.append("draft-mtp")
+    elif external_spec_type == "eagle3":
+        # EAGLE-3 draft model: a one-layer transformer that reads the target's
+        # hidden states. Loaded via -md but requires the explicit token
+        # (mainline does NOT auto-detect eagle3 from -md).
+        spec_types.append("draft-eagle3")
+    elif external_spec_type == "dflash":
+        # DFlash block-diffusion draft model: emits a whole block per step.
+        spec_types.append("draft-dflash")
     if use_ngram:
         spec_types.append(ngram_method)
     if spec_types:

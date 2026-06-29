@@ -1830,6 +1830,18 @@ class MainWindow(QMainWindow):
                 has_binary = any((child / sub).is_file() for sub in _BINARY_SUBPATHS)
                 if has_binary:
                     result.append((child.name, child))
+                else:
+                    # Debug aid: surface WHY a matching dir was skipped.
+                    try:
+                        from auto_tuner import debug_cat
+
+                        debug_cat(
+                            "llama_cpp",
+                            f"fork-skip (GUI container): {child.name} matched "
+                            "the name pattern but has no llama-server binary",
+                        )
+                    except Exception:
+                        pass
         except (OSError, PermissionError):
             pass
         return result

@@ -978,6 +978,98 @@ def test_resolver_distinguishes_between_llama_and_1b_llama(
     assert Path(res2).resolve() == bitnet.resolve()
 
 
+def test_resolver_matches_versioned_fork_dir(tmp_path, monkeypatch) -> None:
+    """A profile hint like '2b_llama/llama-server' must resolve to a
+    versioned on-disk dir like '2b_b8840_llama.cpp' after normalising the
+    '_b<NUM>' version segment — and must NOT cross-match the 1-bit family.
+    """
+    from auto_tuner import _resolve_server_binary, _fork_family
+
+    # Normalisation sanity
+    assert _fork_family("2b_b8840_llama.cpp") == "2b_llama"
+    assert _fork_family("1b_llama.cpp") == "1b_llama"
+    assert _fork_family("b9840_llama.cpp") == "llama"
+
+    auto_dir = tmp_path / "Auto Tuner"
+    auto_dir.mkdir()
+    fork2b = (
+        tmp_path
+        / "ai-local"
+        / "2b_b8840_llama.cpp"
+        / "build"
+        / "bin"
+        / "Release"
+        / "llama-server.exe"
+    )
+    fork1b = (
+        tmp_path
+        / "ai-local"
+        / "1b_llama.cpp"
+        / "build"
+        / "bin"
+        / "Release"
+        / "llama-server.exe"
+    )
+    for s in (fork2b, fork1b):
+        s.parent.mkdir(parents=True)
+        s.write_text("")
+
+    monkeypatch.chdir(auto_dir)
+    monkeypatch.delenv("LLAMA_CPP_DIR", raising=False)
+    monkeypatch.setenv("LLAMA_CPP_DIR", str(tmp_path / "ai-local"))
+
+    # Ternary profile hint -> versioned 2b_ fork on disk
+    res = _resolve_server_binary("2b_llama/llama-server")
+    assert Path(res).resolve() == fork2b.resolve()
+    # 1-bit hint must NOT match the 2b fork
+    res1 = _resolve_server_binary("1b_llama/llama-server")
+    assert Path(res1).resolve() == fork1b.resolve()
+
+
+def test_eagle3_and_dflash_drafter_detection() -> None:
+    """EAGLE-3 / DFlash drafter GGUFs are detected by architecture and
+    filename, classified as drafters (not choosable models), and expose the
+    spec-type token the launcher must emit."""
+    from scanner import (
+        metadata_is_drafter_file,
+        metadata_is_standalone_drafter,
+        _is_draft_filename,
+        _DRAFT_MARKER_RE,
+    )
+
+    # Architecture-based detection
+    assert metadata_is_drafter_file({"general.architecture": "eagle3"})
+    assert metadata_is_drafter_file({"general.architecture": "dflash"})
+    assert metadata_is_drafter_file({"general.architecture": "gemma4-assistant"})
+    assert not metadata_is_drafter_file({"general.architecture": "qwen3"})
+    # eagle3/dflash are NOT 'standalone drafter' (that term is reserved for
+    # the MTP assistant heads) — they must not trigger the draft-mtp path.
+    assert not metadata_is_standalone_drafter({"general.architecture": "eagle3"})
+
+    # Filename token detection
+    assert _is_draft_filename("Qwen3-4B-eagle3.gguf")
+    assert _is_draft_filename("Qwen3-4B-eagle3-Q8_0.gguf")
+    assert _is_draft_filename("Qwen3-4B-dflash.gguf")
+    assert _DRAFT_MARKER_RE.search("Qwen3-4B-eagle3.gguf")
+    assert _DRAFT_MARKER_RE.search("Qwen3-4B-dflash.gguf")
+
+    # drafter_spec_type maps arch -> spec-type token
+    def spec_type(arch: str) -> str | None:
+        a = arch.lower().strip()
+        if a.endswith("-assistant") or a.endswith("_assistant"):
+            return "mtp"
+        if a == "eagle3":
+            return "eagle3"
+        if a == "dflash":
+            return "dflash"
+        return None
+
+    assert spec_type("eagle3") == "eagle3"
+    assert spec_type("dflash") == "dflash"
+    assert spec_type("gemma4-assistant") == "mtp"
+    assert spec_type("qwen3") is None
+
+
 def test_turbo_quant_mode_selection(tmp_path, monkeypatch) -> None:
     """Test that the turbo mode selection logic works (mocking input)."""
     from auto_tuner import main
@@ -1003,13 +1095,17 @@ def test_turbo_quant_mode_selection(tmp_path, monkeypatch) -> None:
 
 
 def test_profile_supports_server_binary_field() -> None:
-    """Bonsai-Ternary should declare its preferred server binary."""
+    """Bonsai-Ternary should declare its preferred server binary.
+
+    Ternary-Bonsai (1.58-bit, Q2_0) uses the 2-bit PrismML fork (``2b_…``),
+    NOT the 1-bit Bonsai fork (``1b_…``). The two must stay distinct.
+    """
     profiles = load_profiles(SETTINGS_DIR)
     by_name = {p.source_file: p for p in profiles}
     assert "bonsai-ternary.yaml" in by_name
     p = by_name["bonsai-ternary.yaml"]
     assert p.server_binary, "Bonsai-Ternary profile must set server_binary"
-    assert "1b_llama" in p.server_binary.lower()
+    assert "2b_llama" in p.server_binary.lower()
 
 
 def test_ternary_bonsai_pattern_beats_regular_bonsai() -> None:
