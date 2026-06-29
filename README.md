@@ -416,7 +416,7 @@ that only make sense with persistent state:
 | `--dry-run` | Print the command, don't start the server |
 | `--yes / -y` | Skip the launch confirmation prompt |
 | `--force-mlock` | Force `--mlock` / `--no-mmap` (prevents VRAM/RAM paging) |
-| `--performance-target {safe,balanced,throughput}` | VRAM utilisation preset (see below) |
+| `--performance-target {safe,balanced,throughput,low_vram}` | VRAM utilisation preset (see below) |
 | `-- <args...>` | Anything after `--` is forwarded to `llama-server` |
 
 ### Performance targets (`--performance-target`)
@@ -431,6 +431,22 @@ tier can move several expert layers between GPU and CPU.
 | `safe` | 128 k tokens | 0.30 GB | Long-context sessions (>64 k), maximum stability |
 | `balanced` *(default)* | 64 k tokens | 0.25 GB | General use — moderate optimisation that helps everyone |
 | `throughput` | 32 k tokens | 0.15 GB | Short-context inference (chat, reasoning ≤32 k); pushes more expert layers onto the GPU for higher tokens/s |
+| `low_vram` | KV → system RAM | 0.15 GB | **LOW-VRAM / high-RAM boxes** (e.g. 8 GB VRAM, 64 GB RAM). Forces the KV cache into system RAM via `--no-kv-offload`, so context is drawn from abundant RAM instead of scarce VRAM — the only way to reach 90 k+ on a 20 GB MoE that barely fits the GPU. Trades generation speed for context (attention compute follows the KV onto the CPU). |
+
+#### Why `low_vram` exists
+
+On a GPU too small to hold both a MoE model's expert weights **and**
+its KV cache, the leftover VRAM after expert placement throttles context
+to a few thousand tokens — useless for agentic coding, which typically
+needs 90–130 k. The other tiers keep the MoE KV cache in VRAM (the
+Vulkan backend asserts when MoE KV spills to RAM mid-split), so they
+cannot help here. `low_vram` sidesteps the whole problem by telling
+llama.cpp to keep the **entire** KV cache in system RAM
+(`--no-kv-offload`); the model's 64 GB of RAM becomes the context
+budget instead of the ~1 GB of leftover VRAM. Experts still run on the
+GPU where they fit (`--n-cpu-moe`), so only attention is paid for in
+speed. Opt-in only — `safe`/`balanced`/`throughput` are completely
+unaffected.
 
 **Resolution priority** (highest wins): explicit CLI flag → GUI dropdown
 → `performance_target:` in the model's YAML profile → `balanced` default.

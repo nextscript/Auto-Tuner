@@ -5,7 +5,7 @@ how aggressively the AutoTuner uses GPU VRAM and system RAM. The goal
 is to give users one knob ("safe / balanced / throughput") instead of
 forcing them to tune four interacting numbers individually.
 
-Three tiers
+Four tiers
 -----------
 - **safe**: conservative reservations. Best for long-context sessions
   (>64k tokens) and users who prefer "it just works" over peak speed.
@@ -15,6 +15,12 @@ Three tiers
 - **throughput**: aggressive reservations. Optimised for short-context
   inference (~32k) where you want every available expert layer to sit
   in VRAM. Trades context headroom for tokens-per-second.
+- **low_vram**: the LOW-VRAM / high-RAM escape hatch (e.g. 8 GB VRAM,
+  64 GB RAM). Forces the KV cache into system RAM via ``--no-kv-offload``
+  so context is drawn from abundant system memory instead of scarce
+  VRAM. The only tier that lets a 20 GB MoE reach 90k+ context on a
+  GPU that can barely hold the experts. Trades generation speed for
+  context — attention compute follows the KV onto the CPU.
 
 Resolution priority (highest wins)
 ----------------------------------
@@ -80,7 +86,28 @@ class PerformanceTarget:
     #   throughput  1  — single-user, every token as fast as possible
     #   balanced    2  — dual-user or light agentic workflows
     #   safe        4  — traditional multi-slot, long-context sessions
+    #   low_vram    1  — single slot, every spare RAM byte goes to KV
     n_parallel: int = 1
+
+    # -- LOW-VRAM escape hatch (``low_vram`` tier only).
+    # When True, compute_config moves the *entire* KV cache into system
+    # RAM by emitting ``--no-kv-offload`` (attention compute follows the
+    # KV onto the CPU). This is the one lever that gives a low-VRAM /
+    # high-RAM box a usable long context on a model whose KV would never
+    # fit in the leftover VRAM. It trades generation speed for context:
+    # attention reads/writes KV over the host-memory bus instead of VRAM.
+    #
+    # Only meaningful when there IS a GPU (CPU-only configs already keep
+    # the KV in RAM). Existing tiers keep the default False, so high-end
+    # systems on safe/balanced/throughput are completely unaffected.
+    kv_to_ram: bool = False
+
+    # Upper bound (GB) on RAM-resident KV when ``kv_to_ram`` is active.
+    # Caps the context the tuner will promise from system RAM; the
+    # model's native_ctx is a separate (usually lower) ceiling. Chosen
+    # generously so abundant system RAM is effectively the only KV
+    # limit, while still leaving headroom for the model weights and OS.
+    kv_ram_cap_gb: float = 32.0
 
     def __str__(self) -> str:  # pragma: no cover — trivial
         return self.name
@@ -145,6 +172,36 @@ PERFORMANCE_TARGETS: Dict[str, PerformanceTarget] = {
             "context or multi-user setups."
         ),
     ),
+    "low_vram": PerformanceTarget(
+        name="low_vram",
+        moe_vram_safety_gb=0.15,
+        # KV lives in system RAM (kv_to_ram below), so we do NOT reserve
+        # VRAM for it during MoE placement — only a token 4k reservation
+        # so the placement heuristic's formula stays positive. Every
+        # spare MB of VRAM goes to expert weights instead, maximising
+        # how many experts run on the GPU before spilling to CPU.
+        moe_placement_ctx_target=4096,
+        dense_vram_safety_gb=0.15,
+        ram_safety_gb=1.00,
+        # 1024/1024 keeps the compute buffer small — on a low-VRAM card
+        # every MB matters, and prompt-processing throughput is already
+        # limited by CPU-resident experts + CPU attention.
+        moe_hybrid_batch=1024,
+        moe_hybrid_ubatch=1024,
+        # Single slot: the whole point is maximising per-slot context,
+        # so the KV budget is not divided across slots.
+        n_parallel=1,
+        # The defining lever: force the KV cache into system RAM.
+        kv_to_ram=True,
+        kv_ram_cap_gb=32.0,
+        description=(
+            "Max context for low-VRAM / high-RAM systems (e.g. 8 GB VRAM, "
+            "64 GB RAM). KV cache moves to system RAM (--no-kv-offload), "
+            "trading generation speed for far larger context — the only "
+            "way to reach 90k+ on a 20 GB MoE that barely fits the GPU. "
+            "Single parallel slot."
+        ),
+    ),
 }
 
 DEFAULT_TARGET_NAME = "balanced"
@@ -155,8 +212,13 @@ DEFAULT_TARGET_NAME = "balanced"
 
 
 def list_target_names() -> List[str]:
-    """Return target names in display order (safe → balanced → throughput)."""
-    return ["safe", "balanced", "throughput"]
+    """Return target names in display order.
+
+    safe → balanced → throughput → low_vram. The first three are the
+    performance tiers; ``low_vram`` is a special-purpose escape hatch
+    kept last so it never changes the default selection (``balanced``).
+    """
+    return ["safe", "balanced", "throughput", "low_vram"]
 
 
 def get_target(name: str) -> Optional[PerformanceTarget]:

@@ -897,7 +897,7 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--performance-target",
         choices=list_target_names(),
         default=None,
-        metavar="{safe,balanced,throughput}",
+        metavar="{safe,balanced,throughput,low_vram}",
         help="VRAM utilisation preset. Overrides any 'performance_target:' "
         "in the YAML profile. Tiers:\n" + describe_targets(),
     )

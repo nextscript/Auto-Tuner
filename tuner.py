@@ -432,6 +432,13 @@ class TunedConfig:
 
     no_context_shift: bool = False
 
+    # True when the KV cache is forced into system RAM via
+    # --no-kv-offload (the LOW-VRAM / ``low_vram`` perf-target lever).
+    # Set by compute_config when the resolved PerformanceTarget has
+    # kv_to_ram=True and there is a GPU to offload FROM. Trades
+    # generation speed for context headroom drawn from system RAM.
+    no_kv_offload: bool = False
+
     # RoPE-Scaling: aktiviert wenn ctx > native_ctx und YaRN/rope-scaling
     # verwendet werden soll (optional, nur für Modelle die es unterstützen).
     rope_scaling: bool = False
@@ -1056,6 +1063,13 @@ def compute_config(
     free_ram_after = max(0.0, system.free_ram_gb - ram_safety_gb - model_ram)
 
     # KV-cache placement rules:
+    #   - kv_to_ram (low_vram): the ENTIRE KV cache lives in system RAM via
+    #     --no-kv-offload, regardless of model type. Attention compute
+    #     follows the KV onto the CPU. This is the LOW-VRAM escape hatch —
+    #     it lets an 8 GB-VRAM / 64 GB-RAM box reach 90k+ context on a
+    #     20 GB MoE whose KV would never fit in the leftover VRAM. The
+    #     experts are already mostly on CPU (--n-cpu-moe), so the marginal
+    #     cost is slower attention, paid back with huge context headroom.
     #   - MoE on GPU: KV must live in VRAM only. The Vulkan backend
     #     crashes with GGML_ASSERT(addr) when MoE KV spills to RAM.
     #   - Dense full-offload: KV in VRAM only (it's already on GPU).
@@ -1077,7 +1091,15 @@ def compute_config(
     # uncapped formula.
     HYBRID_KV_RAM_CAP_GB = 4.0
 
-    if is_moe and has_gpu:
+    no_kv_offload = False
+    if perf_target.kv_to_ram and has_gpu:
+        # LOW-VRAM mode: KV cache → system RAM via --no-kv-offload.
+        # Budget is the RAM headroom (capped by the tier), NOT the VRAM
+        # remainder — with KV offload disabled, no KV lands in VRAM.
+        ram_kv = min(free_ram_after, perf_target.kv_ram_cap_gb)
+        kv_budget_gb = ram_kv
+        no_kv_offload = True
+    elif is_moe and has_gpu:
         kv_budget_gb = free_vram_after
     elif full_off:
         # Dense model fully on GPU, but the model may nearly fill VRAM
@@ -1278,11 +1300,16 @@ def compute_config(
     # ---- (3b) VRAM Overcommit Warning
     warning: Optional[str] = None
     if n_cpu_moe is not None or full_off:
-        gpu_total = model_vram + estimated_kv_gb + effective_vram_safety
+        # When --no-kv-offload is active the KV cache lives in system RAM,
+        # so it must NOT count toward the VRAM overcommit check (otherwise
+        # every low_vram run would false-positive a "VRAM budget tight"
+        # warning for KV that isn't even on the GPU).
+        vram_kv_component = 0.0 if no_kv_offload else estimated_kv_gb
+        gpu_total = model_vram + vram_kv_component + effective_vram_safety
         if gpu_total > free_vram * 0.98:
             warning = (
                 f"VRAM budget tight: model {model_vram:.1f} GB + KV "
-                f"{estimated_kv_gb:.1f} GB + safety "
+                f"{vram_kv_component:.1f} GB + safety "
                 f"{effective_vram_safety:.1f} GB ≈ {gpu_total:.1f} GB of "
                 f"{free_vram:.1f} GB free."
             )
@@ -1686,10 +1713,13 @@ def compute_config(
     no_context_shift = (ctx >= 32768) or full_off
 
     # ---- KV split between VRAM and RAM for display fidelity -----------
-    # Mirrors the budget logic in step (2): MoE/full_off keep KV on GPU
-    # entirely; dense-hybrid splits proportionally to the layer split;
-    # CPU-only keeps it all in RAM.
-    if is_moe and has_gpu:
+    # Mirrors the budget logic in step (2): no_kv_offload puts ALL KV in
+    # RAM; MoE/full_off keep KV on GPU entirely; dense-hybrid splits
+    # proportionally to the layer split; CPU-only keeps it all in RAM.
+    if no_kv_offload:
+        kv_vram_gb = 0.0
+        kv_ram_gb = estimated_kv_gb
+    elif is_moe and has_gpu:
         kv_vram_gb = estimated_kv_gb
         kv_ram_gb = 0.0
     elif full_off:
@@ -1743,6 +1773,7 @@ def compute_config(
         kv_ram_gb=kv_ram_gb,
         kv_quant_strategy=kv_quant_strategy,
         no_context_shift=no_context_shift,
+        no_kv_offload=no_kv_offload,
         rope_scaling=rope_scaling_active,
         rope_scale_factor=float(profile_rope_factor) if rope_scaling_active else 1.0,
         performance_target=perf_target.name,
@@ -2262,6 +2293,13 @@ def build_command(
         cmd.append("--no-mmap")
     if config.no_context_shift:
         cmd.append("--no-context-shift")
+    # LOW-VRAM lever (low_vram perf-target): keep the KV cache in system
+    # RAM instead of offloading it to VRAM. Attention compute follows
+    # onto the CPU, so this trades generation speed for the context
+    # headroom drawn from abundant system RAM. Confirmed flag on
+    # llama-server (b9334+, present in current mainline).
+    if config.no_kv_offload:
+        cmd.append("--no-kv-offload")
 
     # RoPE-Scaling (YaRN) optional aktivieren für erweiterte Context-Längen
     # Bei Qwen3.5/3.6 möglich: native 262144 → bis 1048576 mit yarn scaling

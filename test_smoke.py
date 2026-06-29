@@ -1122,21 +1122,32 @@ def test_ternary_bonsai_pattern_beats_regular_bonsai() -> None:
 # Performance targets
 
 
-def test_performance_target_registry_has_three_tiers() -> None:
-    """Sanity: the three documented tiers exist and are well-ordered."""
+def test_performance_target_registry_has_four_tiers() -> None:
+    """Sanity: the documented tiers exist and are well-ordered.
+
+    The first three (safe / balanced / throughput) are the performance
+    tiers; ``low_vram`` is a special-purpose LOW-VRAM escape hatch kept
+    last so it never shifts the default (``balanced``).
+    """
     from performance_target import PERFORMANCE_TARGETS, list_target_names
 
     names = list_target_names()
-    assert names == ["safe", "balanced", "throughput"]
+    assert names == ["safe", "balanced", "throughput", "low_vram"]
     safe = PERFORMANCE_TARGETS["safe"]
     bal = PERFORMANCE_TARGETS["balanced"]
     thr = PERFORMANCE_TARGETS["throughput"]
+    lv = PERFORMANCE_TARGETS["low_vram"]
     # KV reservation should shrink monotonically: safe ≥ balanced ≥ throughput
     assert safe.moe_placement_ctx_target >= bal.moe_placement_ctx_target
     assert bal.moe_placement_ctx_target >= thr.moe_placement_ctx_target
     # Same for VRAM safety bands
     assert safe.moe_vram_safety_gb >= bal.moe_vram_safety_gb
     assert bal.moe_vram_safety_gb >= thr.moe_vram_safety_gb
+    # kv_to_ram is the defining lever of the low_vram tier, and ONLY it.
+    assert lv.kv_to_ram is True
+    assert PERFORMANCE_TARGETS["safe"].kv_to_ram is False
+    assert PERFORMANCE_TARGETS["balanced"].kv_to_ram is False
+    assert PERFORMANCE_TARGETS["throughput"].kv_to_ram is False
 
 
 def test_resolve_performance_target_priority() -> None:
@@ -1221,6 +1232,88 @@ def test_throughput_places_more_moe_layers_on_gpu_than_safe(tmp_path) -> None:
     # And the metadata field round-trips into TunedConfig
     assert cfg_safe.performance_target == "safe"
     assert cfg_thr.performance_target == "throughput"
+
+
+def test_low_vram_unlocks_huge_context_on_tiny_gpu(tmp_path) -> None:
+    """The LOW-VRAM colleague scenario: 8 GB VRAM, 64 GB RAM, a 20 GB MoE.
+
+    With the default (balanced) tier the MoE KV budget is VRAM-only, so
+    the leftover VRAM after expert placement throttles context to a few
+    thousand tokens — useless for agentic coding (needs 90-130k). The
+    ``low_vram`` tier moves the KV cache into system RAM via
+    --no-kv-offload, drawing context headroom from the abundant RAM
+    instead, and must reach dramatically higher context.
+    """
+    from performance_target import PERFORMANCE_TARGETS
+    from scanner import ModelEntry
+
+    p = tmp_path / "Qwen3-30B-A3B-Q4_K_M.gguf"
+    _write_minimal_gguf(p)
+    model = ModelEntry(
+        path=p,
+        name="Qwen3-30B-A3B-Q4_K_M",
+        group=".",
+        size_bytes=int(20.0 * 1024**3),
+        metadata={
+            "general.architecture": "qwen3moe",
+            "qwen3moe.expert_count": 128,
+            "qwen3moe.block_count": 48,
+            "qwen3moe.context_length": 262144,
+            "qwen3moe.attention.head_count_kv": 8,
+            "qwen3moe.attention.key_length": 128,
+            "qwen3moe.attention.value_length": 128,
+        },
+    )
+
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    # 8 GB VRAM (~7.4 GB free), 64 GB RAM (~58 GB free).
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg_bal = compute_config(
+        model, sys_info, profile, perf_target=PERFORMANCE_TARGETS["balanced"]
+    )
+    cfg_lv = compute_config(
+        model, sys_info, profile, perf_target=PERFORMANCE_TARGETS["low_vram"]
+    )
+
+    # low_vram must unlock context an order of magnitude larger — enough
+    # for agentic coding (>= 90k), and here capped by the model's native
+    # 262k rather than by RAM.
+    assert cfg_lv.ctx >= 90000, f"low_vram ctx too small: {cfg_lv.ctx}"
+    assert cfg_lv.ctx > cfg_bal.ctx * 5, (
+        f"low_vram should beat balanced by >5×; "
+        f"balanced={cfg_bal.ctx}, low_vram={cfg_lv.ctx}"
+    )
+    # The lever is active and the KV cache is accounted as RAM-resident.
+    assert cfg_lv.no_kv_offload is True
+    assert cfg_lv.kv_ram_gb > 1.0 and cfg_lv.kv_vram_gb < 0.1
+    # balanced is untouched by the new path (no regression on the default).
+    assert cfg_bal.no_kv_offload is False
+
+    # build_command must emit the actual flag.
+    cmd = build_command(model, cfg_lv, profile, server_binary="llama-server")
+    assert "--no-kv-offload" in cmd
+    # And it composes with --n-cpu-moe (experts on CPU, KV in RAM).
+    assert "--n-cpu-moe" in cmd
+
+
+def test_low_vram_does_not_regress_high_end_gpu(tmp_path) -> None:
+    """On a comfortable GPU the default tiers must be byte-for-byte
+    unchanged by the low_vram addition: no_kv_offload stays False for
+    safe / balanced / throughput, so their KV budget path is untouched."""
+    from performance_target import PERFORMANCE_TARGETS
+
+    model = _fake_model(tmp_path, "Qwen3-30B-A3B-Q4_K_M", size_gb=20.0)
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=16, vram_free=15)
+
+    for tier in ("safe", "balanced", "throughput"):
+        cfg = compute_config(
+            model, sys_info, profile, perf_target=PERFORMANCE_TARGETS[tier]
+        )
+        assert cfg.no_kv_offload is False, f"{tier} must not enable --no-kv-offload"
 
 
 def test_perf_target_default_balanced_when_profile_has_none(tmp_path) -> None:

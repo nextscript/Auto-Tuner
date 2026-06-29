@@ -3076,6 +3076,14 @@ class MainWindow(QMainWindow):
         ]
         if cfg.mlock:
             lines.append("mlock           : on")
+        if cfg.no_kv_offload:
+            # LOW-VRAM lever (low_vram perf-target): the KV cache lives in
+            # system RAM, attention compute runs on CPU. Surface it so the
+            # user understands why context is huge but generation is slower.
+            lines.append(
+                "KV in RAM       : on (--no-kv-offload)  "
+                "[slower gen, max context]"
+            )
         if cfg.rope_scaling:
             lines.append(f"RoPE scaling    : on (factor {cfg.rope_scale_factor:.1f}×)")
         s = cfg.sampling
@@ -3127,6 +3135,24 @@ class MainWindow(QMainWindow):
             lines.append(f"  Total CPU : ~{total_cpu:5.1f} GB")
         if cfg.warning:
             lines.append(f"  ⚠ {cfg.warning}")
+        # Discoverability nudge for the LOW-VRAM escape hatch. On a small
+        # GPU where the current tier can only squeeze out a sub-agentic
+        # context (<32k) while the box has plenty of RAM, point the user at
+        # the low_vram Performance preset — it moves the KV cache into
+        # system RAM and typically unlocks an order of magnitude more
+        # context. Only shown when the user is NOT already on low_vram, so
+        # it never nags once they've opted in.
+        if (
+            not cfg.no_kv_offload
+            and self._system is not None
+            and self._system.total_vram_gb <= 12
+            and self._system.free_ram_gb >= 16
+            and cfg.ctx < 32768
+        ):
+            lines.append(
+                "  💡 Low VRAM? Try Performance → low_vram — moves the KV "
+                "cache into RAM for far larger context (slower gen)."
+            )
         lines.append(bar)
 
         self._config_preview.setPlainText("\n".join(lines))
