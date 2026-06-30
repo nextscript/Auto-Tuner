@@ -357,6 +357,16 @@ that only make sense with persistent state:
   dropdown; the choices survive switching to another model and back,
   swapping performance targets, and restarting the app. Stored in
   `autotuner_settings.json` under `model_overrides` and `mmproj_selection`.
+- **Expert settings are saved per model (autosave).** Every edit you make
+  in the Expert panel — Auto-cascade pins *or* a full Manual setup — is
+  debounced-saved under `expert_overrides` keyed by model name and applied
+  automatically the next time you select that model (just like the
+  checkbox overrides above), so a low-VRAM hand-tuning never has to be
+  re-entered. Auto-mode saves adapt to the current VRAM on launch
+  (re-cascaded from the saved pins); Manual-mode saves are applied as the
+  exact frozen values (the launch VRAM fit-check still gates them). The
+  **⟲ Reset** button next to *Auto* / *Manual* drops the saved state for
+  the current model and reloads the AutoTuner's automatically-best config.
 - **Run several models at once.** Launch stays enabled while servers are
   running — each new model is placed on the **emptier GPU** and given the
   **next free port** (1234, 1235, 1236, …). Stop a server and its port is

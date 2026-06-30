@@ -23,7 +23,12 @@ sys.path.insert(0, str(ROOT))
 from hardware import GPUInfo, SystemInfo, detect_system, format_system  # noqa: E402
 from scanner import group_entries, scan_models, metadata_has_embedded_mtp  # noqa: E402
 from settings_loader import load_profiles, match_profile  # noqa: E402
-from tuner import build_command, compute_config, extract_params_billion  # noqa: E402
+from tuner import (  # noqa: E402
+    build_command,
+    compute_config,
+    extract_params_billion,
+    TunedConfig,
+)
 
 
 SETTINGS_DIR = ROOT / "settings"
@@ -2529,4 +2534,394 @@ def test_agentworld_overrides_qwen35_chat_settings() -> None:
     # indistinguishable from plain Qwen3.5-A3B and correctly lands on the
     # qwen3.5 profile via its arch_fallback — not on AgentWorld.
     assert "Qwen3.5 / Qwen3.6" in p("some-a3b-moe-requant.gguf").display_name
+
+
+# ---------------------------------------------------------------------------
+# Expert-panel per-model persistence (autosave + Reset)
+#
+# A low-VRAM user reported having to re-enter their manual Expert settings
+# on every launch. We now persist the full Expert state per model and
+# apply it automatically (like the vision/draft/thinking checkbox
+# overrides), with a Reset button to revert to Auto. These tests pin the
+# storage round-trip and the value↔config translation that the live panel
+# and the disk-restore path share.
+
+
+@pytest.fixture
+def _isolated_settings(tmp_path, monkeypatch):
+    """Point app_settings at a throwaway JSON file for the duration of a test."""
+    import app_settings
+
+    target = tmp_path / "autotuner_settings.json"
+    monkeypatch.setattr(app_settings, "_settings_file", lambda: target)
+    return target
+
+
+def test_expert_override_round_trip(_isolated_settings) -> None:
+    import app_settings
+
+    assert app_settings.get_expert_override("MyModel") is None
+
+    snap = {
+        "mode": "manual",
+        "pins": {},
+        "values": {"ctx": 32768, "cache_k": "q8_0", "threads": 8},
+        "saved_at": "2026-06-30T12:00:00",
+    }
+    app_settings.set_expert_override("MyModel", snap)
+    got = app_settings.get_expert_override("MyModel")
+    assert got is not None
+    assert got["mode"] == "manual"
+    assert got["values"]["ctx"] == 32768
+    assert got["values"]["cache_k"] == "q8_0"
+
+    # Clearing removes it (Reset button).
+    app_settings.clear_expert_override("MyModel")
+    assert app_settings.get_expert_override("MyModel") is None
+
+
+def test_expert_override_isolated_per_model(_isolated_settings) -> None:
+    """Two models keep independent Expert states."""
+    import app_settings
+
+    app_settings.set_expert_override("A", {"mode": "auto", "values": {"ctx": 4096}})
+    app_settings.set_expert_override("B", {"mode": "manual", "values": {"ctx": 131072}})
+    assert app_settings.get_expert_override("A")["values"]["ctx"] == 4096
+    assert app_settings.get_expert_override("B")["values"]["ctx"] == 131072
+    # Clearing one leaves the other intact.
+    app_settings.clear_expert_override("A")
+    assert app_settings.get_expert_override("A") is None
+    assert app_settings.get_expert_override("B")["values"]["ctx"] == 131072
+
+
+def test_expert_override_rejects_invalid_snapshot(_isolated_settings) -> None:
+    """A snapshot missing mode/values must never land on disk."""
+    import app_settings
+
+    app_settings.set_expert_override("Bad", {"mode": "manual"})  # no 'values'
+    app_settings.set_expert_override("Bad2", {"values": {}})  # no 'mode'
+    app_settings.set_expert_override("Bad3", "not-a-dict")  # wrong type
+    assert app_settings.get_expert_override("Bad") is None
+    assert app_settings.get_expert_override("Bad2") is None
+    assert app_settings.get_expert_override("Bad3") is None
+
+
+def test_expert_override_survives_corrupt_blob(_isolated_settings) -> None:
+    """A structurally invalid entry on disk is treated as missing, not a crash."""
+    import app_settings
+
+    # Write a blob whose entry for 'X' is the wrong shape.
+    _isolated_settings.write_text('{"expert_overrides": {"X": "garbage"}}', encoding="utf-8")
+    assert app_settings.get_expert_override("X") is None
+    # A valid entry next to it still loads.
+    app_settings.set_expert_override("Y", {"mode": "auto", "values": {"ctx": 8192}})
+    assert app_settings.get_expert_override("Y")["values"]["ctx"] == 8192
+
+
+def test_expert_override_empty_name_noop(_isolated_settings) -> None:
+    import app_settings
+
+    app_settings.set_expert_override("", {"mode": "auto", "values": {}})
+    app_settings.clear_expert_override("")
+    assert app_settings.get_expert_override("") is None
+
+
+# ---- Expert value ↔ config translation (shared by live panel + disk) -------
+
+
+def test_reasoning_flags_from_values_mapping() -> None:
+    """auto→none, off→--reasoning off, <level>→kwargs, budget≥0→--reasoning-budget."""
+    from qt_launcher import _reasoning_flags_from_values
+
+    assert _reasoning_flags_from_values("auto", -1) == []
+    assert _reasoning_flags_from_values("off", -1) == ["--reasoning", "off"]
+    flags = _reasoning_flags_from_values("high", -1)
+    assert flags == ["--chat-template-kwargs", '{"reasoning_effort":"high"}']
+    # Think budget emits the b9625+ flag name.
+    assert _reasoning_flags_from_values("auto", 2048) == [
+        "--reasoning-budget",
+        "2048",
+    ]
+    # off + budget compose.
+    assert _reasoning_flags_from_values("off", 0) == [
+        "--reasoning",
+        "off",
+        "--reasoning-budget",
+        "0",
+    ]
+    # Defensive: junk budget falls back to -1 (no flag).
+    assert _reasoning_flags_from_values("auto", "oops") == []
+
+
+def test_expert_extras_assembles_all_flag_sources() -> None:
+    """jinja + verbose + reasoning dropdown + free text all land in extras."""
+    from qt_launcher import _expert_extras_from_values
+
+    vals = {
+        "jinja": True,
+        "verbose": True,
+        "reasoning": "medium",
+        "think_budget": 512,
+        "extras": "--some-flag value",
+    }
+    out = _expert_extras_from_values(vals)
+    assert out[0] == "--jinja"
+    assert out[1] == "--verbose"
+    assert "--chat-template-kwargs" in out
+    assert '{"reasoning_effort":"medium"}' in out
+    assert "--reasoning-budget" in out and "512" in out
+    assert "--some-flag" in out and "value" in out
+
+
+def _base_cfg(tmp_path) -> TunedConfig:
+    """A real TunedConfig to feed the value helpers."""
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    sysinfo = _fake_system()
+    profile = match_profile(model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", ""))
+    cfg = compute_config(model=model, system=sysinfo, profile=profile)
+    assert cfg is not None
+    return cfg
+
+
+def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
+    """Cascading fields (ctx/KV/ngl/n_cpu_moe/rope) must be left to compute_config."""
+    from qt_launcher import apply_expert_values
+
+    base = _base_cfg(tmp_path)
+    orig_ctx = base.ctx
+    orig_k = base.cache_k
+    orig_ngl = base.ngl
+
+    vals = {
+        "ctx": 999999,          # must be IGNORED by apply_expert_values
+        "cache_k": "f16",       # must be IGNORED
+        "ngl": 0,               # must be IGNORED
+        "threads": 42,          # must be APPLIED
+        "ubatch": 1234,         # must be APPLIED
+        "flash_attn": True,
+        "mlock": True,
+        "numa": "isolate",
+        "temperature": 0.33,
+        "top_k": 7,
+        "reasoning": "off",
+        "think_budget": 100,
+        "extras": "--jinja",
+    }
+    out = apply_expert_values(base, vals)
+    # Cascading untouched
+    assert out.ctx == orig_ctx
+    assert out.cache_k == orig_k
+    assert out.ngl == orig_ngl
+    # Non-cascading applied
+    assert out.threads == 42
+    assert out.ubatch == 1234
+    assert out.flash_attn is True
+    assert out.mlock is True
+    assert out.numa == "isolate"
+    assert out.sampling["temperature"] == 0.33
+    assert out.sampling["top_k"] == 7
+    assert "--jinja" in out.extra_cli_flags
+    assert "--reasoning" in out.extra_cli_flags  # from reasoning=off
+
+
+def test_expert_cfg_from_values_is_frozen_manual(tmp_path) -> None:
+    """expert_cfg_from_values sets EVERY field (incl. cascading) from the snapshot."""
+    from qt_launcher import expert_cfg_from_values
+
+    base = _base_cfg(tmp_path)
+    vals = {
+        "ctx": 65536,
+        "cache_k": "q5_0",
+        "cache_v": "q4_0",
+        "ngl": 17,
+        "n_cpu_moe": 3,
+        "threads": 5,
+        "ubatch": 256,
+        "rope_scaling": True,
+        "rope_factor": 2.0,
+        "flash_attn": False,
+        "numa": "off",
+        "temperature": 0.8,
+        "top_k": 40,
+        "reasoning": "auto",
+        "think_budget": -1,
+        "extras": "",
+    }
+    cfg = expert_cfg_from_values(base, vals)
+    assert cfg.ctx == 65536
+    assert cfg.cache_k == "q5_0"
+    assert cfg.cache_v == "q4_0"
+    assert cfg.ngl == 17
+    assert cfg.n_cpu_moe == 3
+    assert cfg.threads == 5
+    assert cfg.ubatch == 256
+    assert cfg.rope_scaling is True
+    assert cfg.rope_scale_factor == 2.0
+    assert cfg.flash_attn is False
+    assert cfg.numa is None  # 'off' → None
+    assert cfg.sampling["temperature"] == 0.8
+    assert cfg.kv_quant_strategy == "manual"
+    # Unmodelled fields inherited from base (the build must stay complete).
+    assert cfg.env_overrides == base.env_overrides
+
+
+def test_expert_cfg_from_values_tolerates_partial_snapshot(tmp_path) -> None:
+    """A snapshot missing some keys falls back to the base value (defensive)."""
+    from qt_launcher import expert_cfg_from_values
+
+    base = _base_cfg(tmp_path)
+    # Only ctx provided — everything else defaults from base.
+    cfg = expert_cfg_from_values(base, {"ctx": 2048})
+    assert cfg.ctx == 2048
+    assert cfg.cache_k == base.cache_k
+    assert cfg.threads == base.threads
+
+
+def test_manual_config_helper_matches_disk_restore(tmp_path) -> None:
+    """Round-trip: live-manual build and disk-restore build must agree.
+
+    This is the invariant that keeps the on-screen panel and the
+    no-panel launch path from drifting apart: both translate a values
+    dict via the same helpers, so a model launches with exactly what the
+    user last saw.
+    """
+    from qt_launcher import expert_cfg_from_values
+
+    base = _base_cfg(tmp_path)
+    vals = {
+        "ctx": 32768,
+        "cache_k": "q8_0",
+        "cache_v": "q8_0",
+        "ngl": 999,
+        "n_cpu_moe": 0,
+        "threads": 12,
+        "batch_threads": 12,
+        "batch": 2048,
+        "ubatch": 512,
+        "flash_attn": True,
+        "mlock": False,
+        "no_mmap": False,
+        "jinja": True,
+        "verbose": False,
+        "numa": "off",
+        "rope_scaling": False,
+        "rope_factor": 1.0,
+        "temperature": 0.7,
+        "top_k": 40,
+        "top_p": 0.9,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+        "presence_penalty": 0.0,
+        "reasoning": "high",
+        "think_budget": -1,
+        "extras": "",
+    }
+    cfg = expert_cfg_from_values(base, vals)
+    # Re-applying the same snapshot must be idempotent.
+    cfg2 = expert_cfg_from_values(base, vals)
+    assert cfg.ctx == cfg2.ctx
+    assert cfg.extra_cli_flags == cfg2.extra_cli_flags
+    assert '--chat-template-kwargs' in cfg.extra_cli_flags
+    assert "--jinja" in cfg.extra_cli_flags
+
+
+# ---------------------------------------------------------------------------
+# Auto-mode context pin round-trip (the low-VRAM "stay in Auto, remember
+# my context" use case). A user who keeps the Expert panel in Auto mode and
+# only nudges the context slider expects that value to be restored next time
+# AND applied at launch — without having to switch to Manual.
+
+
+def _auto_override_for_ctx(pinned_ctx: int) -> dict:
+    """Build the exact snapshot ExpertPanel._make_snapshot() emits when the
+    user pins a context in Auto mode (mode=auto, pins={'user_ctx': N})."""
+    return {
+        "mode": "auto",
+        "pins": {"user_ctx": pinned_ctx},
+        "values": {"ctx": pinned_ctx, "threads": 8, "temperature": 0.7},
+        "saved_at": "2026-06-30T12:00:00",
+    }
+
+
+def test_auto_ctx_pin_re_cascades_through_compute_config(tmp_path) -> None:
+    """A saved Auto-mode ctx pin must re-flow through compute_config at launch.
+
+    This is the heart of the _effective_config() Auto branch: the pin is
+    NOT a frozen value — it is re-cascaded so it adapts to the current VRAM
+    / checkbox state. We prove it by showing compute_config(user_ctx=N)
+    produces the pinned context (when it fits), and that this is exactly
+    what the saved override drives.
+    """
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    sysinfo = _fake_system()
+    profile = match_profile(
+        model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+    )
+
+    base = compute_config(model=model, system=sysinfo, profile=profile)
+    assert base is not None
+
+    # Pin a SMALLER context than the auto default to avoid VRAM clamping —
+    # compute_config will always honour a pin it can fit.
+    pinned = max(2048, base.ctx // 2)
+    pinned_cfg = compute_config(
+        model=model, system=sysinfo, profile=profile, user_ctx=pinned
+    )
+    assert pinned_cfg is not None
+    assert pinned_cfg.ctx == pinned, (
+        f"user_ctx pin {pinned} not honoured; got ctx={pinned_cfg.ctx}"
+    )
+
+
+# NOTE: The full ExpertPanel round-trip (open panel, edit context, reopen)
+# is exercised by a headless script in development; it is NOT replicated
+# here because instantiating QWidget + QApplication inside pytest hangs on
+# teardown (the suite deliberately avoids live Qt objects). The two pure-
+# Python tests below cover the SAME transformation the panel delegates to:
+# compute_config(user_ctx=N) for the cascade, and apply_expert_values for the
+# non-cascading overlay — i.e. both the Auto-restore and the launch paths.
+
+
+def test_auto_ctx_pin_applied_at_launch_without_panel_open(tmp_path, monkeypatch) -> None:
+    """A saved Auto ctx pin applies at launch even when the Expert panel is
+    closed — via the _effective_config() path.
+
+    We exercise the exact transformation _effective_config performs for an
+    Auto-mode override: re-cascade the base config through compute_config
+    with the saved pins, then overlay the saved non-cascading values. The
+    result must carry the pinned context.
+    """
+    import app_settings
+    from qt_launcher import apply_expert_values
+
+    target = tmp_path / "autotuner_settings.json"
+    monkeypatch.setattr(app_settings, "_settings_file", lambda: target)
+
+    base = _base_cfg(tmp_path)
+    pinned = max(2048, base.ctx // 2)
+
+    # Persist an Auto-mode override pinning the context (what the panel saved).
+    app_settings.set_expert_override("MyModel", _auto_override_for_ctx(pinned))
+
+    # Replay _effective_config's Auto branch by hand (it lives on MainWindow
+    # and reads live checkboxes; here we test the pure cfg transformation it
+    # delegates to, using the real compute_config + apply_expert_values).
+    override = app_settings.get_expert_override("MyModel")
+    pins = {k: v for k, v in (override.get("pins") or {}).items() if v is not None}
+    assert pins == {"user_ctx": pinned}
+
+    model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
+    sysinfo = _fake_system()
+    profile = match_profile(
+        model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+    )
+    cascaded = compute_config(
+        model=model, system=sysinfo, profile=profile, user_ctx=pins["user_ctx"]
+    )
+    assert cascaded is not None
+    cascaded = apply_expert_values(cascaded, override.get("values") or {})
+    assert cascaded.ctx == pinned, (
+        f"launch config lost the pinned context; got {cascaded.ctx}"
+    )
+
     

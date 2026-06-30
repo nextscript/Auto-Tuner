@@ -27,6 +27,9 @@ Public API:
     set_port_offset(int)
     get_reasoning_effort(model_name) -> Optional[str]
     set_reasoning_effort(model_name, value)
+    get_expert_override(model_name) -> Optional[dict]   # saved Expert-panel state
+    set_expert_override(model_name, snapshot: dict)
+    clear_expert_override(model_name)
 """
 
 from __future__ import annotations
@@ -230,6 +233,89 @@ def clear_model_overrides(model_name: str) -> None:
     if isinstance(overrides, dict) and model_name in overrides:
         overrides.pop(model_name, None)
         s["model_overrides"] = overrides
+        save_settings(s)
+
+
+# ---------------------------------------------------------------------------
+# Expert-panel state (per model)
+#
+# The Expert panel lets a user override the AutoTuner's decisions for a
+# single model — context length, KV quants, layer placement, threads,
+# sampling, flags, reasoning, … Before this existed the panel started
+# from the auto defaults every time the user (re)opened it, so a low-VRAM
+# user had to re-enter the same hand-tuned settings on every launch.
+#
+# We now persist the full panel state per model so it is restored the
+# next time that model is selected — and applied at launch just like the
+# checkbox overrides above, completing the "remembers everything" story.
+#
+# Schema (stored under "expert_overrides", keyed by model name):
+#   "expert_overrides": {
+#       "Qwen3.5-30B-A3B-UD-Q4_K_XL": {
+#           "mode": "auto",            # "auto" | "manual"
+#           "pins": {                   # auto-mode cascade pins
+##               "user_ctx": 32768,
+#               "force_cache_k": "q8_0"
+#           },
+#           "values": {                 # full widget snapshot (both modes)
+#               "ctx": 32768, "cache_k": "q8_0", …
+#           },
+#           "saved_at": "2026-06-30T12:00:00"
+#       }
+#   }
+#
+# Reset (the new button next to Auto/Manual) simply clears the entry.
+
+def get_expert_override(model_name: str) -> Optional[Dict[str, Any]]:
+    """Return the saved Expert-panel snapshot for ``model_name``, or None.
+
+    The dict (when present) always carries ``mode`` and ``values``; ``pins``
+    and ``saved_at`` are optional. A structurally invalid entry is treated
+    as missing so a corrupt JSON blob never crashes the GUI.
+    """
+    if not model_name:
+        return None
+    raw = load_settings().get("expert_overrides") or {}
+    if not isinstance(raw, dict):
+        return None
+    snap = raw.get(model_name)
+    if not isinstance(snap, dict):
+        return None
+    if "mode" not in snap or "values" not in snap:
+        return None
+    return snap
+
+
+def set_expert_override(model_name: str, snapshot: Dict[str, Any]) -> None:
+    """Persist the Expert-panel snapshot for ``model_name``.
+
+    ``snapshot`` must contain at least ``mode`` and ``values``. ``pins``
+    and ``saved_at`` are preserved when present. An empty/invalid snapshot
+    is ignored rather than written, so a half-built state can never land
+    on disk.
+    """
+    if not model_name:
+        return
+    if not isinstance(snapshot, dict) or "mode" not in snapshot or "values" not in snapshot:
+        return
+    s = load_settings()
+    overrides = s.get("expert_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[model_name] = snapshot
+    s["expert_overrides"] = overrides
+    save_settings(s)
+
+
+def clear_expert_override(model_name: str) -> None:
+    """Drop the saved Expert-panel state for a single model (the Reset button)."""
+    if not model_name:
+        return
+    s = load_settings()
+    overrides = s.get("expert_overrides") or {}
+    if isinstance(overrides, dict) and model_name in overrides:
+        overrides.pop(model_name, None)
+        s["expert_overrides"] = overrides
         save_settings(s)
 
 

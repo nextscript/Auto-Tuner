@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, cast, Tuple
 
@@ -314,6 +315,143 @@ def _clean_model_name(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Expert-panel value helpers (widget-state ↔ config)
+#
+# The Expert panel edits a flat set of widgets (spinboxes, combos,
+# checkboxes, a line edit). Two consumers need the SAME translation
+# logic:
+#
+#   • the live panel — reads widgets, writes a TunedConfig at launch;
+#   • the persisted snapshot — a model's saved Expert state is applied
+#     for preview/launch WITHOUT the panel being open.
+#
+# Factoring the translation into free functions that operate on a plain
+# ``values`` dict (instead of on widgets) lets both paths share one
+# implementation, so the on-screen panel and the disk-restored config
+# can never drift apart.
+#
+# ``values`` keys: ctx, cache_k, cache_v, ngl, n_cpu_moe, threads,
+# batch_threads, batch, ubatch, flash_attn, mlock, no_mmap, jinja,
+# verbose, numa, rope_scaling, rope_factor, temperature, top_k,
+# top_p, min_p, repeat_penalty, presence_penalty, reasoning,
+# think_budget, extras.
+
+
+def _expert_sampling_from_values(vals: dict) -> dict:
+    """Build the sampling dict the launcher expects from a values snapshot."""
+    return {
+        "temperature": float(vals.get("temperature", 0.7)),
+        "top_k": int(vals.get("top_k", 40)),
+        "top_p": float(vals.get("top_p", 0.9)),
+        "min_p": float(vals.get("min_p", 0.05)),
+        "repeat_penalty": float(vals.get("repeat_penalty", 1.05)),
+        "presence_penalty": float(vals.get("presence_penalty", 0.0)),
+    }
+
+
+def _reasoning_flags_from_values(reasoning, think_budget) -> List[str]:
+    """Translate a reasoning-effort label + think budget into CLI flags.
+
+    Mirror of ``ExpertPanel._reasoning_flags_from_widgets`` but driven by
+    plain values so it works for both the live panel and a disk snapshot.
+    See that method for the full mapping rules.
+    """
+    out: List[str] = []
+    choice = str(reasoning or "auto").strip().lower()
+    if choice == "off":
+        out += ["--reasoning", "off"]
+    elif choice and choice != "auto":
+        # "extra_high" intentionally kept with underscore — that's the
+        # spelling Qwen3.6 community templates use.
+        payload = '{"reasoning_effort":"' + choice + '"}'
+        out += ["--chat-template-kwargs", payload]
+    try:
+        budget = int(think_budget if think_budget is not None else -1)
+    except (TypeError, ValueError):
+        budget = -1
+    if budget >= 0:
+        # llama.cpp renamed --think-budget → --reasoning-budget at b9625.
+        out += ["--reasoning-budget", str(budget)]
+    return out
+
+
+def _expert_extras_from_values(vals: dict) -> List[str]:
+    """Rebuild the extra_cli_flags list from a values snapshot."""
+    extras: List[str] = []
+    if vals.get("jinja"):
+        extras.append("--jinja")
+    if vals.get("verbose"):
+        extras.append("--verbose")
+    extras.extend(
+        _reasoning_flags_from_values(vals.get("reasoning", "auto"), vals.get("think_budget", -1))
+    )
+    free = (vals.get("extras") or "").strip()
+    if free:
+        extras.extend(free.split())
+    return extras
+
+
+def apply_expert_values(cfg: TunedConfig, vals: dict) -> TunedConfig:
+    """Overlay the NON-cascading values onto ``cfg`` (in place + returned).
+
+    Used both by the live panel (``_apply_noncascading``) and by the
+    override-aware launch path: after compute_config runs with the saved
+    auto-mode pins, the user's threads / batch / flags / sampling /
+    reasoning choices are stamped back on so they survive the recompute.
+    Cascading fields (ctx, KV quants, ngl, n_cpu_moe, rope) are left
+    untouched — those belong to compute_config.
+    """
+    try:
+        if vals.get("threads"):
+            cfg.threads = int(vals["threads"]) or cfg.threads
+        if vals.get("batch_threads"):
+            cfg.batch_threads = int(vals["batch_threads"]) or cfg.batch_threads
+        if vals.get("batch"):
+            cfg.batch = int(vals["batch"]) or cfg.batch
+        if vals.get("ubatch"):
+            cfg.ubatch = int(vals["ubatch"]) or cfg.ubatch
+        cfg.flash_attn = bool(vals.get("flash_attn", cfg.flash_attn))
+        cfg.mlock = bool(vals.get("mlock", cfg.mlock))
+        cfg.no_mmap = bool(vals.get("no_mmap", cfg.no_mmap))
+        numa_choice = str(vals.get("numa", "off") or "off")
+        cfg.numa = None if numa_choice == "off" else numa_choice
+        cfg.sampling = _expert_sampling_from_values(vals)
+        cfg.extra_cli_flags = _expert_extras_from_values(vals)
+    except Exception:
+        pass
+    return cfg
+
+
+def expert_cfg_from_values(base: TunedConfig, vals: dict) -> TunedConfig:
+    """Build a frozen (manual) TunedConfig from ``base`` + a values snapshot.
+
+    Every editable field is taken from ``vals``; unmodelled fields
+    (tensor_split, main_gpu, env_overrides, VRAM estimates, …) are
+    inherited from ``base`` so the result is still a complete config.
+    This is the disk equivalent of ``ExpertPanel._build_manual_config``.
+    """
+    cfg = copy.copy(base)
+    cfg.ctx = int(vals.get("ctx", base.ctx))
+    cfg.cache_k = str(vals.get("cache_k", base.cache_k))
+    cfg.cache_v = str(vals.get("cache_v", base.cache_v))
+    cfg.ngl = int(vals.get("ngl", base.ngl))
+    try:
+        n_cpu = int(vals.get("n_cpu_moe", 0) or 0)
+    except (TypeError, ValueError):
+        n_cpu = 0
+    cfg.n_cpu_moe = n_cpu if n_cpu > 0 else None
+    cfg.rope_scaling = bool(vals.get("rope_scaling", base.rope_scaling))
+    try:
+        cfg.rope_scale_factor = float(vals.get("rope_factor", base.rope_scale_factor) or 1.0)
+    except (TypeError, ValueError):
+        cfg.rope_scale_factor = float(base.rope_scale_factor or 1.0)
+    # Non-cascading overlay (threads / batch / flags / sampling / reasoning)
+    apply_expert_values(cfg, vals)
+    cfg.kv_quant_strategy = "manual"
+    return cfg
+
+
+# ---------------------------------------------------------------------------
 # Expert panel — editable settings overlay
 # ---------------------------------------------------------------------------
 
@@ -348,6 +486,15 @@ class ExpertPanel(QWidget):
     modeChanged = pyqtSignal(str)  # "auto" | "manual"
     # Emitted when the user clicks the close (×) button.
     closeRequested = pyqtSignal()
+    # Emitted (debounced) with a full panel snapshot whenever the user
+    # edits any Expert widget in either mode, so the parent can persist
+    # the state per model. The snapshot shape is
+    #   {"mode": str, "pins": dict, "values": dict, "saved_at": str}.
+    # Programmatic population (load / reset) does NOT emit this.
+    stateChanged = pyqtSignal(dict)
+    # Emitted when the user clicks the Reset button — the parent clears
+    # the saved override for the current model and reloads pure Auto.
+    resetRequested = pyqtSignal()
 
     # Upstream supports the first six; turbo3/turbo4 only resolve on the
     # TurboQuant forks (TheTom/turboquant_plus, AtomicBot, spiritbuun).
@@ -395,8 +542,27 @@ class ExpertPanel(QWidget):
         # Guard flag — when True we are programmatically setting widget
         # values inside `_populate_from_cfg`, so the valueChanged signals
         # must NOT trigger a recompute (which would either be a no-op
-        # echo or an infinite loop).
+        # echo or an infinite loop) NOR schedule a debounced save (which
+        # would persist the just-loaded state back over itself).
         self._populating = False
+
+        # Debounced auto-save. Any real user edit (in either mode) arms a
+        # single-shot 300 ms timer; when it fires we emit `stateChanged`
+        # with a fresh snapshot so the parent can persist it per model.
+        # 300 ms collapses a spinbox drag / rapid typing into one write.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(300)
+        self._save_timer.timeout.connect(self._emit_state_changed)
+
+        # Transient "✓ gespeichert" confirmation. Shown briefly after a
+        # real save fires (so the user sees their tweak is remembered),
+        # then auto-hidden. The hide timer is single-shot so a rapid
+        # follow-up edit just re-shows + re-schedules the hide.
+        self._hide_saved_timer = QTimer(self)
+        self._hide_saved_timer.setSingleShot(True)
+        self._hide_saved_timer.setInterval(1500)
+        self._hide_saved_timer.timeout.connect(self._hide_saved)
 
         # ── Mode toggle row + close button ─────────────────────────────
         mode_row = QHBoxLayout()
@@ -419,6 +585,26 @@ class ExpertPanel(QWidget):
         )
         self._btn_manual.clicked.connect(lambda: self._set_mode("manual"))
         mode_row.addWidget(self._btn_manual)
+
+        # Reset — drops the saved Expert state for this model and reloads
+        # the AutoTuner's automatically-best config. Sits next to
+        # Auto/Manual so the "back to Auto" path is one click.
+        self._btn_reset = QPushButton("⟲ Reset")
+        self._btn_reset.setToolTip(
+            "Forget the saved Expert settings for this model and reload\n"
+ "the AutoTuner's automatically-best configuration."
+        )
+        self._btn_reset.clicked.connect(self.resetRequested.emit)
+        mode_row.addWidget(self._btn_reset)
+
+        # "✓ gespeichert" flash — confirms a per-model autosave just
+        # landed. Hidden until the first real edit; never shown for
+        # programmatic load / restore / reset (those bypass
+        # `_emit_state_changed` via the `_populating` guard).
+        self._saved_lbl = QLabel("✓ gespeichert")
+        self._saved_lbl.setStyleSheet("color:#6c6;font-style:italic;")
+        self._saved_lbl.setVisible(False)
+        mode_row.addWidget(self._saved_lbl)
 
         mode_row.addStretch(1)
 
@@ -689,6 +875,32 @@ class ExpertPanel(QWidget):
         grid.setRowStretch(row, 1)
         self._widgets_created = True
 
+        # ── Autosave wiring ───────────────────────────────────────────
+        # Every editable widget schedules a debounced snapshot persist,
+        # independent of whether it is a cascading widget (those ALSO
+        # drive `_on_edit` → recompute). The `_populating` guard inside
+        # `_schedule_save` keeps programmatic population (load / reset)
+        # from firing a spurious save.
+        for sp in (
+            self._sp_ctx, self._sp_ngl, self._sp_ncpumoe, self._sp_threads,
+            self._sp_batch_threads, self._sp_batch, self._sp_ubatch,
+            self._sp_rope_factor, self._sp_temp, self._sp_top_k, self._sp_top_p,
+            self._sp_min_p, self._sp_rep, self._sp_presence, self._sp_think_budget,
+        ):
+            sp.valueChanged.connect(self._schedule_save)
+        for cb in (
+            self._cb_cache_k, self._cb_cache_v, self._cb_numa, self._cb_reasoning,
+        ):
+            cb.currentTextChanged.connect(self._schedule_save)
+        for chk in (
+            self._chk_fa, self._chk_mlock, self._chk_no_mmap, self._chk_jinja,
+            self._chk_verbose, self._chk_rope,
+        ):
+            chk.toggled.connect(self._schedule_save)
+        self._le_extra.textChanged.connect(self._schedule_save)
+        self._btn_auto.clicked.connect(self._schedule_save)
+        self._btn_manual.clicked.connect(self._schedule_save)
+
     # ------------------------------------------------------------------
     # Mode toggling
     # ------------------------------------------------------------------
@@ -941,87 +1153,14 @@ class ExpertPanel(QWidget):
 
     def _apply_noncascading(self, cfg: TunedConfig) -> TunedConfig:
         """Overlay the widget values that do not feed back into compute_config."""
-        try:
-            cfg.threads = self._sp_threads.value() or cfg.threads
-            cfg.batch_threads = self._sp_batch_threads.value() or cfg.batch_threads
-            cfg.batch = self._sp_batch.value() or cfg.batch
-            cfg.ubatch = self._sp_ubatch.value() or cfg.ubatch
-            cfg.flash_attn = self._chk_fa.isChecked()
-            cfg.mlock = self._chk_mlock.isChecked()
-            cfg.no_mmap = self._chk_no_mmap.isChecked()
-            numa_choice = self._cb_numa.currentText()
-            cfg.numa = None if numa_choice == "off" else numa_choice
-            # Sampling
-            cfg.sampling = {
-                "temperature": float(self._sp_temp.value()),
-                "top_k": int(self._sp_top_k.value()),
-                "top_p": float(self._sp_top_p.value()),
-                "min_p": float(self._sp_min_p.value()),
-                "repeat_penalty": float(self._sp_rep.value()),
-                "presence_penalty": float(self._sp_presence.value()),
-            }
-            # Free-form extras + the two modelled flags + reasoning dropdown
-            extras: List[str] = []
-            if self._chk_jinja.isChecked():
-                extras.append("--jinja")
-            if self._chk_verbose.isChecked():
-                extras.append("--verbose")
-            extras.extend(self._reasoning_flags_from_widgets())
-            free = self._le_extra.text().strip()
-            if free:
-                extras.extend(free.split())
-            cfg.extra_cli_flags = extras
-        except Exception:
-            pass
-        return cfg
+        return apply_expert_values(cfg, self._widgets_to_values())
 
     def _build_manual_config(self) -> Optional[TunedConfig]:
         """Construct a TunedConfig from widget values without compute_config."""
         base = self._last_cfg
         if base is None:
             return None
-        # Clone the auto-cfg then overwrite every field with the live widget value.
-        # Using copy() keeps the unmodelled fields (tensor_split, main_gpu, etc.)
-        import copy as _copy
-
-        cfg = _copy.copy(base)
-        cfg.ctx = self._sp_ctx.value()
-        cfg.cache_k = self._cb_cache_k.currentText()
-        cfg.cache_v = self._cb_cache_v.currentText()
-        cfg.ngl = self._sp_ngl.value()
-        n_cpu = self._sp_ncpumoe.value()
-        cfg.n_cpu_moe = n_cpu if n_cpu > 0 else None
-        cfg.threads = self._sp_threads.value()
-        cfg.batch_threads = self._sp_batch_threads.value()
-        cfg.batch = self._sp_batch.value()
-        cfg.ubatch = self._sp_ubatch.value()
-        cfg.flash_attn = self._chk_fa.isChecked()
-        cfg.mlock = self._chk_mlock.isChecked()
-        cfg.no_mmap = self._chk_no_mmap.isChecked()
-        numa_choice = self._cb_numa.currentText()
-        cfg.numa = None if numa_choice == "off" else numa_choice
-        cfg.rope_scaling = self._chk_rope.isChecked()
-        cfg.rope_scale_factor = float(self._sp_rope_factor.value())
-        cfg.sampling = {
-            "temperature": float(self._sp_temp.value()),
-            "top_k": int(self._sp_top_k.value()),
-            "top_p": float(self._sp_top_p.value()),
-            "min_p": float(self._sp_min_p.value()),
-            "repeat_penalty": float(self._sp_rep.value()),
-            "presence_penalty": float(self._sp_presence.value()),
-        }
-        extras: List[str] = []
-        if self._chk_jinja.isChecked():
-            extras.append("--jinja")
-        if self._chk_verbose.isChecked():
-            extras.append("--verbose")
-        extras.extend(self._reasoning_flags_from_widgets())
-        free = self._le_extra.text().strip()
-        if free:
-            extras.extend(free.split())
-        cfg.extra_cli_flags = extras
-        cfg.kv_quant_strategy = "manual"
-        return cfg
+        return expert_cfg_from_values(base, self._widgets_to_values())
 
     # ------------------------------------------------------------------
     # Reasoning helper
@@ -1029,37 +1168,175 @@ class ExpertPanel(QWidget):
     def _reasoning_flags_from_widgets(self) -> List[str]:
         """Translate the two reasoning widgets into llama-server flags.
 
-        Mapping rules:
+        Thin wrapper over the shared ``_reasoning_flags_from_values`` so
+        the live panel and the disk-snapshot path stay in lock-step.
+        See the free function for the full mapping rules:
           dropdown == "auto"   → no flag (let the template decide)
           dropdown == "off"    → --reasoning off  (silence thinking)
           dropdown == anything else → --chat-template-kwargs
                                        '{"reasoning_effort":"<value>"}'
           spinbox  == -1        → no flag
           spinbox  >=  0        → --reasoning-budget <N>
-
-        We emit a SINGLE flat list. Duplicates are harmless because
-        build_cmd de-dupes, but we still avoid emitting "auto" since
-        that means "no override".
         """
-        out: List[str] = []
-        choice = self._cb_reasoning.currentText().strip().lower()
-        if choice == "off":
-            out += ["--reasoning", "off"]
-        elif choice and choice != "auto":
-            # "extra_high" intentionally kept with underscore — that's
-            # the spelling Qwen3.6 community templates use. Builds that
-            # don't recognise it will just ignore the kwarg.
-            payload = '{"reasoning_effort":"' + choice + '"}'
-            out += ["--chat-template-kwargs", payload]
+        return _reasoning_flags_from_values(
+            self._cb_reasoning.currentText(), int(self._sp_think_budget.value())
+        )
 
-        budget = int(self._sp_think_budget.value())
-        if budget >= 0:
-            # llama.cpp renamed --think-budget → --reasoning-budget at
-            # b9625 (the old spelling is gone, not an alias). Emit the
-            # current name; the parser still reads the legacy one back
-            # from older persisted settings.
-            out += ["--reasoning-budget", str(budget)]
-        return out
+    # ------------------------------------------------------------------
+    # Snapshot / autosave / restore
+    # ------------------------------------------------------------------
+    def _widgets_to_values(self) -> dict:
+        """Read every editable widget into a JSON-serialisable values dict.
+
+        This is the single source of truth for both the debounced save
+        (→ ``stateChanged``) and the two config builders
+        (``_apply_noncascading`` / ``_build_manual_config``) via the free
+        helpers, so a widget can never be added without also being
+        persisted.
+        """
+        return {
+            "ctx": self._sp_ctx.value(),
+            "cache_k": self._cb_cache_k.currentText(),
+            "cache_v": self._cb_cache_v.currentText(),
+            "ngl": self._sp_ngl.value(),
+            "n_cpu_moe": self._sp_ncpumoe.value(),
+            "threads": self._sp_threads.value(),
+            "batch_threads": self._sp_batch_threads.value(),
+            "batch": self._sp_batch.value(),
+            "ubatch": self._sp_ubatch.value(),
+            "flash_attn": self._chk_fa.isChecked(),
+            "mlock": self._chk_mlock.isChecked(),
+            "no_mmap": self._chk_no_mmap.isChecked(),
+            "jinja": self._chk_jinja.isChecked(),
+            "verbose": self._chk_verbose.isChecked(),
+            "numa": self._cb_numa.currentText(),
+            "rope_scaling": self._chk_rope.isChecked(),
+            "rope_factor": self._sp_rope_factor.value(),
+            "temperature": self._sp_temp.value(),
+            "top_k": self._sp_top_k.value(),
+            "top_p": self._sp_top_p.value(),
+            "min_p": self._sp_min_p.value(),
+            "repeat_penalty": self._sp_rep.value(),
+            "presence_penalty": self._sp_presence.value(),
+            "reasoning": self._cb_reasoning.currentText(),
+            "think_budget": self._sp_think_budget.value(),
+            "extras": self._le_extra.text().strip(),
+        }
+
+    def _make_snapshot(self) -> dict:
+        """Full persisted state: mode + auto-mode pins + widget values."""
+        return {
+            "mode": self._mode,
+            "pins": {k: v for k, v in self._user_pins.items()},
+            "values": self._widgets_to_values(),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _schedule_save(self, *_) -> None:
+        """Arm the debounced save timer (no-op while populating/resetting).
+
+        Accepts and ignores the signal payload (value/index/text) so it
+        can be connected to every widget signal type uniformly.
+        """
+        if self._populating:
+            return
+        self._save_timer.start()  # (re)starts the 300 ms countdown
+
+    def _emit_state_changed(self) -> None:
+        """Timer fired → emit a fresh snapshot for the parent to persist.
+
+        Also flashes the "✓ gespeichert" confirmation so the user sees
+        their tweak was saved. Guarded by `_populating` so a programmatic
+        load / restore / reset never flashes a false confirmation.
+        """
+        if self._populating:
+            return
+        self.stateChanged.emit(self._make_snapshot())
+        self._flash_saved()
+
+    def _flash_saved(self) -> None:
+        """Show the "✓ gespeichert" label and (re)arm the 1.5 s hide timer."""
+        self._saved_lbl.setVisible(True)
+        self._hide_saved_timer.start()
+
+    def _hide_saved(self) -> None:
+        """Hide timer fired → drop the "gespeichert" confirmation."""
+        self._saved_lbl.setVisible(False)
+
+    def flush_pending_save(self) -> None:
+        """Immediately persist if a debounced save is still pending.
+
+        Called by the parent before it repopulates the panel (model switch,
+        checkbox toggle while open) so an in-flight edit is not lost.
+        """
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._emit_state_changed()
+
+    def restore_from_snapshot(self, snap: dict) -> None:
+        """Apply a saved Expert snapshot to the live panel.
+
+        Sets mode + pins, paints the widget values, and — in Auto mode —
+        re-runs the cascade from the saved pins so the displayed cascading
+        fields (ctx / KV / ngl / n_cpu_moe) match what the user pinned.
+        Manual mode just paints the frozen values. Emits NO save (the whole
+        point is to reproduce a saved state, not re-record it).
+        """
+        if not isinstance(snap, dict) or "values" not in snap:
+            return
+        vals = snap.get("values") or {}
+        mode = snap.get("mode", "auto")
+        if mode not in ("auto", "manual"):
+            mode = "auto"
+
+        base = self._last_cfg
+
+        # 1. Paint every widget from the saved values. Done under the
+        #    populating guard so the valueChanged flood does not trigger
+        #    a recompute or a save.
+        self._populating = True
+        try:
+            self._user_pins = {
+                k: v for k, v in (snap.get("pins") or {}).items() if v is not None
+            }
+            self._mode = mode
+            self._btn_auto.setChecked(mode == "auto")
+            self._btn_manual.setChecked(mode == "manual")
+            if vals and base is not None:
+                painted = expert_cfg_from_values(base, vals)
+                self._populate_from_cfg(painted)
+        finally:
+            self._populating = False
+
+        # 2. Re-derive the effective config.
+        if mode == "auto":
+            # Cascade from the saved pins (read non-cascading widgets = the
+            # just-painted values), then repaint. _recompute sets _last_cfg.
+            self._recompute(force_overrides=dict(self._user_pins))
+        else:
+            # Manual: the frozen config IS the painted values.
+            self._last_cfg = self._build_manual_config()
+        if self._last_cfg is not None:
+            self.configChanged.emit(self._last_cfg)
+
+    def reset_to_auto(self) -> None:
+        """Reload the AutoTuner's automatically-best config (Reset button).
+
+        Clears pins, forces Auto mode and re-cascades from empty pins.
+        Must NOT emit a save — the parent has just cleared the override,
+        and re-persisting the freshly-loaded Auto state would undo that.
+        """
+        self._populating = True
+        try:
+            self._user_pins.clear()
+            self._mode = "auto"
+            self._btn_auto.setChecked(True)
+            self._btn_manual.setChecked(False)
+        finally:
+            self._populating = False
+        # _recompute runs with empty pins → pure Auto; its internal
+        # _populate_from_cfg is guarded, so no save fires.
+        self._recompute(force_overrides={})
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1614,10 @@ class MainWindow(QMainWindow):
         self._expert_panel.configChanged.connect(self._on_expert_cfg_changed)
         self._expert_panel.modeChanged.connect(self._on_expert_mode_changed)
         self._expert_panel.closeRequested.connect(self._exit_expert_mode)
+        # Persist the live Expert state per model (debounced) and handle
+        # the Reset button (clear saved override → reload Auto).
+        self._expert_panel.stateChanged.connect(self._on_expert_state_changed)
+        self._expert_panel.resetRequested.connect(self._on_expert_reset)
 
         self._config_stack = QStackedWidget()
         self._config_stack.addWidget(self._config_preview)  # index 0 — preview
@@ -2978,25 +3259,91 @@ class MainWindow(QMainWindow):
             self._log(f"[Warning] compute_config failed: {exc}")
             return None
 
-    def _update_config_text(self, entry: ModelEntry, profile: ModelProfile) -> None:
-        """Recompute config using current checkbox states, refresh preview."""
-        assert self._system is not None
+    def _effective_config(
+        self, entry: ModelEntry, profile: ModelProfile
+    ) -> Optional[TunedConfig]:
+        """The config actually shown in the preview and used at launch.
+
+        Honours a saved Expert override per model; otherwise the
+        AutoTuner's auto-tuned default. This is what makes a hand-tuned
+        Expert setup "stick" for a model (the low-VRAM use case): once
+        saved, the override is applied automatically, just like the
+        vision/draft/thinking checkbox overrides.
+
+        * Auto-mode overrides are re-derived through ``compute_config``
+          with the saved pins so they ADAPT to the current VRAM /
+          checkbox state, then the saved non-cascading values are
+          stamped back on.
+        * Manual-mode overrides are applied as a frozen config (the user
+          owns the exact values); the launch-path VRAM fit-check still
+          gates them, and Reset reverts to Auto.
+        """
+        base = self._build_auto_config(entry, profile)
+        if base is None:
+            return None
+        override = app_settings.get_expert_override(entry.name)
+        if not override:
+            return base
+        vals = override.get("values") or {}
+        try:
+            if override.get("mode") == "manual" and vals:
+                return expert_cfg_from_values(base, vals)
+            # Auto mode: re-cascade from the saved pins (adapts to the
+            # live VRAM / checkbox state), then overlay the saved
+            # non-cascading widget values (threads / batch / flags / …).
+            pins = {
+                k: v
+                for k, v in (override.get("pins") or {}).items()
+                if v is not None
+            }
+            cascaded = self._build_auto_config(entry, profile, pins) or base
+            if vals:
+                cascaded = apply_expert_values(cascaded, vals)
+            return cascaded
+        except Exception as exc:
+            self._log(
+                f"[Warning] Saved Expert override for {entry.name} invalid "
+                f"({exc}); falling back to Auto."
+            )
+            return base
+
+    def _load_expert_panel(
+        self, entry: ModelEntry, profile: ModelProfile
+    ) -> None:
+        """Bind the Expert panel to the current model + apply any saved
+        Expert override. Used when entering Expert mode and when a
+        checkbox toggles while the panel is already open."""
+        assert self._system is not None  # callers guard / assert this first
         cfg = self._build_auto_config(entry, profile)
         if cfg is None:
             return
-        self._render_cfg_to_preview(entry, profile, cfg)
-        # When Expert mode is open, push the rebuilt cfg through the
-        # panel too so vision/draft/turbo toggles cascade visibly.
+        self._expert_panel.configure_for_model(
+            cfg=cfg,
+            system=self._system,
+            native_ctx=entry.native_context,
+            profile_max=profile.max_context,
+            recompute_cb=lambda overrides: self._build_auto_config(
+                entry, profile, overrides
+            ),
+        )
+        override = app_settings.get_expert_override(entry.name)
+        if override:
+            self._expert_panel.restore_from_snapshot(override)
+
+    def _update_config_text(self, entry: ModelEntry, profile: ModelProfile) -> None:
+        """Recompute the effective config (Auto or saved Expert override)
+        using the current checkbox states and refresh the preview."""
+        assert self._system is not None
+        eff = self._effective_config(entry, profile)
+        if eff is None:
+            return
+        self._render_cfg_to_preview(entry, profile, eff)
+        # When Expert mode is open, keep the panel in sync with checkbox /
+        # hardware changes — but first flush any in-flight edit so it is
+        # not lost when we repaint from the (now current) override.
         if self._config_stack.currentIndex() == 1:
-            self._expert_panel.configure_for_model(
-                cfg=cfg,
-                system=self._system,
-                native_ctx=entry.native_context,
-                profile_max=profile.max_context,
-                recompute_cb=lambda overrides: self._build_auto_config(
-                    entry, profile, overrides
-                ),
-            )
+            self._expert_panel.flush_pending_save()
+            self._load_expert_panel(entry, profile)
 
     def _render_cfg_to_preview(
         self,
@@ -3161,7 +3508,12 @@ class MainWindow(QMainWindow):
     # Expert mode entry / exit
     # ------------------------------------------------------------------
     def _enter_expert_mode(self) -> None:
-        """Swap the read-only preview for the editable Expert panel."""
+        """Swap the read-only preview for the editable Expert panel.
+
+        Restores the saved Expert override for the current model if one
+        exists (so a hand-tuned setup is right where the user left it);
+        otherwise starts from the AutoTuner's auto-tuned default.
+        """
         if self._current_entry is None or self._system is None:
             QMessageBox.information(
                 self,
@@ -3170,33 +3522,34 @@ class MainWindow(QMainWindow):
                 "configuration to start from.",
             )
             return
-        profile = match_profile(
-            self._current_entry.name,
-            self._profiles,
-            getattr(self._current_entry, "architecture", ""),
-        )
-        cfg = self._build_auto_config(self._current_entry, profile)
-        if cfg is None:
-            return
         entry = self._current_entry
-        self._expert_panel.configure_for_model(
-            cfg=cfg,
-            system=self._system,
-            native_ctx=entry.native_context,
-            profile_max=profile.max_context,
-            recompute_cb=lambda overrides: self._build_auto_config(
-                entry, profile, overrides
-            ),
+        profile = match_profile(
+            entry.name,
+            self._profiles,
+            getattr(entry, "architecture", ""),
         )
+        if self._build_auto_config(entry, profile) is None:
+            return
+        self._load_expert_panel(entry, profile)
         self._config_stack.setCurrentIndex(1)
         # Hide the Expert button (it's now "covered" by the panel — the
-        # Auto/Manual toggles inside the panel take its place at the
-        # top of the same area).
+        # Auto/Manual/Reset toggles inside the panel take its place at
+        # the top of the same area).
         self._btn_expert_row.setVisible(False)
-        self._log("[Expert] Entered Expert mode (Auto).")
+        override = app_settings.get_expert_override(entry.name)
+        if override:
+            self._log(
+                f"[Expert] Entered Expert mode — restored saved "
+                f"{override.get('mode', 'auto')} settings for {entry.name}."
+            )
+        else:
+            self._log("[Expert] Entered Expert mode (Auto).")
 
     def _exit_expert_mode(self) -> None:
         """Return to the read-only preview view."""
+        # Flush a pending debounced save so the on-disk override matches
+        # what is on screen (covers the edit-then-immediately-close case).
+        self._expert_panel.flush_pending_save()
         self._config_stack.setCurrentIndex(0)
         self._btn_expert_row.setVisible(True)
         # Re-render the preview from the panel's current cfg so the
@@ -3229,6 +3582,47 @@ class MainWindow(QMainWindow):
 
     def _on_expert_mode_changed(self, mode: str) -> None:
         self._log(f"[Expert] Mode → {mode}.")
+
+    def _on_expert_state_changed(self, snapshot: dict) -> None:
+        """Persist the live Expert state for the current model (debounced).
+
+        This is the autosave the low-VRAM workflow asked for: every edit
+        in either mode lands on disk keyed by model name, so the setup
+        is restored next time and applied at launch like the checkbox
+        overrides.
+        """
+        entry = self._current_entry
+        if entry is None or not isinstance(snapshot, dict):
+            return
+        try:
+            app_settings.set_expert_override(entry.name, snapshot)
+        except Exception as exc:
+            self._log(f"[Warning] Could not save Expert settings: {exc}")
+
+    def _on_expert_reset(self) -> None:
+        """Reset button: forget the saved Expert override for the current
+        model and reload the AutoTuner's automatically-best config."""
+        entry = self._current_entry
+        if entry is None or self._system is None:
+            return
+        profile = match_profile(
+            entry.name,
+            self._profiles,
+            getattr(entry, "architecture", ""),
+        )
+        # Make sure a pending save for the old state cannot land AFTER
+        # the clear (it would resurrect the override we just dropped).
+        self._expert_panel._save_timer.stop()
+        try:
+            app_settings.clear_expert_override(entry.name)
+        except Exception as exc:
+            self._log(f"[Warning] Could not clear Expert settings: {exc}")
+        # Reload pure Auto into the panel (no save) and refresh preview.
+        self._expert_panel.reset_to_auto()
+        eff = self._effective_config(entry, profile)
+        if eff is not None:
+            self._render_cfg_to_preview(entry, profile, eff)
+        self._log(f"[Expert] Reset to Auto for {entry.name}.")
 
     # ------------------------------------------------------------------
     # Diagnostic report
@@ -3631,7 +4025,8 @@ class MainWindow(QMainWindow):
         use_vision = self._chk_vision.isChecked() and self._chk_vision.isEnabled()
         use_draft = self._chk_draft.isChecked() and self._chk_draft.isEnabled()
         use_thinking = self._chk_thinking.isChecked() and self._chk_thinking.isEnabled()
-        turbo_kv = self._chk_turbo_kv.isChecked() and self._chk_turbo_kv.isEnabled()
+        # turbo_kv is read by _build_auto_config/_effective_config straight
+        # from the checkbox, so there's no local to forward here.
         use_ngram = self._chk_ngram.isChecked() and self._chk_ngram.isEnabled()
         use_prompt_cache = (
             self._chk_prompt_cache.isChecked() and self._chk_prompt_cache.isEnabled()
@@ -3646,30 +4041,22 @@ class MainWindow(QMainWindow):
             entry.name, self._profiles, getattr(entry, "architecture", "")
         )
 
-        # When Expert mode is open we use the panel's current config
-        # (Manual mode = literal widget values; Auto mode = the last
-        # cascaded result the user can see in the panel). Otherwise we
-        # rebuild via compute_config from scratch.
+        # Resolve the launch config:
+        #   • Expert panel open → the user is editing live; flush any
+        #     pending autosave so the on-disk override matches what we
+        #     launch, then use the panel's current config.
+        #   • Panel closed → the per-model saved Expert override if one
+        #     exists (so a hand-tuned setup is applied automatically),
+        #     otherwise the AutoTuner's auto-tuned default.
         expert_open = self._config_stack.currentIndex() == 1
         cfg: Optional[TunedConfig] = None
         if expert_open:
+            self._expert_panel.flush_pending_save()
             cfg = self._expert_panel.current_config()
             if cfg is None:
                 self._log("[Warning] Expert panel had no config; falling back to auto.")
         if cfg is None:
-            cfg = compute_config(
-                model=entry,
-                system=self._system,
-                profile=profile,
-                draft_model=self._current_draft if use_draft else None,
-                user_ctx=None,
-                force_mlock=False,
-                perf_target=self._resolve_perf_target_for_profile(profile),
-                mode=self._current_mode(),
-                turbo_kv=turbo_kv,
-                gpu_priorities=app_settings.get_gpu_priorities(),
-                force_gpu=app_settings.get_forced_gpu(),
-            )
+            cfg = self._effective_config(entry, profile)
         # cfg is always non-None here: either the expert panel provided it
         # or compute_config just returned one.  The assert narrows the type
         # for static checkers (Pylance / mypy) that cannot prove this.
