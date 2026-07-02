@@ -1693,16 +1693,104 @@ def test_moe_spread_fills_both_gpus_by_capacity(tmp_path) -> None:
     assert cfg.tensor_split is not None, "expected a spread, got pin/None"
     parts = [float(x) for x in cfg.tensor_split.split(",")]
     assert len(parts) == 2
+    # MoE splits are emitted as LAYER COUNTS (llama.cpp normalises them),
+    # so normalise before comparing shares.
+    total = sum(parts)
+    assert total > 0
     # Vulkan order: device 0 = 9070 XT (cap ~13 GB), device 1 = R9700 (cap ~30 GB).
-    xt_share, r97_share = parts[0], parts[1]
+    xt_share, r97_share = parts[0] / total, parts[1] / total
     # Capacity-proportional shares: 13/43 ≈ 0.30 and 30/43 ≈ 0.70.
     # The 9070 XT must get a MEANINGFUL share — well above the ~0.20 the
-    # old priority-weighting produced.
+    # old priority-weighting produced. (This model fits fully on GPU —
+    # n_cpu_moe == 0 — so layer shares equal byte shares here.)
     assert xt_share > 0.25, (
         f"9070 XT under-filled (capacity-fill regressed): share={xt_share:.3f}"
     )
     # Sanity: the larger card still carries the larger share.
     assert r97_share > xt_share
+
+
+def test_moe_cpu_offload_split_is_byte_aware(tmp_path) -> None:
+    """Regression: step-3.7-Flash (74.5 GB MoE, 45 layers) on R9700+9070 XT.
+
+    llama.cpp maps --tensor-split onto LAYER COUNTS, and --n-cpu-moe strips
+    the expert tensors of the FIRST N layers to CPU. The old byte-FRACTION
+    split therefore handed Vulkan device 0 (the 9070 XT) only expert-
+    stripped front layers: ~8/16 GB used while the R9700 sat at 30.9/32 GB.
+    The fix emits layer counts computed from per-layer GPU byte weights, so
+    reconstructing the byte load per device from the emitted counts must
+    show BOTH cards filled to a comparable fraction of their usable caps —
+    and neither card over its cap."""
+    profiles = load_profiles(SETTINGS_DIR)
+    md = {
+        "general.architecture": "step35",
+        "step35.block_count": 45,
+        "step35.expert_count": 288,
+        "step35.attention.head_count": 64,
+        "step35.attention.head_count_kv": 8,
+        "step35.attention.key_length": 128,
+        "step35.attention.value_length": 128,
+        "step35.embedding_length": 4096,
+        "step35.context_length": 262144,
+    }
+    model = _fake_model_md(tmp_path, "Step-3.7-Flash-UD-IQ3_S", 74.5, md)
+    profile = match_profile(model.name, profiles)
+    assert "step" in profile.display_name.lower()
+    prio = {
+        "AMD Radeon AI PRO R9700": 2,
+        "AMD Radeon RX 9070 XT": 1,
+    }
+    cfg = compute_config(
+        model, _fake_dual_gpu_system_with_vk_order(), profile, gpu_priorities=prio
+    )
+    # 74.5 GB on 48 GB VRAM → experts MUST spill to CPU.
+    assert cfg.n_cpu_moe is not None and cfg.n_cpu_moe > 0
+    assert cfg.tensor_split is not None, "expected a spread, got pin/None"
+    counts = [int(round(float(x))) for x in cfg.tensor_split.split(",")]
+    assert len(counts) == 2 and sum(counts) == 45, (
+        f"expected layer counts summing to 45, got {cfg.tensor_split}"
+    )
+    xt_layers, r97_layers = counts  # Vulkan order: device 0 = 9070 XT
+
+    # The 9070 XT gets the light (expert-stripped) FRONT layers — it must
+    # take MORE than just those to carry a real byte share.
+    assert xt_layers > cfg.n_cpu_moe, (
+        f"9070 XT got only expert-stripped layers ({xt_layers} ≤ "
+        f"n_cpu_moe={cfg.n_cpu_moe}) — byte-aware split regressed"
+    )
+
+    # Reconstruct the byte load per device with the same per-layer model
+    # the tuner uses (light front layers + heavy expert layers + KV slice).
+    n_layers = 45
+    shared_gb = model.size_gb * 0.08
+    per_layer_expert = (model.size_gb - shared_gb) / n_layers
+    light = shared_gb / n_layers
+    kv_l = 0.0 if cfg.no_kv_offload else cfg.estimated_kv_gb / n_layers
+    layer_bytes = [
+        light + kv_l + (0.0 if i < cfg.n_cpu_moe else per_layer_expert)
+        for i in range(n_layers)
+    ]
+    xt_gb = sum(layer_bytes[:xt_layers])
+    r97_gb = sum(layer_bytes[xt_layers:])
+    # Usable caps mirror _gpu_usable_cap_gb on this fake system:
+    #   9070 XT: min(16 − 1.6, 14 free) = 14.0; R9700: min(32 − 1.92, 31) = 30.08.
+    # Layers are indivisible, so a residual overshoot of strictly less than
+    # ONE layer may remain on a device when no contiguous split satisfies
+    # every cap exactly — it eats reserved headroom, not physical VRAM.
+    one_layer = per_layer_expert + kv_l + 1e-6
+    xt_cap, r97_cap = 14.0, 30.08
+    assert xt_gb <= xt_cap + one_layer, f"9070 XT over cap: {xt_gb:.1f} GB"
+    assert r97_gb <= r97_cap + one_layer, f"R9700 over cap: {r97_gb:.1f} GB"
+    # Balanced fill: the 9070 XT must be filled to a fraction of its cap
+    # comparable to the R9700's — the whole point of the fix. The old
+    # fraction-based split left the XT at ~0.15 fill while the R9700 ran
+    # past 0.95.
+    xt_fill = xt_gb / xt_cap
+    r97_fill = r97_gb / r97_cap
+    assert xt_fill > 0.55, f"9070 XT still stranded: fill={xt_fill:.2f}"
+    assert abs(xt_fill - r97_fill) < 0.30, (
+        f"unbalanced fill: XT={xt_fill:.2f} vs R9700={r97_fill:.2f}"
+    )
 
 
 def test_dense_spread_stays_priority_weighted(tmp_path) -> None:
@@ -2250,7 +2338,7 @@ def test_diffusiongemma_kv_broadcast_not_undersized() -> None:
         "general.architecture": "diffusion-gemma",
         "diffusion-gemma.block_count": 30,
         "diffusion-gemma.attention.head_count": 16,
-        "diffusion-gemma.attention.head_count_kv": [2],          # broadcast
+        "diffusion-gemma.attention.head_count_kv": [2],  # broadcast
         "diffusion-gemma.attention.key_length": 512,
         "diffusion-gemma.attention.value_length": 512,
         "diffusion-gemma.attention.sliding_window": 1024,
@@ -2282,7 +2370,8 @@ def test_gemma4_per_layer_kv_array_not_broken_by_broadcast_fix() -> None:
         "gemma4.attention.head_count_kv": [8, 8, 8, 8, 8, 2] * 5,
         # 5 SWA layers (True) + 1 full-attention layer (False) per 6-group;
         # only the False (full-attention) layers carry scaling KV.
-        "gemma4.attention.sliding_window_pattern": [True, True, True, True, True, False] * 5,
+        "gemma4.attention.sliding_window_pattern": [True, True, True, True, True, False]
+        * 5,
         "gemma4.attention.key_length": 512,
         "gemma4.attention.value_length": 512,
         "gemma4.embedding_length": 2816,
@@ -2303,12 +2392,10 @@ def test_diffusion_resolver_picks_gemma_binary_for_diffusiongemma() -> None:
     import auto_tuner as at
 
     assert (
-        at._diffusion_binary_for_arch("diffusion-gemma")
-        == "llama-diffusion-gemma-cli"
+        at._diffusion_binary_for_arch("diffusion-gemma") == "llama-diffusion-gemma-cli"
     )
     assert (
-        at._diffusion_binary_for_arch("diffusion_gemma")
-        == "llama-diffusion-gemma-cli"
+        at._diffusion_binary_for_arch("diffusion_gemma") == "llama-diffusion-gemma-cli"
     )
     # Mainline diffusion archs keep the generic CLI.
     for arch in ("dream", "llada", "rnd1", None):
@@ -2438,7 +2525,7 @@ def test_build_diffusion_command_gpu_placement_passthrough() -> None:
     from settings_loader import ModelProfile
 
     cfg = _fake_diffusion_config()
-    cfg.main_gpu = 1          # pin to the 32 GB card
+    cfg.main_gpu = 1  # pin to the 32 GB card
     cfg.tensor_split = "0.000,1.000"
     p = ModelProfile(display_name="x", diffusion={"steps": 48})
     cmd = build_diffusion_command(_fake_diffusion_model(), cfg, p)
@@ -2777,7 +2864,9 @@ def test_expert_override_survives_corrupt_blob(_isolated_settings) -> None:
     import app_settings
 
     # Write a blob whose entry for 'X' is the wrong shape.
-    _isolated_settings.write_text('{"expert_overrides": {"X": "garbage"}}', encoding="utf-8")
+    _isolated_settings.write_text(
+        '{"expert_overrides": {"X": "garbage"}}', encoding="utf-8"
+    )
     assert app_settings.get_expert_override("X") is None
     # A valid entry next to it still loads.
     app_settings.set_expert_override("Y", {"mode": "auto", "values": {"ctx": 8192}})
@@ -2843,7 +2932,9 @@ def _base_cfg(tmp_path) -> TunedConfig:
     """A real TunedConfig to feed the value helpers."""
     model = _fake_model(tmp_path, "Qwen3.5-9B-Q8_0", size_gb=9.0)
     sysinfo = _fake_system()
-    profile = match_profile(model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", ""))
+    profile = match_profile(
+        model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+    )
     cfg = compute_config(model=model, system=sysinfo, profile=profile)
     assert cfg is not None
     return cfg
@@ -2859,11 +2950,11 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
     orig_ngl = base.ngl
 
     vals = {
-        "ctx": 999999,          # must be IGNORED by apply_expert_values
-        "cache_k": "f16",       # must be IGNORED
-        "ngl": 0,               # must be IGNORED
-        "threads": 42,          # must be APPLIED
-        "ubatch": 1234,         # must be APPLIED
+        "ctx": 999999,  # must be IGNORED by apply_expert_values
+        "cache_k": "f16",  # must be IGNORED
+        "ngl": 0,  # must be IGNORED
+        "threads": 42,  # must be APPLIED
+        "ubatch": 1234,  # must be APPLIED
         "flash_attn": True,
         "mlock": True,
         "numa": "isolate",
@@ -2987,7 +3078,7 @@ def test_manual_config_helper_matches_disk_restore(tmp_path) -> None:
     cfg2 = expert_cfg_from_values(base, vals)
     assert cfg.ctx == cfg2.ctx
     assert cfg.extra_cli_flags == cfg2.extra_cli_flags
-    assert '--chat-template-kwargs' in cfg.extra_cli_flags
+    assert "--chat-template-kwargs" in cfg.extra_cli_flags
     assert "--jinja" in cfg.extra_cli_flags
 
 
@@ -3048,7 +3139,9 @@ def test_auto_ctx_pin_re_cascades_through_compute_config(tmp_path) -> None:
 # non-cascading overlay — i.e. both the Auto-restore and the launch paths.
 
 
-def test_auto_ctx_pin_applied_at_launch_without_panel_open(tmp_path, monkeypatch) -> None:
+def test_auto_ctx_pin_applied_at_launch_without_panel_open(
+    tmp_path, monkeypatch
+) -> None:
     """A saved Auto ctx pin applies at launch even when the Expert panel is
     closed — via the _effective_config() path.
 
@@ -3089,5 +3182,3 @@ def test_auto_ctx_pin_applied_at_launch_without_panel_open(tmp_path, monkeypatch
     assert cascaded.ctx == pinned, (
         f"launch config lost the pinned context; got {cascaded.ctx}"
     )
-
-    

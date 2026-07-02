@@ -610,6 +610,141 @@ def _decide_moe_offload(
     return 999, n_cpu_moe, model_vram, model_ram, False
 
 
+def _gpu_usable_cap_gb(gpu: "GPUInfo", is_primary: bool) -> float:
+    """Per-card usable VRAM cap (GB) for multi-GPU placement.
+
+    Keep a little headroom so the card never runs bone-dry, but make it
+    PROPORTIONAL to the card size instead of a flat amount. A flat 3 GB
+    on a 16 GB card is a ~19 % tax that strands several GB of the RX
+    9070 XT on big MoE spreads (Basti's report #1), while the same 3 GB
+    is trivial on a 32 GB card. We instead reserve a fraction of TOTAL
+    VRAM — more on the secondary (it also drives desktop + OBS encode)
+    than the primary — floored at a small minimum so a tiny card still
+    keeps a safety margin. Then clamp by the card's *free* VRAM so we
+    never plan to use memory other apps already hold ("inclusive was
+    schon genutzt wird"), and never let the proportional reserve grow so
+    large on a big card that it wastes more than the old flat value
+    would have.
+
+    Module-level (not nested in the spread section) because the MoE
+    expert-placement budget must use the SAME caps: budgeting
+    ``--n-cpu-moe`` against the raw combined free VRAM while the spread
+    reserves per-card headroom overcommits by exactly that headroom and
+    pushes the primary card to its physical limit.
+    """
+    total_gb = gpu.total_vram_mb / 1024.0
+    frac = 0.06 if is_primary else 0.10  # 6 % primary, 10 % secondary
+    floor = 1.0 if is_primary else 1.5  # GB, minimum breathing room
+    cap_flat = 2.0 if is_primary else 3.0  # legacy flat reserve = ceiling
+    headroom = min(cap_flat, max(floor, total_gb * frac))
+    cap_by_total = total_gb - headroom
+    free_gb = gpu.free_vram_mb / 1024.0
+    return max(0.0, min(cap_by_total, free_gb))
+
+
+def _split_layers_by_bytes(layer_bytes: List[float], caps: List[float]) -> List[int]:
+    """Assign contiguous front-to-back layer ranges to devices so each
+    card's BYTE load fills it proportionally to its usable capacity —
+    and never exceeds the cap where avoidable.
+
+    Why this exists: llama.cpp interprets ``--tensor-split`` as a
+    LAYER-COUNT proportion, not a byte proportion. Layer ``il`` goes to
+    the device whose normalised cumulative split bucket contains
+    ``il / n_layers`` — device 0 receives the FIRST chunk of layers
+    (verified against b9859 ``src/llama-model.cpp``). Meanwhile
+    ``--n-cpu-moe N`` strips the expert tensors of the FIRST N layers
+    to CPU (``common/arg.cpp``: ``llm_ffn_exps_block_regex(i)`` for
+    i < N), so those front layers keep only tiny attention/norm tensors
+    in VRAM while layers N.. carry the full expert weight.
+
+    Per-layer GPU bytes are therefore wildly non-uniform, and emitting a
+    byte-proportional FRACTION mis-places bytes badly: on Basti's
+    step-3.7-Flash run the RX 9070 XT (Vulkan device 0) received only
+    expert-stripped front layers and idled at ~8/16 GB while the R9700
+    was pushed to its limit — exactly the stranded-VRAM problem the
+    capacity-fill strategy was meant to solve.
+
+    This helper solves the inverse problem: given the actual per-layer
+    GPU byte weights (in layer order 0..L-1) and per-device capacity
+    caps (in VISIBLE device order — the device that receives layer 0
+    first), it returns the layer COUNT each device should get. Those
+    counts are emitted directly as ``--tensor-split`` values; llama.cpp
+    normalises them, so the counts reproduce themselves exactly (up to
+    ±1 rounding) and the byte distribution lands as planned.
+
+    With uniform per-layer bytes (dense, or MoE with n_cpu_moe == 0)
+    this degenerates to a capacity-proportional layer split — identical
+    to the previous fraction-based behaviour.
+
+    Granularity note: layers are indivisible, so when no contiguous
+    assignment satisfies every cap exactly (a single expert layer can
+    weigh 1.5+ GB), the residual overshoot — strictly less than one
+    layer — remains on the LAST device after the fix-up pass. The caps
+    already contain per-card headroom (_gpu_usable_cap_gb), so a
+    sub-layer overshoot eats reserved breathing room, never the
+    physical VRAM limit.
+    """
+    n_dev = len(caps)
+    n_lay = len(layer_bytes)
+    counts = [0] * n_dev
+    if n_dev == 0 or n_lay == 0:
+        return counts
+    total_bytes = sum(layer_bytes)
+    total_cap = sum(caps)
+    if total_bytes <= 0 or total_cap <= 0:
+        # Degenerate input — even layer split so we never emit all-zeros.
+        base = n_lay // n_dev
+        counts = [base] * n_dev
+        counts[-1] += n_lay - base * n_dev
+        return counts
+
+    # Per-device byte target = capacity-proportional share of the total.
+    targets = [total_bytes * (c / total_cap) for c in caps]
+
+    # Front-fill: walk the layers in order, giving each device layers
+    # until its byte target (or hard cap) is reached. The boundary layer
+    # is taken only if doing so lands CLOSER to the target than stopping
+    # short — this keeps the split balanced when one heavy expert layer
+    # straddles the boundary.
+    i = 0
+    for j in range(n_dev - 1):
+        acc = 0.0
+        while i < n_lay:
+            w = layer_bytes[i]
+            if acc + w > caps[j] + 1e-9:
+                break
+            if acc + w > targets[j] and (acc + w - targets[j]) >= (targets[j] - acc):
+                break
+            acc += w
+            counts[j] += 1
+            i += 1
+    counts[-1] = n_lay - i
+
+    # Fix-up pass: if a later device ended up over its cap (the remainder
+    # after front-filling can be heavier than the last card holds when the
+    # heavy expert layers all sit at the back), shift boundary layers
+    # backward onto earlier devices that still have spare capacity. Only
+    # adjacent moves are possible because assignments must stay contiguous.
+    def _dev_bytes(j: int) -> float:
+        start = sum(counts[:j])
+        return sum(layer_bytes[start : start + counts[j]])
+
+    for _ in range(n_lay):
+        moved = False
+        for j in range(n_dev - 1):
+            if counts[j + 1] > 0 and _dev_bytes(j + 1) > caps[j + 1] + 1e-9:
+                boundary = sum(counts[: j + 1])
+                w = layer_bytes[boundary]
+                if _dev_bytes(j) + w <= caps[j] + 1e-9:
+                    counts[j] += 1
+                    counts[j + 1] -= 1
+                    moved = True
+        if not moved:
+            break
+
+    return counts
+
+
 # ---- Turbo-Quant labels --------------------------------------------------
 # The TurboQuant family of forks (TheTom/turboquant_plus,
 # AtomicBot/atomic-llama-cpp-turboquant, spiritbuun/buun-llama-cpp)
@@ -970,10 +1105,20 @@ def compute_config(
     # utilise both GPUs (R9700 + RX 9070 XT = 48 GB total) instead of
     # being restricted to the primary GPU only.
     has_multiple_gpus = has_gpu and len(system.gpus) > 1
+    combined_usable_vram_gb = 0.0
     if has_multiple_gpus:
-        # Combined free VRAM across all GPUs for MoE expert placement.
-        combined_free_vram_gb = sum(g.free_vram_mb / 1024.0 for g in system.gpus)
-        effective_moe_vram = combined_free_vram_gb - vision_vram_gb - draft_vram_gb
+        # Combined USABLE VRAM across all GPUs for MoE expert placement —
+        # the sum of the per-card caps the spread (section 4d) enforces,
+        # NOT the raw combined free VRAM. The spread reserves per-card
+        # headroom (≈1.9 GB primary + ≈1.6 GB secondary here); budgeting
+        # the expert placement against raw free VRAM overcommits by
+        # exactly that headroom, so the split had to push the primary
+        # card to its physical limit (30.9/32 GB on the step-3.7 run)
+        # no matter how the layers were distributed.
+        combined_usable_vram_gb = sum(
+            _gpu_usable_cap_gb(g, g is primary_gpu) for g in system.gpus
+        )
+        effective_moe_vram = combined_usable_vram_gb - vision_vram_gb - draft_vram_gb
     else:
         effective_moe_vram = effective_primary_free_vram
     if effective_moe_vram < 0:
@@ -1128,7 +1273,23 @@ def compute_config(
         kv_budget_gb = ram_kv
         no_kv_offload = True
     elif is_moe and has_gpu:
-        kv_budget_gb = free_vram_after
+        if has_multiple_gpus:
+            # MoE KV lives in VRAM and follows the layer split, so it must
+            # fit inside the SAME per-card caps the spread enforces. Using
+            # the raw free-VRAM remainder here (free_vram_after) hands the
+            # KV sizing the per-card headroom the spread deliberately
+            # reserves — the resulting context then physically cannot be
+            # placed without pushing a card past its cap.
+            kv_budget_gb = max(
+                0.0,
+                combined_usable_vram_gb
+                - effective_vram_safety
+                - model_vram
+                - vision_vram_gb
+                - draft_vram_gb,
+            )
+        else:
+            kv_budget_gb = free_vram_after
     elif full_off:
         # Dense model fully on GPU, but the model may nearly fill VRAM
         # (e.g. a 27B Q3 occupying 14 of 16 GB), leaving almost nothing
@@ -1490,29 +1651,7 @@ def compute_config(
         # capacity-fill strategy, whether or not any experts spilled to CPU.
         is_moe_cfg = is_moe and has_gpu
 
-        # Per-card usable VRAM cap (GB). Keep a little headroom so the card
-        # never runs bone-dry, but make it PROPORTIONAL to the card size
-        # instead of a flat amount. A flat 3 GB on a 16 GB card is a ~19 %
-        # tax that strands several GB of the RX 9070 XT on big MoE spreads
-        # (Basti's report #1), while the same 3 GB is trivial on a 32 GB
-        # card. We instead reserve a fraction of TOTAL VRAM — more on the
-        # secondary (it also drives desktop + OBS encode) than the primary —
-        # floored at a small minimum so a tiny card still keeps a safety
-        # margin. Then clamp by the card's *free* VRAM so we never plan to
-        # use memory other apps already hold ("inclusive was schon genutzt
-        # wird"), and never let the proportional reserve grow so large on a
-        # big card that it wastes more than the old flat value would have.
-        def _usable_cap_gb(gpu: GPUInfo, is_primary: bool) -> float:
-            total_gb = gpu.total_vram_mb / 1024.0
-            frac = 0.06 if is_primary else 0.10  # 6 % primary, 10 % secondary
-            floor = 1.0 if is_primary else 1.5  # GB, minimum breathing room
-            cap_flat = 2.0 if is_primary else 3.0  # legacy flat reserve = ceiling
-            headroom = min(cap_flat, max(floor, total_gb * frac))
-            cap_by_total = total_gb - headroom
-            free_gb = gpu.free_vram_mb / 1024.0
-            return max(0.0, min(cap_by_total, free_gb))
-
-        primary_cap = _usable_cap_gb(primary_gpu, True)
+        primary_cap = _gpu_usable_cap_gb(primary_gpu, True)
 
         # Full GPU footprint we need to place: weights + KV + vision + draft.
         # For pinning decisions, we only consider model_vram (weights) because
@@ -1573,18 +1712,57 @@ def compute_config(
             #     instead of spilling to CPU (--n-cpu-moe) is a large speed
             #     win, so when an MoE has to use both cards we want them BOTH
             #     as full as possible. Priority-weighting here was Basti's
-            #     reported bug: it left several GB unused on the secondary,
-            #     forcing extra layers onto the CPU and slowing the MoE down.
-            #     We therefore distribute proportionally to each card's
-            #     USABLE CAPACITY (not its priority), which fills both cards
-            #     evenly and minimises the CPU-resident expert count.
+            #     reported bug #1: it left several GB unused on the
+            #     secondary, forcing extra layers onto the CPU and slowing
+            #     the MoE down. We distribute proportionally to each card's
+            #     USABLE CAPACITY (not its priority) — and, crucially, we
+            #     emit the split as LAYER COUNTS computed from per-layer
+            #     GPU byte weights (report #2): with --n-cpu-moe the front
+            #     layers are expert-stripped and ~10× lighter in VRAM, so a
+            #     byte-FRACTION split (which llama.cpp maps onto layer
+            #     counts) stranded the Vulkan-device-0 card at ~8/16 GB.
             ordered = sorted(
                 system.gpus,
                 key=lambda g: max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb,
                 reverse=True,  # primary (highest score) first
             )
-            caps = [_usable_cap_gb(g, g is primary_gpu) for g in ordered]
+            caps = [_gpu_usable_cap_gb(g, g is primary_gpu) for g in ordered]
             total_cap = sum(caps)
+
+            # ---- MoE per-layer GPU byte weights --------------------------
+            # llama.cpp splits --tensor-split by LAYER COUNT (device 0 gets
+            # the first chunk of layers), while --n-cpu-moe strips the
+            # expert tensors of the FIRST n_cpu_moe layers to CPU. The GPU
+            # byte weight per layer is therefore non-uniform: front layers
+            # carry only attention/norm tensors (+ their KV slice), back
+            # layers additionally carry the full expert weight. We model
+            # that here and later emit --tensor-split as LAYER COUNTS
+            # computed by _split_layers_by_bytes, so the BYTES land
+            # capacity-proportionally on both cards. A plain byte-fraction
+            # split (the old code) handed the Vulkan-device-0 card (the
+            # 9070 XT) only expert-stripped front layers — ~8/16 GB used
+            # while the R9700 ran at its limit (Basti's step-3.7 report).
+            #
+            # KV is included per layer because MoE KV must live in VRAM on
+            # Vulkan and llama.cpp allocates each layer's KV on that
+            # layer's device. estimated_kv_gb / n_layers is an average —
+            # hybrid SWA/full-attention archs (step35, gemma…) deviate per
+            # layer, but the error is small against expert-weight deltas.
+            layer_gpu_bytes: List[float] = []
+            if is_moe_cfg and n_layers > 0:
+                cpu_moe_layers = min(n_layers, n_cpu_moe or 0)
+                shared_gb = model.size_gb * 0.08
+                per_layer_expert = max(0.001, (model.size_gb - shared_gb) / n_layers)
+                light_gb = shared_gb / n_layers
+                kv_layer_gb = (
+                    0.0 if no_kv_offload else max(0.0, estimated_kv_gb) / n_layers
+                )
+                layer_gpu_bytes = [
+                    light_gb
+                    + kv_layer_gb
+                    + (0.0 if li < cpu_moe_layers else per_layer_expert)
+                    for li in range(n_layers)
+                ]
 
             if is_moe_cfg:
                 # Capacity-proportional weights — fill both cards in step so
@@ -1632,7 +1810,23 @@ def compute_config(
                 vis_str = ",".join(str(ordered[i].hip_index) for i in idx_order)
                 env_overrides["HIP_VISIBLE_DEVICES"] = vis_str
                 env_overrides["GGML_VK_VISIBLE_DEVICES"] = vis_str
-                tensor_split = ",".join(f"{alloc[i] / denom:.3f}" for i in idx_order)
+                if layer_gpu_bytes:
+                    # MoE → byte-aware LAYER-COUNT split (see comment above).
+                    # Caps in visible-device order; the primary's cap is
+                    # reduced by vision/draft VRAM since mmproj + drafter
+                    # load onto the main GPU, not spread by tensor-split.
+                    caps_vis: List[float] = []
+                    for i in idx_order:
+                        c = caps[i]
+                        if ordered[i] is primary_gpu:
+                            c = max(0.0, c - vision_vram_gb - draft_vram_gb)
+                        caps_vis.append(c)
+                    counts_vis = _split_layers_by_bytes(layer_gpu_bytes, caps_vis)
+                    tensor_split = ",".join(f"{c:.3f}" for c in counts_vis)
+                else:
+                    tensor_split = ",".join(
+                        f"{alloc[i] / denom:.3f}" for i in idx_order
+                    )
                 # main_gpu is the index (within the visible/sorted list) of the
                 # primary card — where llama.cpp keeps the small shared tensors.
                 main_gpu = idx_order.index(ordered.index(primary_gpu))
@@ -1640,10 +1834,21 @@ def compute_config(
                 # Indices unknown — position-based split in the system.gpus
                 # order (may be wrong on Windows AMD; keep the llama binary /
                 # vulkaninfo reachable so hip_index resolves).
-                pos_alloc = {id(g): a for g, a in zip(ordered, alloc)}
-                tensor_split = ",".join(
-                    f"{pos_alloc.get(id(g), 0.0) / denom:.3f}" for g in system.gpus
-                )
+                if layer_gpu_bytes:
+                    # MoE → byte-aware layer counts, positional device order.
+                    caps_pos: List[float] = []
+                    for g in system.gpus:
+                        c = _gpu_usable_cap_gb(g, g is primary_gpu)
+                        if g is primary_gpu:
+                            c = max(0.0, c - vision_vram_gb - draft_vram_gb)
+                        caps_pos.append(c)
+                    counts_pos = _split_layers_by_bytes(layer_gpu_bytes, caps_pos)
+                    tensor_split = ",".join(f"{c:.3f}" for c in counts_pos)
+                else:
+                    pos_alloc = {id(g): a for g, a in zip(ordered, alloc)}
+                    tensor_split = ",".join(
+                        f"{pos_alloc.get(id(g), 0.0) / denom:.3f}" for g in system.gpus
+                    )
                 main_gpu = primary_pos
 
     # ---- (4d) NUMA — immer aktivieren bei genügend Kernen für bessere Performance

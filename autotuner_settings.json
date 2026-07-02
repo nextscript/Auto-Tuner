@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "H:\\LAB\\ai-local\\d_b9781_llama.cpp",
+  "fork_path": "H:\\LAB\\ai-local\\b9859_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -157,10 +157,13 @@
     },
     "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": {
       "vision": false
+    },
+    "Step-3.7-Flash-UD-IQ3_S": {
+      "vision": false
     }
   },
   "mode": "coding",
-  "window_geometry": "AdnQywADAAAAAAGUAAAARwAABj4AAASyAAABlAAAAGYAAAY+AAAEsgAAAAAAAAAADXAAAAGUAAAAZgAABj4AAASy",
+  "window_geometry": "AdnQywADAAAAAABoAAAATgAABRIAAAS5AAAAaAAAAG0AAAUSAAAEuQAAAAAAAAAADXAAAABoAAAAbQAABRIAAAS5",
   "window_state": "AAAA/wAAAAD9AAAAAAAABKsAAAQYAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
   "fork_container_path": "H:\\LAB\\ai-local",
   "font_size": 10,
@@ -192,7 +195,9 @@
     "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": "<none>",
     "Qwen3.6-35B-A3B-UD-MTP-Q6_K": "mmproj-Qwen3.6-35B-A3B-UD-MTP-BF16.gguf",
     "gemma-4-26B-A4B-it-UD-Q8_K_XL": "<none>",
-    "gemma-4-31B-it-UD-Q6_K_XL": "<none>"
+    "gemma-4-31B-it-UD-Q6_K_XL": "<none>",
+    "Ministral-3-14B-Reasoning-2512-Q6_K": "<none>",
+    "Devstral-Small-2-24B-Instruct-2512-UD-Q8_K_XL": "<none>"
   },
   "draft_selection": {
     "gemma-4-12B-it-qat-UD-Q4_K_XL": "<none>",
