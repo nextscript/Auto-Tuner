@@ -1,6 +1,6 @@
 {
   "models_path": "I:\\models",
-  "fork_path": "H:\\LAB\\ai-local\\b9859_llama.cpp",
+  "fork_path": "L:\\LAB\\ai-local\\b9867_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {
@@ -156,16 +156,16 @@
       "vision": false
     },
     "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": {
-      "vision": false
+      "vision": true
     },
     "Step-3.7-Flash-UD-IQ3_S": {
       "vision": false
     }
   },
   "mode": "coding",
-  "window_geometry": "AdnQywADAAAAAACFAAAAZwAABS8AAATSAAAAhQAAAIYAAAUvAAAE0gAAAAAAAAAADXAAAACFAAAAhgAABS8AAATS",
+  "window_geometry": "AdnQywADAAAAAADaAAAAcgAABYQAAATdAAAA2gAAAJEAAAWEAAAE3QAAAAAAAAAADXAAAADaAAAAkQAABYQAAATd",
   "window_state": "AAAA/wAAAAD9AAAAAAAABKsAAAQYAAAABAAAAAQAAAAIAAAACPwAAAABAAAAAgAAAAH/////AQAAAAD/////AAAAAAAAAAA=",
-  "fork_container_path": "H:\\LAB\\ai-local",
+  "fork_container_path": "L:\\LAB\\ai-local",
   "font_size": 10,
   "gpu_overrides": {
     "AMD Radeon AI PRO R9700": {
@@ -192,12 +192,15 @@
     "Qwopus3.5-9B-coder-Exp-Q8_0": "<none>",
     "gemma-4-12b-it-BF16": "<none>",
     "Qwen3.6-35B-A3B-UD-Q6_K": "<none>",
-    "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": "<none>",
+    "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": "mmproj-Qwen3.6-35B-A3B-UD-F32.gguf",
     "Qwen3.6-35B-A3B-UD-MTP-Q6_K": "mmproj-Qwen3.6-35B-A3B-UD-MTP-BF16.gguf",
     "gemma-4-26B-A4B-it-UD-Q8_K_XL": "<none>",
     "gemma-4-31B-it-UD-Q6_K_XL": "<none>",
     "Ministral-3-14B-Reasoning-2512-Q6_K": "<none>",
-    "Devstral-Small-2-24B-Instruct-2512-UD-Q8_K_XL": "<none>"
+    "Devstral-Small-2-24B-Instruct-2512-UD-Q8_K_XL": "<none>",
+    "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": "<none>",
+    "Qwen3.6-27B-MTP-IQ4_XS": "<none>",
+    "qwen3.6-35b-a3b-mxfp4_moe": "<none>"
   },
   "draft_selection": {
     "gemma-4-12B-it-qat-UD-Q4_K_XL": "<none>",
@@ -246,6 +249,122 @@
         "extras": ""
       },
       "saved_at": "2026-07-02T19:03:15"
+    },
+    "ornith-1.0-9b-Q8_0": {
+      "mode": "auto",
+      "pins": {
+        "force_n_parallel": 4,
+        "force_rope_scale": true
+      },
+      "values": {
+        "ctx": 916480,
+        "cache_k": "q5_0",
+        "cache_v": "q5_0",
+        "ngl": 999,
+        "n_cpu_moe": 0,
+        "threads": 12,
+        "batch_threads": 16,
+        "batch": 1024,
+        "ubatch": 1024,
+        "flash_attn": true,
+        "mlock": false,
+        "no_mmap": false,
+        "jinja": false,
+        "verbose": false,
+        "numa": "distribute",
+        "rope_scaling": true,
+        "rope_factor": 4.0,
+        "temperature": 0.6,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "reasoning": "auto",
+        "think_budget": -1,
+        "parallel_enabled": true,
+        "parallel_count": 4,
+        "extras": ""
+      },
+      "saved_at": "2026-07-02T21:54:50"
+    },
+    "Qwen3.6-27B-UD-Q8_K_XL": {
+      "mode": "auto",
+      "pins": {
+        "force_rope_scale": true,
+        "force_cache_k": "q8_0",
+        "force_cache_v": "q8_0",
+        "force_n_parallel": 2
+      },
+      "values": {
+        "ctx": 123904,
+        "cache_k": "q8_0",
+        "cache_v": "q8_0",
+        "ngl": 999,
+        "n_cpu_moe": 0,
+        "threads": 12,
+        "batch_threads": 16,
+        "batch": 1024,
+        "ubatch": 1024,
+        "flash_attn": true,
+        "mlock": false,
+        "no_mmap": false,
+        "jinja": false,
+        "verbose": false,
+        "numa": "distribute",
+        "rope_scaling": true,
+        "rope_factor": 4.0,
+        "temperature": 0.6,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "reasoning": "auto",
+        "think_budget": -1,
+        "parallel_enabled": true,
+        "parallel_count": 2,
+        "extras": ""
+      },
+      "saved_at": "2026-07-03T18:55:42"
+    },
+    "Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL": {
+      "mode": "auto",
+      "pins": {
+        "force_cache_k": "q8_0",
+        "force_cache_v": "q8_0"
+      },
+      "values": {
+        "ctx": 262144,
+        "cache_k": "q8_0",
+        "cache_v": "q8_0",
+        "ngl": 999,
+        "n_cpu_moe": 0,
+        "threads": 12,
+        "batch_threads": 16,
+        "batch": 1024,
+        "ubatch": 1024,
+        "flash_attn": true,
+        "mlock": true,
+        "no_mmap": false,
+        "jinja": false,
+        "verbose": false,
+        "numa": "distribute",
+        "rope_scaling": false,
+        "rope_factor": 1.0,
+        "temperature": 0.6,
+        "top_k": 20,
+        "top_p": 0.95,
+        "min_p": 0.0,
+        "repeat_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "reasoning": "auto",
+        "think_budget": -1,
+        "parallel_enabled": false,
+        "parallel_count": 3,
+        "extras": ""
+      },
+      "saved_at": "2026-07-03T19:14:30"
     }
   }
 }
