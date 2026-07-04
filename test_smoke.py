@@ -3233,3 +3233,246 @@ def test_auto_ctx_pin_applied_at_launch_without_panel_open(
     assert cascaded.ctx == pinned, (
         f"launch config lost the pinned context; got {cascaded.ctx}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cross-OS GPU identity: Linux short names, Mesa RADV suffixes, priorities
+# ---------------------------------------------------------------------------
+# Regressions for the Ubuntu 26.04 report "AUTO prioritises the 16 GB
+# RX 9070 XT instead of the 32 GB R9700":
+#   1. gpu_overrides priorities are keyed by the WINDOWS driver names
+#      ("AMD Radeon AI PRO R9700"); Linux lspci/DRM calls the same card
+#      "Radeon AI PRO R9700" and Mesa appends "(RADV NAVI48)". The exact
+#      dict lookup silently dropped every priority after an OS switch.
+#   2. Mesa can report a GENERIC name for a very new card, breaking the
+#      name-based hip_index resolution; VRAM-total matching + elimination
+#      must take over so the placement never falls back to positional
+#      (DRM-order) indices.
+
+
+_LIST_DEVICES_RADV = """Available devices:
+  Vulkan0: AMD Radeon RX 9070 XT (RADV NAVI48) (16304 MiB, 15416 MiB free)
+  Vulkan1: AMD Radeon AI PRO R9700 (RADV NAVI48) (32624 MiB, 31704 MiB free)
+"""
+
+_LIST_DEVICES_RADV_GENERIC = """Available devices:
+  Vulkan0: AMD Radeon RX 9070 XT (RADV NAVI48) (16304 MiB, 15416 MiB free)
+  Vulkan1: AMD Radeon Graphics (RADV NAVI48) (32624 MiB, 31704 MiB free)
+"""
+
+
+def _linux_gpu_pair():
+    return [
+        GPUInfo(
+            index=0,
+            name="Radeon RX 9070 XT",  # Linux DRM/lspci short name
+            vendor="amd",
+            total_vram_mb=16304,
+            free_vram_mb=15400,
+            pci_device_id=0x7550,
+        ),
+        GPUInfo(
+            index=1,
+            name="Radeon AI PRO R9700",
+            vendor="amd",
+            total_vram_mb=32624,
+            free_vram_mb=31700,
+            pci_device_id=0x7551,
+        ),
+    ]
+
+
+def test_list_devices_regex_survives_radv_suffix(monkeypatch) -> None:
+    """Mesa's '(RADV NAVI48)' suffix must not truncate names or break VRAM."""
+    import hardware
+
+    monkeypatch.setattr(hardware, "_run", lambda *a, **k: _LIST_DEVICES_RADV)
+    devices = hardware._detect_llama_devices("llama-server")
+    assert [(d[0], d[2], d[3]) for d in devices] == [
+        (0, 16304, 15416),
+        (1, 32624, 31704),
+    ]
+    assert devices[0][1] == "amd radeon rx 9070 xt (radv navi48)"
+    assert devices[1][1] == "amd radeon ai pro r9700 (radv navi48)"
+
+
+def test_hip_index_resolves_by_name_with_radv_suffix(monkeypatch) -> None:
+    """Linux short names must map onto RADV device names (no vulkaninfo)."""
+    import hardware
+
+    def fake_run(cmd, *a, **k):
+        if "--list-devices" in cmd:
+            return _LIST_DEVICES_RADV
+        return ""  # vulkaninfo unavailable (fresh Ubuntu w/o vulkan-tools)
+
+    monkeypatch.setattr(hardware, "_run", fake_run)
+    gpus = _linux_gpu_pair()
+    hardware._assign_hip_indices(gpus, "llama-server")
+    assert gpus[0].hip_index == 0  # 9070 XT is Vulkan0
+    assert gpus[1].hip_index == 1  # R9700 is Vulkan1
+
+
+def test_hip_index_resolves_generic_radv_name_by_vram(monkeypatch) -> None:
+    """When Mesa reports a GENERIC name for the R9700, the unique 32 GB VRAM
+    total (and finally elimination) must still resolve the correct index —
+    hip_index=None here caused the positional fallback that loaded models
+    onto the wrong card on Ubuntu."""
+    import hardware
+
+    def fake_run(cmd, *a, **k):
+        if "--list-devices" in cmd:
+            return _LIST_DEVICES_RADV_GENERIC
+        return ""
+
+    monkeypatch.setattr(hardware, "_run", fake_run)
+    gpus = _linux_gpu_pair()
+    hardware._assign_hip_indices(gpus, "llama-server")
+    assert gpus[0].hip_index == 0
+    assert gpus[1].hip_index == 1, (
+        "generic RADV name must resolve via VRAM-total match/elimination"
+    )
+
+
+def test_duplicate_radv_names_never_share_a_device(monkeypatch) -> None:
+    """Two cards with IDENTICAL Mesa names must not both resolve to device 0
+    (and their VRAM must not collapse into one dict entry)."""
+    import hardware
+
+    out = (
+        "  Vulkan0: AMD Radeon Graphics (RADV NAVI48) (16304 MiB, 15416 MiB free)\n"
+        "  Vulkan1: AMD Radeon Graphics (RADV NAVI48) (32624 MiB, 31704 MiB free)\n"
+    )
+
+    def fake_run(cmd, *a, **k):
+        if "--list-devices" in cmd:
+            return out
+        return ""
+
+    monkeypatch.setattr(hardware, "_run", fake_run)
+    gpus = _linux_gpu_pair()
+    hardware._assign_hip_indices(gpus, "llama-server")
+    assert {gpus[0].hip_index, gpus[1].hip_index} == {0, 1}
+    assert gpus[0].hip_index == 0  # 16 GB card ↔ 16304 MiB device
+    assert gpus[1].hip_index == 1  # 32 GB card ↔ 32624 MiB device
+
+
+def test_gpu_vram_mapping_prefers_names_then_totals(monkeypatch) -> None:
+    """_map_gpus_to_llama_devices: name first, unique-VRAM second, and every
+    device claimed at most once."""
+    import hardware
+
+    devices = [
+        (0, "amd radeon rx 9070 xt (radv navi48)", 16304, 15416),
+        (1, "amd radeon graphics (radv navi48)", 32624, 31704),
+    ]
+    gpus = _linux_gpu_pair()
+    mapped = hardware._map_gpus_to_llama_devices(gpus, devices)
+    assert mapped[id(gpus[0])][0] == 0
+    assert mapped[id(gpus[1])][0] == 1
+
+
+def test_gpu_priorities_survive_os_switch(tmp_path) -> None:
+    """Windows-keyed priorities ("AMD Radeon …") must apply to the Linux
+    short names AND the Mesa RADV names, so AUTO keeps preferring the R9700
+    after booting into Ubuntu. Regression for the 'AUTO picks the 16 GB
+    9070 XT on Ubuntu' report."""
+    prio_windows_keys = {
+        "AMD Radeon AI PRO R9700": 2,
+        "AMD Radeon RX 9070 XT": 1,
+    }
+
+    for names in (
+        ("Radeon RX 9070 XT", "Radeon AI PRO R9700"),  # Linux lspci/DRM
+        (
+            "AMD Radeon RX 9070 XT (RADV NAVI48)",  # Mesa RADV
+            "AMD Radeon AI PRO R9700 (RADV NAVI48)",
+        ),
+        ("AMD Radeon RX 9070 XT", "AMD Radeon AI PRO R9700"),  # Windows WMI
+    ):
+        sysinfo = SystemInfo(
+            os_name="Linux test",
+            cpu_name="Test CPU",
+            cpu_cores_physical=16,
+            cpu_cores_logical=32,
+            total_ram_gb=48,
+            free_ram_gb=40,
+            gpus=[
+                GPUInfo(
+                    index=0,
+                    name=names[0],
+                    vendor="amd",
+                    total_vram_mb=16304,
+                    free_vram_mb=15400,
+                    hip_index=0,
+                ),
+                GPUInfo(
+                    index=1,
+                    name=names[1],
+                    vendor="amd",
+                    total_vram_mb=32624,
+                    free_vram_mb=31700,
+                    hip_index=1,
+                ),
+            ],
+        )
+        model = _fake_model(tmp_path, f"Dense-22B-Q6_{names[0][:3]}", size_gb=22.5)
+        profile = match_profile(
+            model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+        )
+        cfg = compute_config(
+            model=model,
+            system=sysinfo,
+            profile=profile,
+            gpu_priorities=prio_windows_keys,
+        )
+        # The whole model fits the R9700 → exclusive pin on ITS hip index (1).
+        assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "1", (
+            f"R9700 must stay the primary for names={names}: {cfg.env_overrides}"
+        )
+        assert cfg.main_gpu == 0  # sole visible device after remapping
+
+
+def test_forced_gpu_token_matches_both_os_name_styles(tmp_path) -> None:
+    """The GUI pin token ('9070' / 'R9700') must select the same physical
+    card under Windows AND Linux name styles."""
+    for names in (
+        ("Radeon RX 9070 XT", "Radeon AI PRO R9700"),
+        ("AMD Radeon RX 9070 XT", "AMD Radeon AI PRO R9700"),
+    ):
+        sysinfo = SystemInfo(
+            os_name="test",
+            cpu_name="Test CPU",
+            cpu_cores_physical=16,
+            cpu_cores_logical=32,
+            total_ram_gb=48,
+            free_ram_gb=40,
+            gpus=[
+                GPUInfo(
+                    index=0,
+                    name=names[0],
+                    vendor="amd",
+                    total_vram_mb=16304,
+                    free_vram_mb=15400,
+                    hip_index=0,
+                ),
+                GPUInfo(
+                    index=1,
+                    name=names[1],
+                    vendor="amd",
+                    total_vram_mb=32624,
+                    free_vram_mb=31700,
+                    hip_index=1,
+                ),
+            ],
+        )
+        model = _fake_model(tmp_path, f"Pin-9B-Q8_{names[0][:3]}", size_gb=9.0)
+        profile = match_profile(
+            model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+        )
+        cfg = compute_config(
+            model=model, system=sysinfo, profile=profile, force_gpu="9070"
+        )
+        assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "0", (
+            f"pin '9070' must select the 9070 XT (Vulkan0) for names={names}"
+        )
+        

@@ -4181,7 +4181,43 @@ class MainWindow(QMainWindow):
         # if nothing has room. The first server (none running yet) keeps the
         # AutoTuner's own placement so single-model multi-GPU splits still
         # work as before.
-        if self._servers:
+        #
+        # EXCEPTION — explicit user pin wins: when the GPU dropdown is set
+        # to a specific card (forced_gpu), that choice is ABSOLUTE. The old
+        # code let this balance pass re-pin the model onto whichever card
+        # had the most free VRAM, silently overriding the user's explicit
+        # selection (reported: model pinned to the RX 9070 XT loaded onto
+        # the R9700 because a first server left the R9700 emptier). Now we
+        # keep compute_config's pin (it already targets the forced card and
+        # hides every other GPU), only warn when the fit looks tight, and
+        # never move the model elsewhere.
+        forced_token = app_settings.get_forced_gpu()
+        forced_here = None
+        if forced_token and self._system is not None:
+            needle = forced_token.strip().lower()
+            forced_here = next(
+                (g for g in self._system.gpus if needle in g.name.lower()), None
+            )
+        if forced_here is not None:
+            need = (
+                float(cfg.estimated_model_vram_gb)
+                + float(cfg.kv_vram_gb)
+                + float(cfg.vision_vram_gb)
+                + float(cfg.draft_vram_gb)
+            )
+            if forced_here.free_vram_gb < need:
+                self._log(
+                    f"[Balance] User pin → {forced_here.name} kept, but only "
+                    f"{forced_here.free_vram_gb:.1f} GB free for ≈{need:.1f} GB "
+                    "footprint — expect CPU spill or OOM."
+                )
+            else:
+                self._log(
+                    f"[Balance] User pin → {forced_here.name} "
+                    f"({forced_here.free_vram_gb:.1f} GB free); "
+                    "skipping auto-balance."
+                )
+        elif self._servers:
             chosen_gpu, refusal = self._choose_gpu_for_launch(cfg, entry)
             if refusal is not None:
                 self._log(f"[Balance] Launch refused — {refusal.splitlines()[0]}")
@@ -4798,8 +4834,45 @@ def main(argv: Optional[List[str]] = None) -> None:
         settings_path=Path(args.settings_path),
     )
     window.show()
+
+    # ── Ctrl+C / SIGTERM: stop the servers BEFORE the GUI dies ──────────
+    # llama-server children are spawned with start_new_session (Unix) /
+    # CREATE_NEW_CONSOLE (Windows), so a Ctrl+C in the terminal that
+    # launched the GUI reaches ONLY the Python process. Without a handler,
+    # Qt's event loop dies with a raw KeyboardInterrupt and the servers
+    # keep running as orphans — on Ubuntu this showed up as "KeyboardInterrupt
+    # printed, but the VRAM is still full". We install SIGINT/SIGTERM
+    # handlers that shut every registered server down (SIGTERM to its
+    # process group, escalating to SIGKILL in _TerminalProcess.stop) and
+    # then quit the app cleanly.
+    #
+    # Python-level signal handlers only run between bytecodes; while Qt is
+    # blocked inside its C++ event loop no Python bytecode executes, so the
+    # handler would be delayed indefinitely. The idle QTimer below wakes
+    # the interpreter a few times per second, giving pending signals a spot
+    # to fire — the standard Qt-plus-Python-signals pattern.
+    def _shutdown_on_signal(_signum: int, _frame: object) -> None:
+        try:
+            window._stop_all_servers()
+        except Exception:
+            pass
+        app.quit()
+
+    for _sig_name in ("SIGINT", "SIGTERM"):
+        _sig = getattr(signal, _sig_name, None)
+        if _sig is not None:
+            try:
+                signal.signal(_sig, _shutdown_on_signal)
+            except (ValueError, OSError):
+                pass  # non-main thread / unsupported on this platform
+
+    _signal_wakeup_timer = QTimer()
+    _signal_wakeup_timer.timeout.connect(lambda: None)
+    _signal_wakeup_timer.start(250)
+
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     main()
+    

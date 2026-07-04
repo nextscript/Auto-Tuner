@@ -119,10 +119,53 @@ def _poll_wait(proc: subprocess.Popen, deadline: float) -> bool:
     return proc.poll() is not None
 
 
+def _install_terminal_signal_handlers() -> dict:
+    """Route SIGTERM (and SIGHUP on Unix) into KeyboardInterrupt.
+
+    The child runs in its own session/process group so it deliberately does
+    NOT receive the terminal's signals — WE are responsible for forwarding
+    a shutdown. Without this, closing the terminal window (SIGHUP) or a
+    ``kill <pid>`` (SIGTERM) killed only the Python wrapper and left
+    llama-server running with the VRAM still allocated. Converting both
+    into KeyboardInterrupt funnels every "please stop" into the one
+    graceful-shutdown path in :func:`launch`.
+
+    Returns the previous handlers so the caller can restore them.
+    """
+
+    def _raise_kbint(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    previous: dict = {}
+    for name in ("SIGTERM", "SIGHUP"):  # SIGHUP doesn't exist on Windows
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, _raise_kbint)
+        except (ValueError, OSError):
+            pass  # non-main thread / unsupported — keep default behaviour
+    return previous
+
+
+def _restore_signal_handlers(previous: dict) -> None:
+    for sig, handler in previous.items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+
 def launch(cmd: List[str], env_overrides: Optional[dict] = None) -> int:
     """Run llama-server until it exits or until the user presses Ctrl+C.
 
     Returns the child's exit code (or 130 if it had to be killed).
+
+    Guarantee: on EVERY exit path — normal child exit, Ctrl+C, SIGTERM,
+    SIGHUP (terminal closed), or an unexpected exception — the child is
+    either already dead or gets terminated (SIGTERM/CTRL_BREAK, escalating
+    to SIGKILL). This function never leaves an orphaned llama-server
+    holding VRAM.
     """
     print(
         f"\n[AutoTuner] Starting:\n  {' '.join(_quote(c) for c in cmd)}\n", flush=True
@@ -146,43 +189,64 @@ def launch(cmd: List[str], env_overrides: Optional[dict] = None) -> int:
         flush=True,
     )
 
-    # ---- Main wait loop ---------------------------------------------------
-    # Polling — see the module docstring for why we can't use plain
-    # proc.wait() on Windows.
+    prev_handlers = _install_terminal_signal_handlers()
     try:
-        while True:
+        # ---- Main wait loop -----------------------------------------------
+        # Polling — see the module docstring for why we can't use plain
+        # proc.wait() on Windows.
+        try:
+            while True:
+                try:
+                    return proc.wait(timeout=_POLL_INTERVAL_SECONDS)
+                except subprocess.TimeoutExpired:
+                    continue
+        except KeyboardInterrupt:
+            pass
+
+        # ---- Graceful shutdown ---------------------------------------------
+        print("\n[AutoTuner] Stopping llama-server...", flush=True)
+        _terminate(proc)
+
+        deadline = time.monotonic() + _GRACEFUL_TIMEOUT_SECONDS
+        try:
+            if _poll_wait(proc, deadline):
+                print("[AutoTuner] Stopped cleanly.")
+                return proc.returncode if proc.returncode is not None else 0
+        except KeyboardInterrupt:
+            # Second Ctrl+C during the grace period — user wants out *now*.
+            print("[AutoTuner] Second Ctrl+C — forcing kill.")
+            _force_kill(proc)
             try:
-                return proc.wait(timeout=_POLL_INTERVAL_SECONDS)
+                proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                continue
-    except KeyboardInterrupt:
-        pass
+                pass
+            return 130
 
-    # ---- Graceful shutdown -----------------------------------------------
-    print("\n[AutoTuner] Stopping llama-server...", flush=True)
-    _terminate(proc)
-
-    deadline = time.monotonic() + _GRACEFUL_TIMEOUT_SECONDS
-    try:
-        if _poll_wait(proc, deadline):
-            print("[AutoTuner] Stopped cleanly.")
-            return proc.returncode if proc.returncode is not None else 0
-    except KeyboardInterrupt:
-        # Second Ctrl+C during the grace period — user wants out *now*.
-        print("[AutoTuner] Second Ctrl+C — forcing kill.")
+        print(
+            f"[AutoTuner] Did not exit within "
+            f"{_GRACEFUL_TIMEOUT_SECONDS}s — forcing kill."
+        )
         _force_kill(proc)
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             pass
         return 130
-
-    print(
-        f"[AutoTuner] Did not exit within {_GRACEFUL_TIMEOUT_SECONDS}s — forcing kill."
-    )
-    _force_kill(proc)
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        pass
-    return 130
+    finally:
+        # Safety net for ANY exit path not covered above (unexpected
+        # exception, a KeyboardInterrupt landing between statements, …):
+        # if the child is somehow still alive, take it down before the
+        # wrapper exits so no orphan keeps the VRAM allocated.
+        if proc.poll() is None:
+            _terminate(proc)
+            try:
+                if not _poll_wait(proc, time.monotonic() + 3):
+                    _force_kill(proc)
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except KeyboardInterrupt:
+                _force_kill(proc)
+        _restore_signal_handlers(prev_handlers)
+        

@@ -683,6 +683,8 @@ def _linux_lspci_gpu_map() -> Dict[str, Tuple[str, Optional[int]]]:
     if not out:
         out = _run(["lspci", "-mm"])
     result: Dict[str, Tuple[str, Optional[int]]] = {}
+    if not out:
+        return result
     for line in out.splitlines():
         parsed = _parse_lspci_mm_line(line)
         if not parsed:
@@ -1432,45 +1434,24 @@ def _detect_llama_device_order(binary: Optional[str]) -> List[str]:
 
     Returns an empty list when the binary is missing, errors, or its
     output can't be parsed.
+
+    Thin ordered-names view over :func:`_detect_llama_devices` (which is
+    the full table including per-device VRAM).
     """
-    if not binary:
-        return []
-    out = _run([binary, "--list-devices"], timeout=15)
-    if not out:
-        return []
-    # "<Backend><index>: <name> (<NNNN MiB>, ...)" — Backend ∈ {Vulkan, ROCm, CUDA, …}
-    # Anchored on the "(NNNN MiB" memory annotation so device names that
-    # themselves contain parentheses (e.g. "Intel(R) Graphics") aren't
-    # truncated at the first '('.
-    pat = re.compile(
-        r"^\s*[A-Za-z][A-Za-z0-9]*?(\d+):\s*(.+?)\s*\(\s*\d+\s*(?:MiB|MB|GiB|GB)",
-        re.MULTILINE,
-    )
-    indexed: List[Tuple[int, str]] = []
-    for m in pat.finditer(out):
-        try:
-            idx = int(m.group(1))
-        except ValueError:
-            continue
-        name = m.group(2).strip()
-        if name:
-            indexed.append((idx, name.lower()))
-    if not indexed:
-        return []
-    indexed.sort(key=lambda t: t[0])
-    return [n for _, n in indexed]
+    return [name for (_idx, name, _t, _f) in _detect_llama_devices(binary)]
 
 
-def _detect_llama_device_vram(
+def _detect_llama_devices(
     binary: Optional[str],
-) -> Dict[str, Tuple[int, int]]:
-    """Return ``{gpu_name_lower: (total_mb, free_mb)}`` from ``--list-devices``.
+) -> List[Tuple[int, str, int, int]]:
+    """Return ``[(device_index, name_lower, total_mb, free_mb), …]`` from
+    ``<binary> --list-devices``, sorted by device index.
 
-    This is the AUTHORITATIVE VRAM source: the numbers llama-server itself
-    reports for each backend device, already attributed to the correct card
-    and reflecting live residency of anything already loaded (other servers,
-    the desktop, OBS, games). It is the same binary that will run inference,
-    so the free figure is exactly what the next model has to fit into.
+    This is the AUTHORITATIVE device table: the exact enumeration order,
+    names and VRAM numbers the inference binary itself will use for
+    ``--main-gpu`` / ``--tensor-split`` / the visibility env vars. The free
+    figure reflects live residency of anything already loaded (other
+    servers, the desktop, OBS, games).
 
     Using this sidesteps every Windows WMI problem at once — missing
     DedicatedUsage counters on RDNA 5, the LUID-vs-PCI-id mismatch, and the
@@ -1478,24 +1459,32 @@ def _detect_llama_device_vram(
     swap the two AMD cards (reporting the full RX 9070 XT as empty and the
     empty R9700 as half-full).
 
+    IMPORTANT (Linux/Mesa RADV): two cards can carry the SAME device name
+    (e.g. both "AMD Radeon Graphics (RADV NAVI48)" when Mesa doesn't know a
+    card's marketing name yet). A name-keyed dict would silently collapse
+    them into one entry — this indexed LIST keeps every device distinct so
+    callers can disambiguate by total VRAM instead.
+
     Output line shape (Vulkan build):
 
         Vulkan0: AMD Radeon RX 9070 XT (16304 MiB, 15416 MiB free)
 
-    Units are normalised to MB (MiB/MB treated as ~MB; GiB/GB ×1024). Returns
-    ``{}`` when the binary is missing, errors, or the table can't be parsed.
+    Units are normalised to MB (MiB/MB treated as ~MB; GiB/GB ×1024).
+    Returns ``[]`` when the binary is missing, errors, or the table can't
+    be parsed.
     """
     if not binary:
-        return {}
+        return []
     out = _run([binary, "--list-devices"], timeout=15)
     if not out:
-        return {}
+        return []
 
     # "<Backend><idx>: <name> (<TOTAL UNIT>, <FREE UNIT> free)"
-    # Name may contain parentheses (e.g. "Intel(R) Graphics"), so anchor the
-    # capture on the " (NNNN <unit>, NNNN <unit> free)" memory annotation.
+    # Name may contain parentheses (e.g. "Intel(R) Graphics" or Mesa's
+    # "(RADV NAVI48)" suffix), so anchor the capture on the
+    # " (NNNN <unit>, NNNN <unit> free)" memory annotation.
     pat = re.compile(
-        r"^\s*[A-Za-z][A-Za-z0-9]*?\d+:\s*(.+?)\s*\(\s*"
+        r"^\s*[A-Za-z][A-Za-z0-9]*?(\d+):\s*(.+?)\s*\(\s*"
         r"(\d+)\s*(MiB|MB|GiB|GB)\s*,\s*"
         r"(\d+)\s*(MiB|MB|GiB|GB)\s*free\s*\)",
         re.MULTILINE,
@@ -1506,15 +1495,102 @@ def _detect_llama_device_vram(
             return value * 1024
         return value  # MiB ≈ MB for our purposes
 
-    result: Dict[str, Tuple[int, int]] = {}
+    devices: List[Tuple[int, str, int, int]] = []
     for m in pat.finditer(out):
-        name = m.group(1).strip().lower()
+        try:
+            idx = int(m.group(1))
+        except ValueError:
+            continue
+        name = m.group(2).strip().lower()
         if not name:
             continue
-        total_mb = _to_mb(int(m.group(2)), m.group(3))
-        free_mb = _to_mb(int(m.group(4)), m.group(5))
+        total_mb = _to_mb(int(m.group(3)), m.group(4))
+        free_mb = _to_mb(int(m.group(5)), m.group(6))
         if total_mb > 0:
-            result[name] = (total_mb, min(free_mb, total_mb))
+            devices.append((idx, name, total_mb, min(free_mb, total_mb)))
+    devices.sort(key=lambda t: t[0])
+    return devices
+
+
+def _map_gpus_to_llama_devices(
+    gpus: List["GPUInfo"], devices: List[Tuple[int, str, int, int]]
+) -> Dict[int, Tuple[int, str, int, int]]:
+    """Map each GPU (by ``id()``) onto exactly one ``--list-devices`` entry.
+
+    Matching order, per GPU:
+      1. **Name match** via :func:`_best_gpu_name_match` — handles Windows
+         driver strings, Linux lspci marketing names and Mesa's
+         "… (RADV NAVI48)" suffixes.
+      2. **Total-VRAM match** — when the name can't be matched (Mesa
+         reporting a generic "AMD Radeon Graphics" for a card it doesn't
+         know yet), the physical VRAM size is the next-best physical
+         identity. Only applied when it is UNAMBIGUOUS: exactly one
+         unclaimed device within a ±6 % / ±512 MB tolerance of the GPU's
+         detected total.
+      3. **Elimination** — if after passes 1+2 exactly one GPU is still
+         unmapped and exactly one device is unclaimed, pair them.
+
+    Every device is claimed at most once (two identically-NAMED RADV cards
+    can no longer both resolve to device 0). Returns ``{id(gpu): device}``
+    for every GPU that could be mapped; unmapped GPUs are absent.
+    """
+    mapping: Dict[int, Tuple[int, str, int, int]] = {}
+    if not gpus or not devices:
+        return mapping
+
+    claimed: set = set()
+    dev_names = [d[1] for d in devices]
+
+    # Pass 1: name match (skip devices already claimed by an earlier GPU —
+    # prevents duplicate names from double-assigning the same index).
+    unmatched: List[GPUInfo] = []
+    for gpu in gpus:
+        idx = _best_gpu_name_match(gpu.name, dev_names)
+        if idx is not None and devices[idx][0] not in claimed:
+            mapping[id(gpu)] = devices[idx]
+            claimed.add(devices[idx][0])
+        else:
+            unmatched.append(gpu)
+
+    # Pass 2: unambiguous total-VRAM match for the leftovers.
+    still_unmatched: List[GPUInfo] = []
+    for gpu in unmatched:
+        if gpu.total_vram_mb <= 0:
+            still_unmatched.append(gpu)
+            continue
+        tol = max(512, int(gpu.total_vram_mb * 0.06))
+        cands = [
+            d
+            for d in devices
+            if d[0] not in claimed and abs(d[2] - gpu.total_vram_mb) <= tol
+        ]
+        if len(cands) == 1:
+            mapping[id(gpu)] = cands[0]
+            claimed.add(cands[0][0])
+        else:
+            still_unmatched.append(gpu)
+
+    # Pass 3: elimination — one GPU left, one device left.
+    if len(still_unmatched) == 1:
+        leftover = [d for d in devices if d[0] not in claimed]
+        if len(leftover) == 1:
+            mapping[id(still_unmatched[0])] = leftover[0]
+    return mapping
+
+
+def _detect_llama_device_vram(
+    binary: Optional[str],
+) -> Dict[str, Tuple[int, int]]:
+    """Return ``{gpu_name_lower: (total_mb, free_mb)}`` from ``--list-devices``.
+
+    Thin name-keyed view over :func:`_detect_llama_devices`, kept for
+    callers that only need per-name VRAM. NOTE: two devices with identical
+    names collapse to one key here — order-sensitive callers must use
+    :func:`_detect_llama_devices` / :func:`_map_gpus_to_llama_devices`.
+    """
+    result: Dict[str, Tuple[int, int]] = {}
+    for _idx, name, total_mb, free_mb in _detect_llama_devices(binary):
+        result[name] = (total_mb, free_mb)
     return result
 
 
@@ -1666,9 +1742,9 @@ def _get_pci_device_ids() -> Dict[str, int]:
     """
     result: Dict[str, int] = {}
     if platform.system() == "Linux":
-        for name, dev_id in _linux_lspci_gpu_map().values():
-            if dev_id is not None:
-                result[name.lower()] = dev_id
+        for lname, ldev_id in _linux_lspci_gpu_map().values():
+            if ldev_id is not None:
+                result[lname.lower()] = ldev_id
         return result
     if platform.system() != "Windows":
         return result
@@ -1796,11 +1872,17 @@ def _assign_hip_indices(
 
       1. **PCI device ID match** (the Rosetta Stone). vulkaninfo --summary
          gives each Vulkan index its ``deviceID``; we match that against the
-         GPU's ``pci_device_id`` (from WMI). Order- and name-independent, so
-         it is correct even for two identically *named* cards.
-      2. **Name match against ``--list-devices``** — the authoritative order
-         reported by the very binary that will run inference. Used when the
-         PCI id is unavailable on either side.
+         GPU's ``pci_device_id`` (WMI on Windows, DRM sysfs/lspci on Linux).
+         Order- and name-independent, so it is correct even for two
+         identically *named* cards. Requires vulkaninfo (Vulkan SDK /
+         ``vulkan-tools``) — often NOT installed on a fresh Ubuntu.
+      2. **Name + VRAM match against ``--list-devices``** — the
+         authoritative table reported by the very binary that will run
+         inference. Names are matched first; cards whose names don't match
+         (Mesa RADV can report a generic "AMD Radeon Graphics (RADV …)"
+         for very new cards like the R9700) are matched by their UNIQUE
+         total VRAM instead, and a single leftover pair is resolved by
+         elimination. Each device index is claimed at most once.
       3. **Name match against vulkaninfo** (summary, then legacy) as a final
          fallback when the llama binary can't be located.
 
@@ -1817,30 +1899,39 @@ def _assign_hip_indices(
     }
     summary_names: List[str] = [name for (_idx, name, _d) in vk_summary]
 
-    # --- Source B: llama-server --list-devices → ordered names (preferred
-    #     for *name* matching since it is the runtime's own enumeration). ---
-    llama_names = _detect_llama_device_order(llama_binary)
-
-    # --- Source C: legacy vulkaninfo name probe (last resort). ------------
-    legacy_names = llama_names or summary_names or _detect_vulkan_device_order()
-
+    # 1. PCI device-id match — strongest, order/name independent.
     for gpu in gpus:
         if gpu.hip_index is not None:
             continue
-        # 1. PCI device-id match — strongest, order/name independent.
         if gpu.pci_device_id is not None and gpu.pci_device_id in devid_to_idx:
             gpu.hip_index = devid_to_idx[gpu.pci_device_id]
+
+    # --- Source B: llama-server --list-devices → indexed device table
+    #     (preferred over vulkaninfo names since it is the runtime's own
+    #     enumeration AND carries per-device VRAM for name-free matching). ---
+    llama_devices = _detect_llama_devices(llama_binary)
+    pending = [g for g in gpus if g.hip_index is None]
+    if pending and llama_devices:
+        # Devices already claimed via PCI-id must not be re-assigned.
+        claimed_idx = {g.hip_index for g in gpus if g.hip_index is not None}
+        free_devices = [d for d in llama_devices if d[0] not in claimed_idx]
+        for gid, dev in _map_gpus_to_llama_devices(pending, free_devices).items():
+            for g in pending:
+                if id(g) == gid:
+                    g.hip_index = dev[0]
+                    break
+
+    # --- Source C: legacy vulkaninfo name probe (last resort). ------------
+    llama_names = [d[1] for d in llama_devices]
+    legacy_names = llama_names or summary_names or _detect_vulkan_device_order()
+    taken = {g.hip_index for g in gpus if g.hip_index is not None}
+    for gpu in gpus:
+        if gpu.hip_index is not None:
             continue
-        # 2. Name match against the llama binary's own device list.
-        if llama_names:
-            idx = _match_gpu_to_vulkan(gpu.name, llama_names)
-            if idx is not None:
-                gpu.hip_index = idx
-                continue
-        # 3. Name match against vulkaninfo (summary → legacy).
         idx = _match_gpu_to_vulkan(gpu.name, legacy_names)
-        if idx is not None:
+        if idx is not None and idx not in taken:
             gpu.hip_index = idx
+            taken.add(idx)
 
 
 def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
@@ -1940,17 +2031,17 @@ def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
     # the next model must fit into. Name-keyed (lowercased), unique per card.
     llama_bin = _resolve_llama_binary(llama_binary)
     try:
-        dev_vram = _detect_llama_device_vram(llama_bin)
-        if dev_vram:
-            dev_names = list(dev_vram.keys())
+        llama_devices = _detect_llama_devices(llama_bin)
+        if llama_devices:
+            # One device per GPU, never double-assigned — critical on Linux
+            # where Mesa RADV can give two cards the SAME device name (which
+            # used to collapse them into one dict entry and overwrite both
+            # cards with the same total/free figures).
+            mapped = _map_gpus_to_llama_devices(raw, llama_devices)
             for g in raw:
-                hit = dev_vram.get(g.name.lower())
-                if hit is None:
-                    idx = _best_gpu_name_match(g.name, dev_names)
-                    if idx is not None:
-                        hit = dev_vram.get(dev_names[idx])
-                if hit is not None:
-                    total_mb, free_mb = hit
+                dev = mapped.get(id(g))
+                if dev is not None:
+                    _idx, _name, total_mb, free_mb = dev
                     g.total_vram_mb = total_mb
                     g.free_vram_mb = free_mb
     except Exception:

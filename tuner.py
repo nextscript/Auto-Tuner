@@ -1011,8 +1011,51 @@ def compute_config(
     # Falls back gracefully to the summed value on single-GPU / CPU systems.
     _prio_map = gpu_priorities or {}
 
+    def _gpu_priority(g: GPUInfo) -> int:
+        """Priority for *g* with OS-robust name matching.
+
+        Priorities are persisted keyed by the GPU name of the OS they were
+        set on ("AMD Radeon AI PRO R9700" from Windows WMI), but the SAME
+        card is called "Radeon AI PRO R9700" by Linux lspci/DRM and
+        "AMD Radeon AI PRO R9700 (RADV NAVI48)" by Mesa. An exact dict.get
+        therefore silently dropped every priority after switching OS — the
+        Ubuntu "AUTO picks the 16 GB card" report. Match exact → case-
+        insensitive → substring (either direction) → shared model-number
+        token (e.g. "r9700", "9070"), so one settings file serves both
+        boots. Falls back to 1 (neutral) when nothing matches.
+        """
+        hit = _prio_map.get(g.name)
+        if hit is not None:
+            return max(1, hit)
+        g_lower = g.name.strip().lower()
+        if not g_lower:
+            return 1
+        for key, prio in _prio_map.items():
+            k_lower = key.strip().lower()
+            if k_lower == g_lower or k_lower in g_lower or g_lower in k_lower:
+                return max(1, prio)
+        # Model-number token match: any alnum token containing a digit that
+        # both names share ("r9700", "9070", "3060ti") identifies the card
+        # across driver-string variants; generation tokens like "navi48"
+        # appear on BOTH of Basti's cards and are therefore excluded by
+        # requiring the token to exist in the *stored* key too (a settings
+        # key never contains the Mesa "(RADV NAVI48)" suffix).
+        g_tokens = {
+            t for t in re.findall(r"[a-z0-9]+", g_lower) if any(c.isdigit() for c in t)
+        }
+        if g_tokens:
+            for key, prio in _prio_map.items():
+                k_tokens = {
+                    t
+                    for t in re.findall(r"[a-z0-9]+", key.lower())
+                    if any(c.isdigit() for c in t)
+                }
+                if k_tokens and (g_tokens & k_tokens):
+                    return max(1, prio)
+        return 1
+
     def _gpu_score(g: GPUInfo) -> float:
-        return max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb
+        return _gpu_priority(g) * g.total_vram_mb
 
     # Resolve an explicit user pin (force_gpu) up front. Matched case-
     # insensitively against the card name; substring match is allowed so the
@@ -1739,7 +1782,7 @@ def compute_config(
             #     counts) stranded the Vulkan-device-0 card at ~8/16 GB.
             ordered = sorted(
                 system.gpus,
-                key=lambda g: max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb,
+                key=_gpu_score,
                 reverse=True,  # primary (highest score) first
             )
             caps = [_gpu_usable_cap_gb(g, g is primary_gpu) for g in ordered]
@@ -1786,9 +1829,7 @@ def compute_config(
                 weights = list(caps)
             else:
                 # Priority×VRAM weights — bias the high-priority AI card.
-                weights = [
-                    max(1, _prio_map.get(g.name, 1)) * g.total_vram_mb for g in ordered
-                ]
+                weights = [_gpu_score(g) for g in ordered]
             total_weight = sum(weights)
 
             # First pass: allocate proportionally by the chosen weighting,
