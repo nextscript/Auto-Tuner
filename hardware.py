@@ -541,7 +541,11 @@ class SystemInfo:
 # Helpers
 
 
-def _run(cmd: List[str], timeout: float = 5) -> Optional[str]:
+def _run(
+    cmd: List[str],
+    timeout: float = 5,
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Run a command and return stdout, or None on any failure.
 
     On Windows, CREATE_NO_WINDOW suppresses the brief console-window flash
@@ -549,6 +553,8 @@ def _run(cmd: List[str], timeout: float = 5) -> Optional[str]:
     """
     try:
         kwargs: dict = {}
+        if env is not None:
+            kwargs["env"] = env
         if os.name == "nt":
             # Prevent subprocess from creating a visible console window.
             # Without this flag, every powershell call briefly flashes a
@@ -571,6 +577,205 @@ def _run(cmd: List[str], timeout: float = 5) -> Optional[str]:
 
 # ---------------------------------------------------------------------------
 # GPU detection per vendor
+
+
+def _read_int_file(path: Path) -> Optional[int]:
+    """Read a decimal or 0x-prefixed integer from *path* (best effort)."""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(raw, 0)
+    except ValueError:
+        return None
+
+
+def _clean_lspci_label(label: str) -> str:
+    """Drop numeric PCI-id suffixes from lspci -nn labels, keep marketing names."""
+    label = re.sub(r"\s*\[[0-9a-fA-F]{4,}\]\s*$", "", label).strip()
+    label = re.sub(r"\s+", " ", label)
+    return label
+
+
+def _shorten_gpu_display_name(name: str, pci_device_id: Optional[int] = None) -> str:
+    """Make verbose Linux PCI vendor names fit into the GUI/terminal columns."""
+    # lspci is still ambiguous for very new RDNA cards; use the PCI id for the
+    # user's known cards so the visible label stays short and exact.
+    if pci_device_id == 0x7550:
+        return "Radeon RX 9070 XT"
+    if pci_device_id == 0x7551:
+        return "Radeon AI PRO R9700"
+
+    # For AMD cards prefer only the marketing name inside the Radeon bracket:
+    # "Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon ...]" is too
+    # long for the status widgets; "Radeon ..." remains readable.
+    radeon = re.search(r"\[(Radeon[^\]]+)\]", name, flags=re.IGNORECASE)
+    if radeon:
+        return re.sub(r"\s+", " ", radeon.group(1)).strip()
+
+    # Intel lspci names are similarly verbose:
+    # "Intel Corporation Arrow Lake-S [Intel Graphics]" → "Intel Graphics".
+    if re.search(r"\bIntel Corporation\b", name, flags=re.IGNORECASE):
+        bracket = re.search(r"\[([^\]]+)\]", name)
+        if bracket:
+            label = re.sub(r"\s+", " ", bracket.group(1)).strip()
+            if label.lower().startswith("intel"):
+                return label
+            return f"Intel {label}"
+        return re.sub(
+            r"\bIntel Corporation\b",
+            "Intel",
+            re.sub(r"\s+", " ", name),
+            flags=re.IGNORECASE,
+        ).strip()
+
+    name = re.sub(
+        r"\bAdvanced Micro Devices,\s*Inc\.\s*\[AMD/ATI\]",
+        "AMD",
+        name,
+        flags=re.IGNORECASE,
+    )
+    name = re.sub(
+        r"\bAdvanced Micro Devices,\s*Inc\.\b",
+        "AMD",
+        name,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _parse_lspci_mm_line(line: str) -> Optional[Tuple[str, str, str, Optional[int]]]:
+    """Parse one lspci -mm/-nnmm line.
+
+    Returns ``(slot, class, vendor+device label, pci_device_id)``.
+    """
+    m_slot = re.match(r"^(\S+)\s+", line)
+    if not m_slot:
+        return None
+    quoted = [p.strip('"') for p in re.findall(r'"[^"]*"', line)]
+    if len(quoted) < 3:
+        return None
+    cls = _clean_lspci_label(quoted[0])
+    vendor = _clean_lspci_label(quoted[1])
+    device_raw = quoted[2]
+    dev_id: Optional[int] = None
+    m_dev = re.search(r"\[([0-9a-fA-F]{4,})\]\s*$", device_raw)
+    if m_dev:
+        try:
+            dev_id = int(m_dev.group(1), 16)
+        except ValueError:
+            dev_id = None
+    device = _clean_lspci_label(device_raw)
+    name = _shorten_gpu_display_name(f"{vendor} {device}".strip(), dev_id)
+    return m_slot.group(1), cls, name, dev_id
+
+
+def _linux_lspci_gpu_map() -> Dict[str, Tuple[str, Optional[int]]]:
+    """Return ``{pci_slot: (display_name, device_id)}`` for Linux GPUs."""
+    if platform.system() != "Linux" or not shutil.which("lspci"):
+        return {}
+    out = _run(["lspci", "-D", "-nnmm"])
+    if not out:
+        out = _run(["lspci", "-nnmm"])
+    if not out:
+        out = _run(["lspci", "-mm"])
+    result: Dict[str, Tuple[str, Optional[int]]] = {}
+    for line in out.splitlines():
+        parsed = _parse_lspci_mm_line(line)
+        if not parsed:
+            continue
+        slot, cls, name, dev_id = parsed
+        if not re.search(r"^(VGA|3D|Display)", cls, re.IGNORECASE):
+            continue
+        result[slot] = (name, dev_id)
+        # lspci without -D may omit the 0000: domain while sysfs includes it.
+        if slot.startswith("0000:"):
+            result[slot[5:]] = (name, dev_id)
+        elif re.match(r"^[0-9a-fA-F]{2}:", slot):
+            result[f"0000:{slot}"] = (name, dev_id)
+    return result
+
+
+def _detect_linux_drm_gpus(skip_names: Optional[set] = None) -> List[GPUInfo]:
+    """Linux GPU detection via DRM/amdgpu sysfs.
+
+    This is the path nvtop-style tools use for modern AMD cards. It does not
+    depend on ROCm support, so very new RDNA cards (where rocm-smi and Ubuntu's
+    system monitor may still report nothing useful) still expose VRAM totals,
+    live VRAM usage and GPU busy percent through /sys/class/drm/card*/device.
+    """
+    if platform.system() != "Linux":
+        return []
+    drm_root = Path("/sys/class/drm")
+    if not drm_root.exists():
+        return []
+
+    skip = {n.lower() for n in (skip_names or set())}
+    lspci = _linux_lspci_gpu_map()
+    gpus: List[GPUInfo] = []
+    seen_slots: set = set()
+
+    for card in sorted(drm_root.glob("card[0-9]*"), key=lambda p: p.name):
+        dev = card / "device"
+        if not dev.exists():
+            continue
+        vendor_id = _read_int_file(dev / "vendor")
+        device_id = _read_int_file(dev / "device")
+        if vendor_id is None:
+            continue
+
+        slot = ""
+        try:
+            slot = dev.resolve().name
+        except OSError:
+            slot = ""
+        try:
+            for line in (dev / "uevent").read_text(
+                encoding="utf-8", errors="ignore"
+            ).splitlines():
+                if line.startswith("PCI_SLOT_NAME="):
+                    slot = line.split("=", 1)[1].strip()
+                    break
+        except OSError:
+            pass
+        if slot and slot in seen_slots:
+            continue
+        if slot:
+            seen_slots.add(slot)
+
+        mapped = lspci.get(slot) if slot else None
+        name = mapped[0] if mapped else ""
+        if not name:
+            vendor_label = {
+                0x1002: "AMD",
+                0x10DE: "NVIDIA",
+                0x8086: "Intel",
+            }.get(vendor_id, "Unknown")
+            dev_label = f"0x{device_id:04x}" if device_id is not None else card.name
+            name = f"{vendor_label} GPU {dev_label}"
+        if name.lower() in skip:
+            continue
+
+        total_b = _read_int_file(dev / "mem_info_vram_total") or 0
+        used_b = _read_int_file(dev / "mem_info_vram_used") or 0
+        free_b = max(0, total_b - used_b)
+        busy = _read_int_file(dev / "gpu_busy_percent")
+        pci_id = device_id if device_id is not None else (mapped[1] if mapped else None)
+        gpus.append(
+            GPUInfo(
+                index=len(gpus),
+                name=name,
+                vendor=_vendor_from_name(name),
+                total_vram_mb=total_b // (1024 * 1024),
+                free_vram_mb=free_b // (1024 * 1024),
+                gpu_util_percent=float(busy if busy is not None else 0.0),
+                pci_device_id=pci_id,
+            )
+        )
+    return gpus
 
 
 def _detect_nvidia() -> List[GPUInfo]:
@@ -1014,36 +1219,31 @@ def _detect_windows_gpus(skip_names: Optional[set] = None) -> List[GPUInfo]:
 
 
 def _detect_linux_other_gpus(skip_names: Optional[set] = None) -> List[GPUInfo]:
-    """Linux: catch GPUs that nvidia-smi/rocm-smi missed (mainly Intel iGPUs).
+    """Linux: catch GPUs that vendor/sysfs probes missed.
 
-    Uses lspci for naming. VRAM is unknown without vendor SDKs, so it stays 0
-    and these GPUs end up filtered out when a real dGPU is also present.
+    Uses lspci for naming and PCI ids. VRAM stays 0 here; when a llama-server
+    binary is available, detect_system() later fills total/free VRAM from its
+    authoritative --list-devices output using fuzzy name matching.
     """
     if platform.system() != "Linux":
         return []
     skip = {n.lower() for n in (skip_names or set())}
-    out = _run(["lspci", "-mm"])
-    if not out:
-        return []
     gpus: List[GPUInfo] = []
-    for line in out.splitlines():
-        if not re.search(r'"(VGA|3D|Display)', line):
+    seen_names: set = set()
+    for name, dev_id in _linux_lspci_gpu_map().values():
+        lname = name.lower()
+        if lname in skip or lname in seen_names:
             continue
-        parts = [p.strip('"') for p in re.findall(r'"[^"]*"', line)]
-        if len(parts) < 4:
-            continue
-        vendor_str = parts[1]
-        name = parts[2]
-        if name.lower() in skip:
-            continue
+        seen_names.add(lname)
         gpus.append(
             GPUInfo(
                 index=len(gpus),
-                name=f"{vendor_str} {name}".strip(),
-                vendor=_vendor_from_name(f"{vendor_str} {name}"),
+                name=name,
+                vendor=_vendor_from_name(name),
                 total_vram_mb=0,
                 free_vram_mb=0,
                 gpu_util_percent=0.0,
+                pci_device_id=dev_id,
             )
         )
     return gpus
@@ -1330,8 +1530,15 @@ def _detect_vulkan_device_order() -> List[str]:
     Uses ``vulkaninfo`` (shipped with the Vulkan SDK).
     Returns an empty list when the tool is unavailable or fails.
     """
-    # JSON form (Vulkan SDK ≥ 1.3 — clean, stable)
+    # JSON form (Vulkan SDK ≥ 1.3 — clean, stable). On Linux, retry with
+    # DISPLAY/WAYLAND_DISPLAY cleared when launched from a service/root shell
+    # that has stale GUI auth; vulkaninfo can still enumerate devices headless.
     out = _run(["vulkaninfo", "--json"], timeout=10)
+    if not out and platform.system() == "Linux":
+        env = os.environ.copy()
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+        out = _run(["vulkaninfo", "--json"], timeout=10, env=env)
     if out:
         try:
             start = out.find("{")
@@ -1354,6 +1561,11 @@ def _detect_vulkan_device_order() -> List[str]:
 
     # Plain-text fallback (older vulkaninfo versions)
     out = _run(["vulkaninfo"], timeout=12)
+    if not out and platform.system() == "Linux":
+        env = os.environ.copy()
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+        out = _run(["vulkaninfo"], timeout=12, env=env)
     if not out:
         return []
     names = []
@@ -1370,50 +1582,94 @@ def _detect_vulkan_device_order() -> List[str]:
     return names
 
 
-def _match_gpu_to_vulkan(gpu_name: str, vulkan_names: List[str]) -> Optional[int]:
-    """Return the Vulkan device index that best matches *gpu_name*, or None.
+_GPU_GENERIC_TOKENS = {
+    "advanced",
+    "amd",
+    "ati",
+    "compatible",
+    "controller",
+    "corporation",
+    "devices",
+    "geforce",
+    "graphics",
+    "gpu",
+    "inc",
+    "intel",
+    "micro",
+    "navi",
+    "nvidia",
+    "processor",
+    "radeon",
+    "series",
+    "the",
+}
 
-    Matching strategy (most → least specific):
-      1. Direct substring: gpu_name in vk_name OR vk_name in gpu_name
-      2. Key-token match: ALL distinguishing tokens of gpu_name appear in vk_name
-         (e.g. ["9070", "xt"] for "AMD Radeon RX 9070 XT")
+
+def _gpu_match_tokens(name: str) -> set:
+    tokens = set(re.findall(r"[a-z0-9]+", name.lower()))
+    # Drop short family tokens like RDNA generation "48". They are useful for
+    # marketing, but not unique enough to distinguish RX 9070 XT from R9700.
+    return {t for t in tokens if t not in _GPU_GENERIC_TOKENS and len(t) > 2}
+
+
+def _best_gpu_name_match(gpu_name: str, candidate_names: List[str]) -> Optional[int]:
+    """Return the best candidate index for a GPU display name.
+
+    Handles Linux lspci marketing strings such as
+    ``Navi 48 [Radeon RX 9070/9070 XT/9070 GRE]`` matching llama.cpp's shorter
+    ``AMD Radeon RX 9070 XT`` output, without requiring every lspci token to
+    appear in the runtime name.
     """
     gpu_lower = gpu_name.lower()
-
-    # Step 1 — direct substring
-    for i, vk in enumerate(vulkan_names):
-        if gpu_lower in vk or vk in gpu_lower:
+    for i, cand in enumerate(candidate_names):
+        cand_lower = cand.lower()
+        if gpu_lower in cand_lower or cand_lower in gpu_lower:
             return i
 
-    # Step 2 — key-token match
-    _GENERIC = {"amd", "radeon", "nvidia", "geforce", "intel", "arc",
-                "gpu", "graphics", "processor", "the", "pro", "rx"}
-    tokens = re.findall(r"[a-z0-9]+", gpu_lower)
-    key = [t for t in tokens if t not in _GENERIC and (len(t) > 2 or t.isdigit())]
-    if key:
-        for i, vk in enumerate(vulkan_names):
-            if all(t in vk for t in key):
-                return i
+    gpu_tokens = _gpu_match_tokens(gpu_name)
+    if not gpu_tokens:
+        return None
+    gpu_digit_tokens = {t for t in gpu_tokens if any(ch.isdigit() for ch in t)}
 
-    return None
+    best_idx: Optional[int] = None
+    best_score = 0
+    for i, cand in enumerate(candidate_names):
+        cand_tokens = _gpu_match_tokens(cand)
+        overlap = gpu_tokens & cand_tokens
+        if not overlap:
+            continue
+        cand_digit_tokens = {t for t in cand_tokens if any(ch.isdigit() for ch in t)}
+        if gpu_digit_tokens and cand_digit_tokens and not (gpu_digit_tokens & cand_digit_tokens):
+            continue
+        score = len(overlap) * 2 + len(gpu_digit_tokens & cand_digit_tokens)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx if best_score > 0 else None
+
+
+def _match_gpu_to_vulkan(gpu_name: str, vulkan_names: List[str]) -> Optional[int]:
+    """Return the Vulkan device index that best matches *gpu_name*, or None."""
+    return _best_gpu_name_match(gpu_name, vulkan_names)
 
 
 def _get_pci_device_ids() -> Dict[str, int]:
     """Return mapping of GPU name (lowercased) → PCI device ID (int).
 
     The PCI device ID is the stable physical identity of a card and is the
-    one value that is identical across the Windows side (PNPDeviceID
-    ``...&DEV_7550&...`` / Win32_VideoController.VideoProcessor "(0x7550)")
-    and the Vulkan side (per-device ``deviceID = 0x7550``).  We use it to
-    map a Windows-enumerated GPU onto its llama.cpp/Vulkan device index
-    without depending on either side's enumeration *order* (which differ:
-    registry lists the R9700 first, Vulkan lists the RX 9070 XT first).
+    one value that is identical across OS-side enumeration and Vulkan's
+    per-device ``deviceID``.  We use it to map detected GPUs onto the
+    llama.cpp/Vulkan device index without depending on enumeration order.
 
-    Source: ``Win32_VideoController.VideoProcessor`` which embeds the PCI
-    device ID in parentheses, e.g. "AMD Radeon Graphics Processor (0x7550)".
-    Empty dict on non-Windows or when WMI is unavailable.
+    Windows source: ``Win32_VideoController.VideoProcessor`` / PNPDeviceID.
+    Linux source: ``lspci -nnmm`` or DRM sysfs ``device`` files.
     """
     result: Dict[str, int] = {}
+    if platform.system() == "Linux":
+        for name, dev_id in _linux_lspci_gpu_map().values():
+            if dev_id is not None:
+                result[name.lower()] = dev_id
+        return result
     if platform.system() != "Windows":
         return result
     try:
@@ -1475,6 +1731,11 @@ def _detect_vulkan_summary() -> List[Tuple[int, str, Optional[int]]]:
     Returns an empty list when vulkaninfo is unavailable or unparsable.
     """
     out = _run(["vulkaninfo", "--summary"], timeout=12)
+    if not out and platform.system() == "Linux":
+        env = os.environ.copy()
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+        out = _run(["vulkaninfo", "--summary"], timeout=12, env=env)
     if not out:
         return []
     devices: List[Tuple[int, str, Optional[int]]] = []
@@ -1608,14 +1869,46 @@ def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
             pass
 
     # OS-specific catch-all detectors fill in whatever the vendor-specific
-    # ones missed (Windows: AMD without ROCm, Intel Arc; Linux: Intel iGPUs).
+    # ones missed (Windows: AMD without ROCm, Intel Arc; Linux: DRM/sysfs for
+    # new AMD cards plus lspci names for devices without measurable VRAM).
     found_names = {g.name.lower() for g in raw}
-    for detector in (_detect_windows_gpus, _detect_linux_other_gpus):
+    for detector in (_detect_windows_gpus, _detect_linux_drm_gpus, _detect_linux_other_gpus):
         try:
             raw.extend(detector(skip_names=found_names))
             found_names = {g.name.lower() for g in raw}
         except Exception:
             pass
+
+    # Merge duplicate detections (e.g. rocm-smi + DRM sysfs for the same Linux
+    # card). Prefer entries that have measured VRAM/utilization and keep any
+    # PCI id found by the catch-all detector.
+    merged: List[GPUInfo] = []
+    for g in raw:
+        match_idx: Optional[int] = None
+        if g.pci_device_id is not None:
+            for i, old in enumerate(merged):
+                if old.pci_device_id == g.pci_device_id:
+                    match_idx = i
+                    break
+        if match_idx is None and merged:
+            match_idx = _best_gpu_name_match(g.name, [old.name for old in merged])
+        if match_idx is None:
+            merged.append(g)
+            continue
+        old = merged[match_idx]
+        if old.total_vram_mb <= 0 and g.total_vram_mb > 0:
+            old.total_vram_mb = g.total_vram_mb
+            old.free_vram_mb = g.free_vram_mb
+        elif g.free_vram_mb > old.free_vram_mb and g.total_vram_mb >= old.total_vram_mb:
+            old.total_vram_mb = g.total_vram_mb
+            old.free_vram_mb = g.free_vram_mb
+        if old.gpu_util_percent <= 0 and g.gpu_util_percent > 0:
+            old.gpu_util_percent = g.gpu_util_percent
+        if old.pci_device_id is None:
+            old.pci_device_id = g.pci_device_id
+        if old.vendor == "unknown" and g.vendor != "unknown":
+            old.vendor = g.vendor
+    raw = merged
 
     # Re-index in detection order for stable display. NOTE: g.index is the
     # Windows registry / detection order and is used ONLY for display and for
@@ -1649,8 +1942,13 @@ def detect_system(llama_binary: Optional[str] = None) -> SystemInfo:
     try:
         dev_vram = _detect_llama_device_vram(llama_bin)
         if dev_vram:
+            dev_names = list(dev_vram.keys())
             for g in raw:
                 hit = dev_vram.get(g.name.lower())
+                if hit is None:
+                    idx = _best_gpu_name_match(g.name, dev_names)
+                    if idx is not None:
+                        hit = dev_vram.get(dev_names[idx])
                 if hit is not None:
                     total_mb, free_mb = hit
                     g.total_vram_mb = total_mb

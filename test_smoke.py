@@ -1938,6 +1938,57 @@ def test_list_devices_free_never_exceeds_total(monkeypatch) -> None:
     assert (total, free) == (8000, 8000)
 
 
+def test_linux_lspci_names_match_llama_device_names() -> None:
+    import hardware
+
+    llama_names = ["amd radeon rx 9070 xt", "amd radeon ai pro r9700"]
+    assert (
+        hardware._best_gpu_name_match(
+            "Radeon RX 9070 XT",
+            llama_names,
+        )
+        == 0
+    )
+    assert (
+        hardware._best_gpu_name_match(
+            "Radeon AI PRO R9700",
+            llama_names,
+        )
+        == 1
+    )
+
+
+def test_intel_lspci_name_is_shortened() -> None:
+    import hardware
+
+    parsed = hardware._parse_lspci_mm_line(
+        '0000:00:02.0 "VGA compatible controller [0300]" '
+        '"Intel Corporation [8086]" '
+        '"Arrow Lake-S [Intel Graphics] [7d67]" -r06 -p00 '
+        '"Micro-Star International Co., Ltd. [MSI] [1462]" "Device [7e20]"'
+    )
+    assert parsed is not None
+    assert parsed[2] == "Intel Graphics"
+    assert parsed[3] == 0x7D67
+
+
+def test_lspci_nnmm_parser_extracts_linux_pci_device_id() -> None:
+    import hardware
+
+    parsed = hardware._parse_lspci_mm_line(
+        '0000:08:00.0 "VGA compatible controller [0300]" '
+        '"Advanced Micro Devices, Inc. [AMD/ATI] [1002]" '
+        '"Navi 48 [Radeon AI PRO R9700] [7551]" -rc0 -p00 '
+        '"Gigabyte Technology Co., Ltd [1458]" "Device [242f]"'
+    )
+    assert parsed is not None
+    slot, cls, name, dev_id = parsed
+    assert slot == "0000:08:00.0"
+    assert cls == "VGA compatible controller"
+    assert name == "Radeon AI PRO R9700"
+    assert dev_id == 0x7551
+
+
 def test_vulkan_summary_maps_basti_gpu_pci_ids(monkeypatch) -> None:
     """Basti's workstation: Windows lists R9700 first, but Vulkan/llama.cpp
     lists RX 9070 XT first. PCI device IDs must resolve the correct indices."""

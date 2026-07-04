@@ -2,7 +2,7 @@
 Type=Application
 Name=AutoTuner GUI
 Comment=Startet den AutoTuner Launcher
-Exec="/home/sebas/GitHub/Auto Tuner/autotuner_gui.sh"
-Icon=/home/sebas/GitHub/Auto Tuner/icon.png
+Exec="/run/media/dawasteh/Zwischenspeicher/GitHub/Auto Tuner/autotuner_gui.sh"
+Icon=/run/media/dawasteh/Zwischenspeicher/GitHub/Auto Tuner/image.png
 Terminal=false
 Categories=Development;
