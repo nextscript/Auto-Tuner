@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# Vollautomatisches Setup: llama.cpp mit CUDA auf M:\kilocal
+# Vollautomatisches Setup: llama.cpp mit CUDA im aktuellen Script-Ordner
 # Ausfuehren als Admin:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force
 #   .\setup_llamacpp_cuda.ps1
@@ -8,7 +8,7 @@ Set-StrictMode -Off
 $ErrorActionPreference = "Stop"
 
 # --- KONFIGURATION ---
-$INSTALL_DIR   = "M:\kilocal"
+$INSTALL_DIR   = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $PARALLEL_JOBS = 12
 $CUDA_VERSION  = "12.6"
 $CUDA_BASE     = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
@@ -327,7 +327,7 @@ $cmakeArgs = @(
     "-DCMAKE_BUILD_TYPE=Release",
     "-DGGML_CUDA=ON", "-DGGML_VULKAN=OFF",
     "-DGGML_NATIVE=OFF", "-DGGML_AVX2=ON", "-DGGML_FMA=ON", "-DGGML_F16C=ON",
-    "-DBUILD_SHARED_LIBS=ON", "-DLLAMA_BUILD_SERVER=ON",
+    "-DBUILD_SHARED_LIBS=OFF", "-DLLAMA_BUILD_SERVER=ON",
     "-DLLAMA_BUILD_UI=ON", "-DLLAMA_USE_PREBUILT_UI=OFF",
     "-DLLAMA_CURL=OFF", "-DGGML_CCACHE=OFF"
 )

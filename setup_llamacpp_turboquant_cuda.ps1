@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# Vollautomatisches Setup: llama-cpp-turboquant (TheTom Fork) mit CUDA auf M:\kilocal
+# Vollautomatisches Setup: llama-cpp-turboquant (TheTom Fork) mit CUDA im aktuellen Script-Ordner
 # Ausfuehren als Admin:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force
 #   .\setup_llamacpp_turboquant_cuda.ps1
@@ -8,13 +8,13 @@ Set-StrictMode -Off
 $ErrorActionPreference = "Stop"
 
 # --- KONFIGURATION ---
-$INSTALL_DIR   = "M:\kilocal"
+$INSTALL_DIR   = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $PARALLEL_JOBS = 12
 $CUDA_VERSION  = "12.6"
 $CUDA_BASE     = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
 $REPO_URL      = "https://github.com/TheTom/llama-cpp-turboquant.git"
 $REPO_BRANCH   = "feature/turboquant-kv-cache"
-$DIR_SUFFIX    = "turboquant.cpp"   # eigener Suffix, damit kein Konflikt mit *_llama.cpp Verzeichnissen
+$DIR_SUFFIX    = "turboquant.llama.cpp"   # eigener Suffix, damit kein Konflikt mit *_llama.cpp Verzeichnissen
 
 # --- HILFSFUNKTIONEN ---
 function Log($msg)  { Write-Host "`n==> $msg" -ForegroundColor Cyan }
