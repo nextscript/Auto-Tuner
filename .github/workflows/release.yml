@@ -50,11 +50,8 @@ jobs:
 
       - name: Read AutoTuner version
         id: ver
-        shell: python
-        run: |
-          from autotuner_version import VERSION
-          print(f"version={VERSION}")
-          print(f"::set-output name=version::{VERSION}")
+        shell: bash
+        run: echo "version=$(python -c 'from autotuner_version import VERSION; print(VERSION)')" >> $GITHUB_OUTPUT
 
       # Frozen PyQt6 on Linux needs the X/EGL/Qt platform stack present at
       # build time (PyInstaller records which xcb plugins to bundle).
@@ -129,7 +126,7 @@ jobs:
 
       - name: Read AutoTuner version
         id: ver
-        run: echo "version=$(python -c 'import sys; sys.path.insert(0,"."); from autotuner_version import VERSION; print(VERSION)')" >> $GITHUB_OUTPUT
+        run: echo "version=$(python -c 'from autotuner_version import VERSION; print(VERSION)')" >> $GITHUB_OUTPUT
 
       - name: Sanity-check tag matches version (on tag push)
         if: startsWith(github.ref, 'refs/tags/v')
