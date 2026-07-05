@@ -8,7 +8,12 @@ __pycache__/
 *.egg
 *.egg-info/
 .eggs/
-dist/
+# PyInstaller: the compiled binaries ship IN the repo for direct download,
+# but only the binaries — not stray runtime state (settings/logs) that a
+# test run of dist/AutoTuner.exe would drop next to itself.
+dist/*
+!dist/AutoTuner.exe
+!dist/AutoTuner-Linux
 build/
 wheels/
 pip-wheel-metadata/

@@ -1023,11 +1023,21 @@ class _BinaryUpdateWorker(QObject):
     ) -> Optional[Dict[str, object]]:
         """Choose the release asset for the current OS.
 
-        Windows → a ``.exe`` asset. Linux → an asset whose name contains
-        ``linux``, else the first asset that is not a ``.exe``.
+        Prefers a per-OS **zip** asset (e.g. ``AutoTuner-Windows-x64.zip``,
+        ``AutoTuner-Linux-x64.zip``) — a single asset that serves BOTH the
+        beginner download AND the in-app auto-update (the worker extracts the
+        binary from the zip). Falls back to a raw binary asset for older
+        releases that ship an unpacked ``.exe`` / Linux binary.
+
+        Windows → name contains ``windows`` or ends ``.exe``.
+        Linux   → name contains ``linux`` (zip or raw ELF).
         """
         is_windows = os.name == "nt"
         if is_windows:
+            for a in assets:
+                name = str(a.get("name", "")).lower()
+                if "windows" in name:
+                    return a
             for a in assets:
                 name = str(a.get("name", "")).lower()
                 if name.endswith(".exe"):
@@ -1043,6 +1053,46 @@ class _BinaryUpdateWorker(QObject):
             if not name.endswith(".exe") and "." not in name:
                 return a
         return None
+
+    def _extract_binary_from_zip(self, zip_path: Path) -> Path:
+        """Pull the AutoTuner binary out of a downloaded release zip.
+
+        Accepts the binary at the archive root OR inside one top folder
+        (the common ``AutoTuner-Windows-x64/AutoTuner.exe`` layout that
+        Compress-Archive / zip produce). On Windows the member must end in
+        ``.exe``; on Linux it is the ``AutoTuner-Linux`` / ``AutoTuner`` ELF.
+        Extracts next to the running binary (same volume → atomic swap).
+        """
+        target_suffix = ".exe" if os.name == "nt" else ""
+        member_name: Optional[str] = None
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                base = Path(info.filename).name.lower()
+                if os.name == "nt":
+                    if base.endswith(".exe"):
+                        member_name = info.filename
+                        break
+                else:
+                    if base in ("autotuner-linux", "autotuner") or base.endswith(
+                        "-linux"
+                    ):
+                        member_name = info.filename
+                        break
+            if member_name is None:
+                raise RuntimeError(
+                    f"No AutoTuner binary found inside {zip_path.name}"
+                )
+            suffix = ".exe" if os.name == "nt" else ".new"
+            out_fd, out_path = tempfile.mkstemp(
+                prefix="autotuner_update_bin_", suffix=suffix, dir=str(self._data_dir)
+            )
+            os.close(out_fd)
+            out_file = Path(out_path)
+            with zf.open(member_name) as src, out_file.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+        return out_file
 
     # -- swap shims -------------------------------------------------------
     def _write_windows_shim(self, new_exe: Path) -> Path:
@@ -1161,7 +1211,9 @@ class _BinaryUpdateWorker(QObject):
             )
 
             # Temp file on the SAME volume as the binary → atomic move.
-            suffix = ".exe" if os.name == "nt" else ".new"
+            suffix = ".zip" if name.lower().endswith(".zip") else (
+                ".exe" if os.name == "nt" else ".new"
+            )
             tmp_fd, tmp_path = tempfile.mkstemp(
                 prefix="autotuner_update_", suffix=suffix, dir=str(self._data_dir)
             )
@@ -1173,10 +1225,23 @@ class _BinaryUpdateWorker(QObject):
             if tmp_file.stat().st_size == 0:
                 raise RuntimeError(f"downloaded {name} is empty")
 
-            if os.name == "nt":
-                shim = self._write_windows_shim(tmp_file)
+            # Release assets ship as a per-OS zip (one asset serves the
+            # beginner download AND this auto-update). Extract the binary;
+            # older releases with a raw .exe / ELF work unchanged.
+            if name.lower().endswith(".zip"):
+                self.progress.emit(f"[Update] Extracting binary from {name} …")
+                bin_path = self._extract_binary_from_zip(tmp_file)
+                try:
+                    tmp_file.unlink()
+                except OSError:
+                    pass
             else:
-                shim = self._write_linux_shim(tmp_file)
+                bin_path = tmp_file
+
+            if os.name == "nt":
+                shim = self._write_windows_shim(bin_path)
+            else:
+                shim = self._write_linux_shim(bin_path)
             self._launch_shim(shim)
 
             self.finished.emit(
