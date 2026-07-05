@@ -65,13 +65,20 @@ if [ -z "${LLAMA_CPP_DIR:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Python-Interpreter bevorzugen (venv), sonst globales python3
+# Python-Interpreter bevorzugen:
+#   Linux/macOS: .venv_linux
+#   Windows:     .venv (wird von den .bat-Startern genutzt)
+# Falls jemand unter Linux bewusst eine POSIX-.venv angelegt hat, akzeptieren
+# wir sie als Fallback. Die Windows-.venv in diesem Repo hat nur Scripts/ und
+# wird dadurch unter Linux nicht versehentlich verwendet.
 # ---------------------------------------------------------------------------
-if [ -f "./.venv/bin/python" ]; then
+if [ -f "./.venv_linux/bin/python" ]; then
+    PY="./.venv_linux/bin/python"
+elif [ -f "./.venv/bin/python" ]; then
     PY="./.venv/bin/python"
 else
-    echo "[WARN] .venv nicht gefunden - nutze globales python3."
-    echo "       Um venv anzulegen: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    echo "[WARN] .venv_linux nicht gefunden - nutze globales python3."
+    echo "       Ubuntu/Linux-venv anlegen: python3 -m venv .venv_linux && .venv_linux/bin/python -m pip install -r requirements.txt"
     PY="python3"
 fi
 

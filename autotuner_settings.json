@@ -1,6 +1,6 @@
 {
-  "models_path": "/run/media/dawasteh/OneDrive/models",
-  "fork_path": "/home/dawasteh/local_ai/b9871_ubuntu_llama.cpp",
+  "models_path": "I:\\models",
+  "fork_path": "L:\\LAB\\ai-local\\b9867_llama.cpp",
   "performance_target": "throughput",
   "model_overrides": {
     "NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q6_K": {

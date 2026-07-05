@@ -300,9 +300,22 @@ geändert hat — schadet aber nie):
 ```bash
 pip install -r requirements.txt
 ```
-Falls du eine virtuelle Umgebung nutzt, aktiviere sie vorher
-(`.venv\Scripts\activate` unter Windows bzw. `source .venv/bin/activate`
-unter Linux/macOS).
+Falls du eine virtuelle Umgebung nutzt, aktiviere sie vorher. Projekt-Konvention:
+Windows nutzt `.venv`, Ubuntu/Linux nutzt `.venv_linux`.
+
+```bash
+# Ubuntu/Linux
+python3 -m venv .venv_linux
+.venv_linux/bin/python -m pip install -r requirements.txt
+source .venv_linux/bin/activate
+```
+
+```bat
+REM Windows
+py -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
 **4. App starten** — danach einfach wie gewohnt:
 

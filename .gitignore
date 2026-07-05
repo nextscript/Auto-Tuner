@@ -19,6 +19,7 @@ MANIFEST
 # Virtual environments
 # =============================================================================
 .venv/
+.venv_linux/
 venv/
 env/
 ENV/
@@ -66,7 +67,4 @@ BitNet/
 .env.local
 *.local
 autotuner_settings.json
-llama.log".venv/" 
-".venv/" 
-".venv/" 
-.venv/
+llama.log
