@@ -345,6 +345,48 @@ python auto_tuner.py         # Terminal
 git pull && python qt_launcher.py
 ```
 
+## Compiled build (.exe / Linux binary)
+
+Für Einsteiger gibt es eine kompilierte **noconsole**-Version — keine
+Python-Installation, kein Terminalfenster, einfach Doppelklick. Sie läuft auf
+**Windows 10/11** (`.exe`) und **Ubuntu** (Linux-Binary) und lässt sich über
+denselben **⬆ Update**-Button self-updaten.
+
+### Bauen
+
+PyInstaller kann nicht cross-kompilieren — die `.exe` wird **auf Windows**
+gemacht, der Linux-Binary **auf Linux**. Beide landen als Assets im selben
+GitHub-Release.
+
+```bash
+# einmalig im Build-Environment:
+python -m pip install pyinstaller
+python -m pip install -r requirements.txt
+
+# dann das jeweilige Binary bauen:
+python build_exe.py
+# → Windows: dist/AutoTuner.exe   |   Linux: dist/AutoTuner-Linux
+```
+
+`build_exe.py` bündelt `settings/*.yaml` als read-only Daten mit. Nutzer-State
+(`autotuner_settings.json`, Logs) liegt persistent neben dem Binary und bleibt
+bei Updates erhalten.
+
+### Release / Auto-Update
+
+1. `autotuner_version.py` → `VERSION` hochzählen (z. B. `"1.1.0"`).
+2. Commit + Tag **`v1.1.0`** (das Tag-Format `v<VERSION>` ist Pflicht — der
+   Updater streift das führende `v` vor dem Vergleich).
+3. Ein GitHub-Release mit Tag `v1.1.0` erstellen und **beide** Assets hochladen:
+   `AutoTuner.exe` (Windows) und `AutoTuner-Linux` (Linux).
+4. Der Update-Button in der kompilierten Version holt sich automatisch das
+   zum laufenden OS passende Asset, lädt es herunter und tauscht das Binary
+   über einen Swap-Shim nach Neustart aus (Windows sperrt die laufende `.exe`,
+   deshalb der Shim; auf Linux geht das direkte `mv` über das laufende ELF).
+
+> Source-Installationen (Entwickler) nutzen weiterhin den git/ZIP-Updater; die
+> kompilierte Version wählt automatisch den Binary-Swap-Pfad (`sys.frozen`).
+
 ## Usage
 
 Point it at a folder of `*.gguf` models — it will recurse:

@@ -14,6 +14,7 @@ import base64
 import copy
 import json
 import os
+import platform
 import re
 import shutil
 import signal
@@ -80,6 +81,7 @@ from performance_target import (
     DEFAULT_TARGET_NAME,
 )
 import app_settings
+from autotuner_version import VERSION, GITHUB_REPO, USER_AGENT
 
 
 def _get_fork_tools():
@@ -94,6 +96,10 @@ def _get_fork_tools():
 
 
 def _default_settings_path() -> Path:
+    # When frozen (PyInstaller), ``__file__`` resolves into the throw-away
+    # ``_MEIPASS`` extraction folder where the bundled ``settings/`` profiles
+    # live — so this works for both source and frozen builds. The profiles are
+    # read-only; user-writable state goes through ``app_settings.app_data_dir``.
     return Path(__file__).resolve().parent / "settings"
 
 
@@ -114,7 +120,11 @@ def _default_models_path() -> Path:
         p = Path(env).expanduser()
         if p.exists():
             return p
-    script_dir = Path(__file__).resolve().parent
+    script_dir = (
+        Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent
+    )
     for c in (script_dir / "models", script_dir.parent / "models"):
         if c.exists():
             return c
@@ -406,7 +416,7 @@ class _UpdateWorker(QObject):
     _SETTINGS_NAME = "autotuner_settings.json"
     _SETTINGS_BACKUP_NAME = "autotuner_settings.json.update-backup"
     _UPDATE_STATE_NAME = ".autotuner_update.json"
-    _GITHUB_REPO = "DaWasteh/Auto-Tuner"
+    _GITHUB_REPO = GITHUB_REPO
     _GITHUB_BRANCH = "main"
     _ARCHIVE_SKIP_DIRS = {
         ".git",
@@ -925,6 +935,258 @@ class _UpdateWorker(QObject):
             if backups and not settings_restored:
                 self._restore_settings(backups)
             self.finished.emit(False, str(exc))
+
+
+class _BinaryUpdateWorker(QObject):
+    """Self-update for a compiled AutoTuner build (PyInstaller onefile).
+
+    The source-based ``_UpdateWorker`` replaces ``.py`` files next to the
+    script — that is meaningless for a frozen binary, where the code is
+    embedded in the ``.exe`` / Linux ELF. Instead this worker:
+
+      1. asks GitHub for the latest Release of ``GITHUB_REPO``;
+      2. compares the Release ``tag_name`` against :data:`VERSION`;
+      3. picks the asset matching the host OS (Windows ``.exe`` / Linux
+         binary) — AutoTuner runs on Windows 10/11 AND Ubuntu, so the asset
+         selection must be OS-aware;
+      4. downloads it to a temp file next to the running binary (same
+         volume → atomic ``move``);
+      5. writes a tiny swap shim (``.bat`` on Windows, ``.sh`` on Linux)
+         that waits for this process to exit, replaces the binary, and
+         relaunches it — because Windows locks the running ``.exe`` and
+         the process cannot overwrite itself;
+      6. launches the shim detached, then emits ``finished``. The GUI
+         quits immediately afterwards so the shim can complete the swap.
+
+    User state (``autotuner_settings.json``) survives untouched — it lives
+    in ``app_settings.app_data_dir()``, which is the EXE folder, not the
+    replaced binary.
+    """
+
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str, bool)  # (ok, message, needs_restart)
+
+    _GITHUB_REPO = GITHUB_REPO
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._exe_path = Path(sys.executable).resolve()
+        self._data_dir = app_settings.app_data_dir()
+
+    # -- helpers ----------------------------------------------------------
+    def _github_request(self, url: str) -> urllib.request.Request:
+        headers = {
+            "Accept": (
+                "application/vnd.github+json"
+                if "api.github.com" in url
+                else "application/octet-stream"
+            ),
+            "User-Agent": USER_AGENT,
+        }
+        if "api.github.com" in url:
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
+        return urllib.request.Request(url, headers=headers)
+
+    def _fetch_json(self, url: str, timeout: float = 30.0) -> Dict[str, object]:
+        with urllib.request.urlopen(self._github_request(url), timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            data = resp.read().decode(charset, errors="replace")
+        parsed = json.loads(data)
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"GitHub returned unexpected JSON for {url}")
+        return parsed
+
+    @staticmethod
+    def _parse_version(tag: str) -> Tuple[int, ...]:
+        """Parse a release tag into a comparable int tuple.
+
+        Accepts ``v1.2.0``, ``1.2.0``, ``v1.2.0-beta`` (pre-release suffix
+        ignored). Non-numeric leading segments are dropped.
+        """
+        clean = tag.strip().lstrip("vV")
+        parts: List[int] = []
+        for tok in clean.split("."):
+            digits = ""
+            for ch in tok:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            if digits:
+                parts.append(int(digits))
+            else:
+                break
+        return tuple(parts) if parts else (0,)
+
+    def _pick_asset(
+        self, assets: List[Dict[str, object]]
+    ) -> Optional[Dict[str, object]]:
+        """Choose the release asset for the current OS.
+
+        Windows → a ``.exe`` asset. Linux → an asset whose name contains
+        ``linux``, else the first asset that is not a ``.exe``.
+        """
+        is_windows = os.name == "nt"
+        if is_windows:
+            for a in assets:
+                name = str(a.get("name", "")).lower()
+                if name.endswith(".exe"):
+                    return a
+            return None
+        # Linux / other
+        for a in assets:
+            name = str(a.get("name", "")).lower()
+            if "linux" in name:
+                return a
+        for a in assets:
+            name = str(a.get("name", "")).lower()
+            if not name.endswith(".exe") and "." not in name:
+                return a
+        return None
+
+    # -- swap shims -------------------------------------------------------
+    def _write_windows_shim(self, new_exe: Path) -> Path:
+        """A detached ``.bat`` that retries the replace then relaunches.
+
+        Windows locks the running ``.exe``, so the move fails until the GUI
+        process has exited. The shim polls (1 s × 60 ≈ 1 min), then launches
+        the new binary and removes itself. ``ping`` is used as the delay
+        because the shim runs without a console (``DETACHED_PROCESS``) where
+        ``timeout`` errors out.
+        """
+        exe = self._exe_path
+        shim = self._data_dir / ".autotuner_update.bat"
+        bat = (
+            "@echo off\r\n"
+            f'set "EXE={exe}"\r\n'
+            f'set "NEW={new_exe}"\r\n'
+            "for /l %%i in (1,1,60) do (\r\n"
+            '  move /Y "%NEW%" "%EXE%" >nul 2>&1 && goto done\r\n'
+            "  ping -n 2 127.0.0.1 >nul\r\n"
+            ")\r\n"
+            "exit /b 1\r\n"
+            ":done\r\n"
+            'start "" "%EXE%"\r\n'
+            '(del "%~f0")\r\n'
+        )
+        shim.write_text(bat, encoding="ascii", errors="ignore")
+        return shim
+
+    def _write_linux_shim(self, new_bin: Path) -> Path:
+        """A detached ``.sh`` that replaces the binary and relaunches.
+
+        Linux does not lock the running ELF — ``mv`` over it succeeds at
+        once (the running process keeps the old inode) — so this is a
+        single attempt followed by a relaunch.
+        """
+        exe = self._exe_path
+        shim = self._data_dir / ".autotuner_update.sh"
+        sh = (
+            "#!/bin/sh\n"
+            f'EXE="{exe}"\n'
+            f'NEW="{new_bin}"\n'
+            'if mv -f "$NEW" "$EXE" 2>/dev/null; then\n'
+            '  chmod +x "$EXE"\n'
+            '  nohup "$EXE" >/dev/null 2>&1 &\n'
+            "fi\n"
+            'rm -f "$0"\n'
+        )
+        shim.write_text(sh, encoding="utf-8")
+        shim.chmod(0o755)
+        return shim
+
+    def _launch_shim(self, shim: Path) -> None:
+        if os.name == "nt":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console,
+            # survives the parent GUI quitting.
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            DETACHED_PROCESS = 0x00000008
+            subprocess.Popen(
+                ["cmd", "/c", str(shim)],
+                cwd=str(self._data_dir),
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                ["/bin/sh", str(shim)],
+                cwd=str(self._data_dir),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+
+    # -- main -------------------------------------------------------------
+    def run(self) -> None:
+        try:
+            self.progress.emit("[Update] Checking latest GitHub Release …")
+            api = f"https://api.github.com/repos/{self._GITHUB_REPO}/releases/latest"
+            release = self._fetch_json(api)
+            tag = str(release.get("tag_name") or "").strip()
+            if not tag:
+                raise RuntimeError("latest release has no tag_name")
+            self.progress.emit(f"[Update] Latest release: {tag} (running v{VERSION})")
+
+            latest = self._parse_version(tag)
+            current = self._parse_version(VERSION)
+            if latest <= current:
+                self.finished.emit(
+                    True, f"AutoTuner v{VERSION} is up to date (latest {tag}).", False
+                )
+                return
+
+            raw_assets = release.get("assets", [])
+            if not isinstance(raw_assets, list):
+                raw_assets = []
+            assets: List[Dict[str, object]] = [
+                a for a in raw_assets if isinstance(a, dict)
+            ]
+            asset = self._pick_asset(assets)
+            if asset is None:
+                names = ", ".join(str(a.get("name", "?")) for a in assets) or "(none)"
+                raise RuntimeError(
+                    f"Release {tag} has no asset for this OS "
+                    f"({platform.system()}). Assets: {names}"
+                )
+            url = str(asset.get("browser_download_url") or "")
+            name = str(asset.get("name", "update"))
+            if not url:
+                raise RuntimeError(f"asset {name} has no download URL")
+            size_raw = asset.get("size") or 0
+            size = int(size_raw) if isinstance(size_raw, (int, float)) else 0
+            self.progress.emit(
+                f"[Update] Downloading {name} "
+                f"({size / 1048576:.1f} MB) …"
+            )
+
+            # Temp file on the SAME volume as the binary → atomic move.
+            suffix = ".exe" if os.name == "nt" else ".new"
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                prefix="autotuner_update_", suffix=suffix, dir=str(self._data_dir)
+            )
+            os.close(tmp_fd)
+            tmp_file = Path(tmp_path)
+            with urllib.request.urlopen(self._github_request(url), timeout=600.0) as resp:
+                with tmp_file.open("wb") as fh:
+                    shutil.copyfileobj(resp, fh)
+            if tmp_file.stat().st_size == 0:
+                raise RuntimeError(f"downloaded {name} is empty")
+
+            if os.name == "nt":
+                shim = self._write_windows_shim(tmp_file)
+            else:
+                shim = self._write_linux_shim(tmp_file)
+            self._launch_shim(shim)
+
+            self.finished.emit(
+                True,
+                f"Update to {tag} downloaded. AutoTuner will restart to "
+                "complete the swap.",
+                True,
+            )
+        except Exception as exc:
+            self.finished.emit(False, str(exc), False)
 
 
 # ---------------------------------------------------------------------------
@@ -2213,7 +2475,10 @@ class MainWindow(QMainWindow):
         self._scan_thread: Optional[QThread] = None
         self._scan_worker: Optional[_ScanWorker] = None
         self._update_thread: Optional[QThread] = None
-        self._update_worker: Optional[_UpdateWorker] = None
+        # Either the source-based updater (dev/source installs) or the
+        # binary-swap updater (frozen builds); both are QObjects moved to
+        # ``_update_thread``.
+        self._update_worker: Optional[QObject] = None
         self._sysinfo_busy = False
         # Persisted font size — falls back to 10pt on first launch.
         self._font_size = app_settings.get_font_size()
@@ -3621,6 +3886,14 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             self._update_thread = None
 
+        if getattr(sys, "frozen", False):
+            # Compiled build (PyInstaller onefile): the source-ZIP/git updater
+            # is meaningless — there are no .py files to replace. Use the
+            # binary-swap worker instead (downloads the OS-correct release
+            # asset + a swap shim).
+            self._start_binary_update()
+            return
+
         reply = QMessageBox.question(
             self,
             "AutoTuner update",
@@ -3648,6 +3921,61 @@ class MainWindow(QMainWindow):
         worker.finished.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
         thread.start()
+
+    def _start_binary_update(self) -> None:
+        """Frozen-build update path: OS-aware release-asset swap."""
+        reply = QMessageBox.question(
+            self,
+            "AutoTuner update",
+            f"GitHub nach einer neuen AutoTuner-Version suchen?\n\n"
+            f"Läuft: v{VERSION} auf {platform.system()}. Bei einem neuen "
+            "Release wird das passende Binary (.exe / Linux) geladen und "
+            "nach dem Neustart ausgetauscht. Deine Einstellungen "
+            "(autotuner_settings.json) bleiben erhalten.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._btn_update.setEnabled(False)
+        self._status.showMessage("Checking GitHub for a newer release …")
+        self._log(f"[Update] Running v{VERSION} on {platform.system()}; checking GitHub …")
+
+        worker = _BinaryUpdateWorker()
+        thread = QThread(self)
+        self._update_worker = worker
+        self._update_thread = thread
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._log)
+        worker.finished.connect(self._on_binary_update_done)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _on_binary_update_done(self, ok: bool, msg: str, needs_restart: bool) -> None:
+        self._btn_update.setEnabled(True)
+        self._log(f"[Update] {msg}")
+        if not ok:
+            self._status.showMessage("Update failed.")
+            QMessageBox.warning(self, "AutoTuner update failed", msg)
+            return
+        self._status.showMessage(msg)
+        if needs_restart:
+            QMessageBox.information(
+                self,
+                "AutoTuner update",
+                msg + "\n\nKlicke OK — AutoTuner beendet sich jetzt und "
+                "startet automatisch mit der neuen Version neu.",
+            )
+            # Stop child servers so VRAM is freed before the swap/relaunch.
+            try:
+                self._stop_all_servers()
+            except Exception:
+                pass
+            QApplication.quit()
+        else:
+            QMessageBox.information(self, "AutoTuner update", msg)
 
     def _on_update_done(self, ok: bool, msg: str) -> None:
         self._btn_update.setEnabled(True)
@@ -5749,6 +6077,33 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 def main(argv: Optional[List[str]] = None) -> None:
     import argparse
+
+    # Frozen noconsole build (PyInstaller --windowed): sys.stdout/stderr are
+    # None, so a stray print()/traceback would crash. Redirect them to a
+    # rotating log file in the persistent app-data dir so crashes stay
+    # debuggable. (Source installs keep the terminal.)
+    if getattr(sys, "frozen", False) and sys.stdout is None:
+        try:
+            log_dir = app_settings.app_data_dir()
+            log_path = log_dir / "autotuner_console.log"
+            # Keep the previous run as .1 (light rotation, text stays small).
+            try:
+                prev = log_dir / "autotuner_console.log.1"
+                if log_path.exists():
+                    log_path.replace(prev)
+            except OSError:
+                pass
+            sys.stdout = log_path.open("a", encoding="utf-8", buffering=1)
+            sys.stderr = sys.stdout
+            print(
+                f"\n=== AutoTuner v{VERSION} console log "
+                f"{datetime.now().isoformat(timespec='seconds')} ===",
+                flush=True,
+            )
+        except Exception:
+            # Last resort: silence streams so the app still runs.
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+            sys.stderr = sys.stdout
 
     p = argparse.ArgumentParser(
         prog="qt_launcher", description="AutoTuner Qt GUI launcher"

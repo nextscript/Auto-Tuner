@@ -69,3 +69,10 @@ BitNet/
 autotuner_settings.json
 .autotuner_update.json
 llama.log
+
+# PyInstaller (compiled .exe / Linux binary) — build_exe.py output
+*.spec
+autotuner_console.log
+autotuner_console.log.*
+.autotuner_update.bat
+.autotuner_update.sh

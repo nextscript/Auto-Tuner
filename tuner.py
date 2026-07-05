@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import platform
 import os
@@ -889,6 +890,52 @@ def _pick_kv_quant(
     return chosen_k, chosen_v
 
 
+def _kv_headroom_reserve(
+    target_ctx: int,
+    n_parallel: int,
+    rope_scaling: bool,
+) -> Tuple[float, float]:
+    """KV-budget headroom to withhold so very long context (especially
+    under YaRN rope-scaling) never fills VRAM/RAM to 99.5 % and OOMs the
+    compute buffer.
+
+    Returns ``(absolute_gb, fractional)``:
+      * ``absolute_gb`` — per-slot compute-buffer / flash-attention
+        workspace + Vulkan/ROCm staging reserve.
+      * ``fractional``  — covers cumulative per-token KV estimation drift
+        and long-context scratch; grows with ``target_ctx`` and is
+        amplified under YaRN.
+
+    Root cause this fixes: the KV budget historically left only the thin
+    performance-target safety band (0.15–0.30 GB) plus a 0.5 % rounding
+    factor. At ~1 M tokens the GPU compute buffer alone reaches several
+    GB, so ``vkAllocateMemory`` failed ("Vulkan buffer error") and the
+    server crashed on the next attempt. The reserve is modest at short
+    context (so we don't waste headroom) and meaningful at long context
+    (so every mode — throughput / balanced / safe / low_vram — stays
+    safe instead of driving the card to the brink of OOM).
+    """
+    slots = max(1, n_parallel)
+    # ~0.6 GB/slot covers the FA workspace + Vulkan/ROCm staging buffers
+    # that llama.cpp allocates on top of the KV cache.
+    absolute_gb = 0.6 * slots
+
+    # 3 % baseline, rising on a log2 scale with context
+    # (3 % → ~6.6 % at 256k → ~9 % at 1 M), capped at 15 % (20 % YaRN).
+    if target_ctx > 0:
+        steps = max(0.0, math.log2(target_ctx / 32768.0))
+        fractional = 0.03 + 0.06 * (steps / 5.0)
+    else:
+        fractional = 0.03
+    fractional = min(max(fractional, 0.03), 0.15)
+    if rope_scaling:
+        # YaRN amplifies the attention/RoPE init scratch and makes the
+        # per-token KV estimate slightly less certain at extreme lengths.
+        fractional = min(fractional * 1.35, 0.20)
+
+    return round(absolute_gb, 2), round(fractional, 3)
+
+
 # ---------------------------------------------------------------------------
 # Main entry
 
@@ -1423,12 +1470,17 @@ def compute_config(
 
         # Wenn gewünschter Context das native Limit überschreitet
         if desired_ctx > native_ctx:
-            # Prüfe ob Speicher vorhanden ist
+            # Prüfe ob Speicher vorhanden ist. WICHTIG: Per-Slot-Budget
+            # verwenden, da llama-server N Slots anlegt — jeder Slot braucht
+            # einen vollen KV-Buffer der gewünschten Größe. Vorher wurde hier
+            # das GESAMTE Budget geprüft, was bei n_parallel>1 die Aktivierung
+            # viel zu großzügig machte und ein rope_scaled_ctx-Ziel setzte, das
+            # nur ein einzelner Slot bedienen könnte.
             rope_kv_gb = (desired_ctx * kv_per_tok_q5) / 1024
-            total_available = free_vram_after + free_ram_after
+            kv_budget_per_slot_gb = kv_budget_gb / n_parallel
 
-            # Aktiviere RoPE-Scaling wenn >= 90% des Bedarfs verfügbar
-            if profile_rope_scale or total_available >= rope_kv_gb * 1.1:
+            # Aktiviere RoPE-Scaling wenn >= 90% des PER-SLOT-Bedarfs verfügbar
+            if profile_rope_scale or kv_budget_per_slot_gb >= rope_kv_gb * 1.1:
                 rope_scaled_ctx = min(desired_ctx, profile_rope_max)
                 rope_scaling_active = True
 
@@ -1444,6 +1496,27 @@ def compute_config(
     elif force_rope_scale is False:
         rope_scaled_ctx = 0
         rope_scaling_active = False
+
+    # ---- (2.6) Compute-buffer reserve (long-context / YaRN OOM guard)
+    # The KV budget accounts for the KV cache itself but NOT for the GPU
+    # compute buffer / flash-attention scratch that llama.cpp's Vulkan/ROCm
+    # backend allocates on top. That scratch grows with context length and
+    # YaRN amplifies it; at ~1 M tokens it reaches several GB. With only the
+    # thin safety band (0.15–0.30 GB) + a 0.5 % rounding factor reserved, the
+    # card was driven to ~99.5 % utilisation and vkAllocateMemory failed
+    # ("Vulkan buffer error"), crashing the server on the retry. We withhold
+    # a context-scaled headroom so no mode can reach that brink.
+    _reserve_target_ctx = (
+        user_ctx
+        if user_ctx is not None
+        else (rope_scaled_ctx if rope_scaling_active else profile_max)
+    )
+    _abs_reserve, _frac_reserve = _kv_headroom_reserve(
+        _reserve_target_ctx, n_parallel, rope_scaling_active
+    )
+    kv_budget_gb = max(
+        0.0, kv_budget_gb - _abs_reserve - _frac_reserve * kv_budget_gb
+    )
 
     # ---- (3) Context + KV quant
     target_ctx = user_ctx if user_ctx is not None else profile_max
@@ -1494,31 +1567,41 @@ def compute_config(
         base_kv_mb * (kv_quant_factor(cache_k) + kv_quant_factor(cache_v)) / 2
     )
 
-    max_fit_ctx: int = 0  # computed only in auto mode; needed for floor guard
+    # Memory-safe ceiling — computed ONCE and used by both the auto and
+    # the user-pin paths. Dividiere durch n_parallel, da llama-server N
+    # Slots anlegt (jeder Slot braucht einen vollen KV-Buffer der
+    # angeforderten Größe). Ohne diese Division würde llama-server "auto"
+    # n_parallel auf z.B. 4 setzen und 4× das Budget belegen.
+    #
+    # Beispiel: 21 GB KV-Budget, n_parallel=1 →
+    #   max_fit_ctx bei Q8 (0.060 MB/tok) = 356k → cap auf 262k ✓
+    #   RAM-Nutzung ~3 GB statt ~60 GB (bei n_parallel=4 ohne diesen Fix).
+    max_fit_ctx: int = 0  # also surfaced to the floor guard below
+    pin_clamped_to_budget: Optional[int] = None
+    kv_budget_per_slot_gb = kv_budget_gb / n_parallel
+    if actual_per_tok_mb > 0:
+        max_fit_ctx = int(
+            (kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb
+        )
+    else:
+        max_fit_ctx = profile_max
+
     if user_ctx is not None:
-        # User-specified context — respect it but clamp to model limits
+        # User-specified context — honour it, but apply TWO clamps so no
+        # mode can drive the card into OOM:
+        #   (1) model cap  — never exceed native / rope-scaled ctx
+        #   (2) budget cap — never exceed what the (reserved) KV budget
+        #       can actually hold. Previously a 1 M YaRN pin sailed past
+        #       the budget cap and crashed the Vulkan compute buffer.
+        #       Now the tuner always delivers the maximum that works.
         ctx = user_ctx
         if model_ctx_limit > 0 and ctx > model_ctx_limit:
             ctx = model_ctx_limit
+        if max_fit_ctx > 0 and ctx > max_fit_ctx:
+            pin_clamped_to_budget = ctx
+            ctx = max_fit_ctx
     else:
-        # Berechne den maximal möglichen Kontext basierend auf dem verfügbaren
-        # KV-Cache-Budget. Dividiere durch n_parallel, da llama-server N Slots
-        # anlegt (jeder Slot braucht einen vollen KV-Buffer der angeforderten
-        # Größe). Ohne diese Division würde llama-server "auto" n_parallel auf
-        # z.B. 4 setzen und 4× das Budget belegen.
-        #
-        # Beispiel: 21 GB KV-Budget, n_parallel=1 →
-        #   max_fit_ctx bei Q8 (0.060 MB/tok) = 356k → cap auf 262k ✓
-        #   RAM-Nutzung ~3 GB statt ~60 GB (bei n_parallel=4 ohne diesen Fix).
-        kv_budget_per_slot_gb = kv_budget_gb / n_parallel
-        if actual_per_tok_mb > 0:
-            max_fit_ctx = int(
-                (kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb
-            )
-        else:
-            max_fit_ctx = profile_max
-
-        # Beschränke auf das Modell-Maximum (native oder rope-scaled)
+        # Auto: beschränke auf das Modell-Maximum (native oder rope-scaled)
         if model_ctx_limit > 0:
             ctx = min(max_fit_ctx, model_ctx_limit)
         else:
@@ -1542,11 +1625,30 @@ def compute_config(
             effective_min = max(2048, (max_fit_ctx // 1024) * 1024)  # budget too tight
         ctx = max(effective_min, (ctx // 1024) * 1024)
     else:
-        ctx = max(2048, (ctx // 1024) * 1024)  # absolute safety floor only
-    estimated_kv_gb = (ctx * actual_per_tok_mb) / 1024
+        # Explicit user pin: honour it EXACTLY (only the 2048 absolute
+        # floor applies). Previously this rounded down to a 1024 boundary,
+        # which silently shrank a pin like 99840 → 99328 — contradicting
+        # the "user_ctx wins" contract. llama-server accepts arbitrary
+        # -c values, so no quantisation is needed here.
+        ctx = max(2048, ctx)
+    # Total KV across ALL n_parallel slots — llama-server allocates one
+    # full KV buffer per slot, so the real VRAM/RAM footprint is
+    # n_parallel × per-slot. Previously this was per-slot only, which
+    # undercounted the "Total GPU" display, the VRAM-overcommit warning,
+    # the pre-launch balance check, and the MoE tensor-split byte weights
+    # by a factor of n_parallel (worst in safe mode, n_parallel=4).
+    estimated_kv_gb = (ctx * actual_per_tok_mb * n_parallel) / 1024
 
     # ---- (3b) VRAM Overcommit Warning
     warning: Optional[str] = None
+    if pin_clamped_to_budget is not None:
+        # The user pinned a context larger than the reserved budget can
+        # hold; we clamped it to the safe maximum. Tell them explicitly so
+        # a "why isn't my 1 M pin honoured?" question answers itself.
+        warning = (
+            f"Requested context {pin_clamped_to_budget:,} exceeds the "
+            f"safe KV budget; clamped to {ctx:,} to avoid VRAM/RAM OOM."
+        )
     if n_cpu_moe is not None or full_off:
         # When --no-kv-offload is active the KV cache lives in system RAM,
         # so it must NOT count toward the VRAM overcommit check (otherwise
@@ -1555,11 +1657,14 @@ def compute_config(
         vram_kv_component = 0.0 if no_kv_offload else estimated_kv_gb
         gpu_total = model_vram + vram_kv_component + effective_vram_safety
         if gpu_total > free_vram * 0.98:
-            warning = (
+            tight = (
                 f"VRAM budget tight: model {model_vram:.1f} GB + KV "
                 f"{vram_kv_component:.1f} GB + safety "
                 f"{effective_vram_safety:.1f} GB ≈ {gpu_total:.1f} GB of "
                 f"{free_vram:.1f} GB free."
+            )
+            warning = (
+                f"{warning} {tight}" if warning else tight
             )
 
     # ---- (4) Threads — weniger Threads für bessere Performance

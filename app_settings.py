@@ -41,28 +41,51 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 _FILENAME = "autotuner_settings.json"
 
 
+def app_data_dir() -> Path:
+    r"""Persistent, user-writable directory for settings / logs / update state.
+
+    Two regimes:
+      * **Source install** — the script directory (portable, same folder the
+        user runs ``qt_launcher.py`` from).
+      * **Frozen build** (PyInstaller onefile) — the directory that contains
+        the compiled ``AutoTuner.exe`` / Linux binary. The bundled code runs
+        from a throw-away ``_MEIPASS`` temp folder that is DELETED on exit, so
+        any user state written there (``autotuner_settings.json``, logs, …)
+        would silently vanish between launches. Routing all user-writable
+        state through the EXE folder keeps it stable across runs.
+
+    If the resolved directory is read-only (e.g. the EXE sits in
+    ``C:\Program Files``), fall back to the user's home directory so the
+    app never crashes trying to persist state. Works on Windows and Linux.
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parent
+    try:
+        probe = base / ".autotuner_write_probe"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return base
+    except (OSError, PermissionError):
+        return Path.home()
+
+
 def _settings_file() -> Path:
     """Resolve the settings file location.
 
-    Preference: alongside the script (portable install). Fallback: the
-    user's home directory if the script directory is read-only.
+    Preference: a portable install (alongside the script when running from
+    source, or next to the .exe when frozen). Fallback: the user's home
+    directory if that location is read-only (e.g. Program Files).
     """
-    here = Path(__file__).resolve().parent
-    portable = here / _FILENAME
-    # Try a write probe to catch read-only installs (e.g. Program Files).
-    try:
-        probe = here / ".autotuner_write_probe"
-        probe.write_text("x", encoding="utf-8")
-        probe.unlink()
-        return portable
-    except (OSError, PermissionError):
-        return Path.home() / _FILENAME
+    return app_data_dir() / _FILENAME
 
 
 def load_settings() -> Dict[str, Any]:
