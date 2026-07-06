@@ -1361,6 +1361,190 @@ def test_low_vram_does_not_regress_high_end_gpu(tmp_path) -> None:
         assert cfg.no_kv_offload is False, f"{tier} must not enable --no-kv-offload"
 
 
+# ---------------------------------------------------------------------------
+# RoPE-Scaling (YaRN) auto-activation — regression suite for the v4.8.0
+# fix. Previously RoPE never activated in ANY mode: the gate checked
+# `desired_ctx > native_ctx` with desired_ctx = profile.max_context, which
+# every profile sets to the NATIVE context → structurally never true.
+# Even rope_scale.enabled: true was dead code. Only the GUI Expert
+# checkbox (force_rope_scale) worked.
+# ---------------------------------------------------------------------------
+
+
+def _qwen3_moe_model(tmp_path):
+    """20 GB Qwen3-MoE, native 256k, supports RoPE scaling (qwen prefix)."""
+    p = tmp_path / "Qwen3-30B-A3B-Q4_K_M.gguf"
+    _write_minimal_gguf(p)
+    from scanner import ModelEntry
+
+    return ModelEntry(
+        path=p,
+        name="Qwen3-30B-A3B-Q4_K_M",
+        group=".",
+        size_bytes=int(20.0 * 1024**3),
+        metadata={
+            "general.architecture": "qwen3moe",
+            "qwen3moe.expert_count": 128,
+            "qwen3moe.block_count": 48,
+            "qwen3moe.context_length": 262144,
+            "qwen3moe.attention.head_count_kv": 8,
+            "qwen3moe.attention.key_length": 128,
+            "qwen3moe.attention.value_length": 128,
+        },
+    )
+
+
+def test_rope_activates_when_profile_enabled_low_vram(tmp_path) -> None:
+    """rope_scale.enabled: true must actually switch YaRN on.
+
+    Before v4.8.0 the profile switch was dead code: the activation gate
+    compared profile.max_context (== native) to native_ctx and was never
+    satisfied. On a low_vram box (8 GB VRAM / 64 GB RAM) the abundant RAM
+    lets the KV budget reach beyond native → RoPE must fire.
+    """
+    import dataclasses
+    from performance_target import PERFORMANCE_TARGETS
+
+    model = _qwen3_moe_model(tmp_path)
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    profile_on = dataclasses.replace(profile, rope_scale_enabled=True)
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg = compute_config(
+        model, sys_info, profile_on, perf_target=PERFORMANCE_TARGETS["low_vram"]
+    )
+    cmd = build_command(model, cfg, profile_on, server_binary="llama-server")
+
+    assert cfg.rope_scaling is True, "enabled=True must activate RoPE"
+    assert "--rope-scaling" in cmd
+    assert "--rope-scale" in cmd
+    assert cfg.ctx > model.native_context, "YaRN must extend context past native"
+
+
+def test_rope_activates_on_user_ctx_beyond_native(tmp_path) -> None:
+    """Pinning ctx > native activates RoPE at the budget-supported level.
+
+    The old all-or-nothing check required the FULL pinned value × 1.1 to
+    fit; otherwise it silently clamped to native WITHOUT emitting YaRN,
+    so the user got less context than asked for and no idea why. Now RoPE
+    activates as soon as the budget supports anything beyond native.
+    """
+    from performance_target import PERFORMANCE_TARGETS
+
+    model = _qwen3_moe_model(tmp_path)
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg = compute_config(
+        model,
+        sys_info,
+        profile,
+        perf_target=PERFORMANCE_TARGETS["low_vram"],
+        user_ctx=524288,  # 512k > native 256k
+    )
+    cmd = build_command(model, cfg, profile, server_binary="llama-server")
+
+    assert cfg.rope_scaling is True
+    assert "--rope-scaling" in cmd
+    # Partial: must exceed native even if it can't reach the full 512k.
+    assert cfg.ctx > model.native_context
+
+
+def test_rope_stays_off_when_profile_disabled_and_auto(tmp_path) -> None:
+    """enabled=False + no user pin → RoPE must NOT silently activate.
+
+    The profile default is OFF deliberately (YaRN beyond native has a
+    quality cost). We must not turn it on for every Qwen model just
+    because RAM is available — that would surprise users.
+    """
+    from performance_target import PERFORMANCE_TARGETS
+
+    model = _qwen3_moe_model(tmp_path)
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    assert profile.rope_scale_enabled is False  # precondition
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg = compute_config(
+        model, sys_info, profile, perf_target=PERFORMANCE_TARGETS["low_vram"]
+    )
+    assert cfg.rope_scaling is False
+
+
+def test_rope_factor_derived_from_context_not_fixed(tmp_path) -> None:
+    """YaRN scale factor tracks the reached context (ceil(ctx/native)),
+    capped at the profile's max factor — not always the flat 4.0.
+
+    Over-stretching RoPE to 1M when only ~300k is used degrades quality at
+    the positions actually exercised. The factor must fit the context.
+    """
+    import dataclasses
+    from performance_target import PERFORMANCE_TARGETS
+
+    model = _qwen3_moe_model(tmp_path)
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    profile_on = dataclasses.replace(profile, rope_scale_enabled=True)
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg = compute_config(
+        model, sys_info, profile_on, perf_target=PERFORMANCE_TARGETS["low_vram"]
+    )
+    # native is 256k; if ctx lands in (256k, 512k] the factor is 2,
+    # in (512k, 768k] it's 3, in (768k, 1M] it's 4. Either way it must be
+    # <= profile max (4.0) and > 1, and consistent with the context chosen.
+    assert 1 < cfg.rope_scale_factor <= profile.rope_scale_factor
+    import math
+
+    expected = math.ceil(cfg.ctx / model.native_context)
+    assert cfg.rope_scale_factor == min(expected, profile.rope_scale_factor)
+
+
+def test_low_vram_dense_model_near_vram_limit_not_full_offload(tmp_path) -> None:
+    """A dense model that fits the WEIGHTS but not weights+compute-buffer
+    must use PARTIAL offload (not full_off), so the GUI pre-launch check
+    doesn't refuse it on an 8 GB card (the gemma-4-12b report).
+
+    Before v4.8.0 a ~7 GB model on a 7.4 GB-free card was marked full_off
+    (weights fit in usable VRAM), then the +1 GB pre-launch margin
+    refused it. FULL_OFF_HEADROOM_GB makes it spill a layer or two to CPU.
+    """
+    from performance_target import PERFORMANCE_TARGETS
+    from scanner import ModelEntry
+
+    p = tmp_path / "gemma-4-12b-Q4_0.gguf"
+    _write_minimal_gguf(p)
+    model = ModelEntry(
+        path=p,
+        name="gemma-4-12b-Q4_0",
+        group=".",
+        size_bytes=int(7.0 * 1024**3),
+        metadata={
+            "general.architecture": "gemma4",
+            "gemma4.block_count": 48,
+            "gemma4.context_length": 32768,
+            "gemma4.attention.head_count_kv": 8,
+            "gemma4.attention.key_length": 256,
+            "gemma4.attention.value_length": 256,
+        },
+    )
+    profiles = load_profiles(SETTINGS_DIR)
+    profile = match_profile(model.name, profiles)
+    sys_info = _fake_system(ram_total=64, ram_free=58, vram_total=8, vram_free=7.4)
+
+    cfg = compute_config(
+        model, sys_info, profile, perf_target=PERFORMANCE_TARGETS["low_vram"]
+    )
+    # The whole point: not flagged full-offload, so the pre-launch check
+    # (which only hard-refuses full_off) lets it through.
+    assert cfg.full_offload is False
+    assert cfg.ngl < 48 or cfg.full_offload is False  # spilt to CPU or tight partial
+    # And the GPU footprint (weights only — KV is in RAM in low_vram) fits.
+    assert cfg.estimated_model_vram_gb <= 7.4
+
+
 def test_perf_target_default_balanced_when_profile_has_none(tmp_path) -> None:
     """A profile without performance_target: falls back to balanced."""
     profiles = load_profiles(SETTINGS_DIR)

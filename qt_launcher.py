@@ -5367,6 +5367,32 @@ class MainWindow(QMainWindow):
             g = sysinfo.gpus[0]
             full_off = bool(getattr(cfg, "full_offload", False))
             if full_off and g.free_vram_gb < need:
+                # `need` = model weights + KV-in-VRAM + the conservative
+                # +SAFETY_GB compute-buffer margin. A full_off model whose
+                # actual GPU footprint (weights + VRAM-resident KV) fits but
+                # whose +margin tips over free VRAM still RUNS: the compute
+                # buffer is small and compute_config already reserved
+                # FULL_OFF_HEADROOM_GB for the full-offload decision. This
+                # was the gemma-4-12b / low-VRAM-card report: an 8 GB box
+                # with 7.4 GB free refused a 6.5–7.2 GB model (weights fit,
+                # but weights + 1 GB margin did not). Only hard-refuse when
+                # the model's real footprint exceeds free VRAM — the one
+                # case with no CPU fallback (full_off pins every layer to
+                # GPU, so an overflow OOMs instead of spilling).
+                hard_footprint = (
+                    float(cfg.estimated_model_vram_gb)
+                    + float(cfg.kv_vram_gb)
+                    + float(cfg.vision_vram_gb)
+                    + float(cfg.draft_vram_gb)
+                )
+                if g.free_vram_gb >= hard_footprint:
+                    self._log(
+                        f"[Balance] {g.name}: full-offload footprint "
+                        f"{hard_footprint:.1f} GB fits in "
+                        f"{g.free_vram_gb:.1f} GB free (compute-buffer "
+                        f"margin {SAFETY_GB:.1f} GB tight) — proceeding."
+                    )
+                    return None, None
                 return None, (
                     f"Not enough free VRAM on {g.name}: needs ≈{need:.1f} GB "
                     f"(model {footprint_gb:.1f} fully on GPU + "

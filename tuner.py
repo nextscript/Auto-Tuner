@@ -43,6 +43,17 @@ MOE_PLACEMENT_CTX_TARGET = PERFORMANCE_TARGETS[
 ].moe_placement_ctx_target
 MOE_KV_RESERVE_FRAC = 0.06
 
+# Compute-buffer headroom a model needs ON TOP of its weights before the
+# AutoTuner will commit to a FULL GPU offload (ngl 999). llama.cpp allocates
+# a flash-attention / compute workspace on top of the weights (~0.3–0.8 GB
+# for a dense model). Without this reserve a model that fits the WEIGHTS but
+# not weights+compute was marked full_off=True, and the GUI pre-launch check
+# then refused it on low-VRAM cards (8 GB box: a 7 GB model + 1 GB margin >
+# 7.4 GB free → "Not enough free VRAM" for a model that genuinely fits).
+# Reserving this headroom makes such models fall through to PARTIAL offload,
+# where the overflow layers spill to CPU and the server runs fine.
+FULL_OFF_HEADROOM_GB = 0.5
+
 
 # ---------------------------------------------------------------------------
 # Model-size helpers
@@ -520,7 +531,11 @@ def _decide_offload(
         return 0, 0.0, model_size_gb, False
 
     usable = max(0.0, free_vram_gb - vram_headroom_gb)
-    if usable >= model_size_gb:
+    # Full offload needs room for the weights AND the compute buffer
+    # (see FULL_OFF_HEADROOM_GB). Below that threshold the model falls
+    # through to PARTIAL offload — excess layers spill to CPU and the
+    # server keeps running instead of being refused at launch.
+    if usable >= model_size_gb + FULL_OFF_HEADROOM_GB:
         return 999, model_size_gb, 0.0, True
 
     if usable < 0.5:
@@ -1460,28 +1475,59 @@ def compute_config(
         # KV-Speicherbedarf pro Token (q5_0 als Entscheidungsgrundlage)
         kv_per_tok_q5 = base_kv_mb * kv_quant_factor("q5_0")
 
-        # Gewünschter Context: user-specified oder Profil-Maximum.
-        # WICHTIG: Hier das UNCAPPED profile.max_context verwenden (nicht das
-        # native_ctx-beschränkte profile_max), denn der Sinn von RoPE-Scaling
-        # ist ja, über native_ctx hinaus zu gehen. Wenn profile.max_context
-        # bereits <= native_ctx ist, wird desired_ctx <= native_ctx und die
-        # Aktivierungsbedingung unten bleibt False (korrekt).
-        desired_ctx = user_ctx if user_ctx is not None else profile.max_context
+        # ---- RoPE-Ziel-Context ----------------------------------------
+        # Wie weit wir via YaRN ausdehnen wollen. Das alte Gate prüfte
+        # `desired_ctx > native_ctx` mit desired_ctx = profile.max_context
+        # — da jedes Profil max_context sinnvollerweise auf den NATIVEN
+        # Context setzt (z.B. qwen3_5-3_6.yaml: 262144 = nativ), war das
+        # strukturell nie erfüllt: RoPE-Scaling aktivierte in KEINEM Modus,
+        # nicht einmal bei rope_scale.enabled=true (der Schalter war Dead
+        # Code). YaRN wurde ausschließlich über den GUI-Expert-Schalter
+        # (force_rope_scale) emittiert.
+        #
+        # Opt-in-Reihenfolge (erster Treffer gewinnt):
+        #   1. Profil rope_scale.enabled=true  → profile_rope_max (z.B. 1M)
+        #   2. User pinnt user_ctx > native   → genau dieser Wert
+        #   3. Sonst (Auto, enabled=false)     → keine Ausdehnung
+        # Fall 3 respektiert bewusst die Profil-Default-Entscheidung
+        # („Standard aus"): YaRN über native hinaus hat einen
+        # Qualitätspreis und darf nicht still für jedes Qwen-Modell
+        # aktiviert werden, nur weil RAM vorhanden ist.
+        if profile_rope_scale:
+            rope_target_ctx = (
+                user_ctx if user_ctx is not None else profile_rope_max
+            )
+        elif user_ctx is not None and user_ctx > native_ctx:
+            rope_target_ctx = user_ctx
+        else:
+            rope_target_ctx = 0
 
-        # Wenn gewünschter Context das native Limit überschreitet
-        if desired_ctx > native_ctx:
-            # Prüfe ob Speicher vorhanden ist. WICHTIG: Per-Slot-Budget
-            # verwenden, da llama-server N Slots anlegt — jeder Slot braucht
-            # einen vollen KV-Buffer der gewünschten Größe. Vorher wurde hier
-            # das GESAMTE Budget geprüft, was bei n_parallel>1 die Aktivierung
-            # viel zu großzügig machte und ein rope_scaled_ctx-Ziel setzte, das
-            # nur ein einzelner Slot bedienen könnte.
-            rope_kv_gb = (desired_ctx * kv_per_tok_q5) / 1024
+        if rope_target_ctx > native_ctx:
+            # Per-Slot-Budget: llama-server legt N Slots an, jeder braucht
+            # einen vollen KV-Buffer der Zielgröße. Das GESAMTE Budget durch
+            # n_parallel zu teilen verhindert Überprovisionierung.
             kv_budget_per_slot_gb = kv_budget_gb / n_parallel
 
-            # Aktiviere RoPE-Scaling wenn >= 90% des PER-SLOT-Bedarfs verfügbar
-            if profile_rope_scale or kv_budget_per_slot_gb >= rope_kv_gb * 1.1:
-                rope_scaled_ctx = min(desired_ctx, profile_rope_max)
+            # Context, den das Budget (q5_0-Basis) pro Slot tatsächlich hält.
+            # kv_budget_gb wird in Schritt (2.6) um den Compute-Buffer-Reserve
+            # verkleinert, daher fällt der finale ctx (max_fit_ctx) etwas
+            # kleiner aus — model_ctx_limit fängt das über min() ab.
+            budget_ctx = (
+                int((kv_budget_per_slot_gb * 1024) / kv_per_tok_q5)
+                if kv_per_tok_q5 > 0
+                else 0
+            )
+
+            # PARTIELLE Aktivierung: schon einschalten, sobald das Budget
+            # MEHR als native_ctx zulässt — nicht erst, wenn die volle
+            # pinned-Zielgröße × 1.1 reinpasst. Das alte All-or-Nothing-
+            # Verhalten clamppte einen user_ctx > native still auf native
+            # zurück, OHNE YaRN zu emittieren (der User bekam weniger
+            # Context als bestellt und wusste nicht warum).
+            if budget_ctx > native_ctx:
+                rope_scaled_ctx = min(
+                    budget_ctx, rope_target_ctx, profile_rope_max
+                )
                 rope_scaling_active = True
 
     # Expert override: force_rope_scale = True turns it on unconditionally;
@@ -2178,7 +2224,26 @@ def compute_config(
         no_context_shift=no_context_shift,
         no_kv_offload=no_kv_offload,
         rope_scaling=rope_scaling_active,
-        rope_scale_factor=float(profile_rope_factor) if rope_scaling_active else 1.0,
+        # YaRN-Faktor aus dem TATSÄCHLICH erreichten rope_scaled_ctx ableiten
+        # (ceil(ctx/native)), gedeckelt auf den profil-erlaubten Maximal-
+        # faktor (z.B. 4.0 für Qwen3.5/3.6). Früher war der Faktor immer fix
+        # profile_rope_factor (4.0) — selbst wenn nur ein 300k-Context auf
+        # einem 262k-nativen Modell aktiv wurde, wurde RoPE bis 1M
+        # überdehnt (Qualitätsverlust an den tatsächlich genutzten
+        # Positionen). Jetzt passt sich der Faktor exakt an.
+        rope_scale_factor=(
+            max(
+                1.0,
+                min(
+                    float(profile_rope_factor),
+                    float(math.ceil(rope_scaled_ctx / native_ctx))
+                    if (rope_scaling_active and native_ctx > 0)
+                    else float(profile_rope_factor),
+                ),
+            )
+            if rope_scaling_active
+            else 1.0
+        ),
         performance_target=perf_target.name,
         n_parallel=n_parallel,
         n_parallel_forced=n_parallel_forced,
