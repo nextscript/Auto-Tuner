@@ -1514,9 +1514,7 @@ def compute_config(
     _abs_reserve, _frac_reserve = _kv_headroom_reserve(
         _reserve_target_ctx, n_parallel, rope_scaling_active
     )
-    kv_budget_gb = max(
-        0.0, kv_budget_gb - _abs_reserve - _frac_reserve * kv_budget_gb
-    )
+    kv_budget_gb = max(0.0, kv_budget_gb - _abs_reserve - _frac_reserve * kv_budget_gb)
 
     # ---- (3) Context + KV quant
     target_ctx = user_ctx if user_ctx is not None else profile_max
@@ -1531,6 +1529,20 @@ def compute_config(
     # Expert overrides for KV-quant: when both K and V are pinned we
     # respect the user's pair as-is; when only one is pinned we still
     # let _pick_kv_quant decide the other within budget.
+    #
+    # NVIDIA CUDA builds default GGML_CUDA_FA_ALL_QUANTS=OFF. At b9888 the
+    # CUDA FlashAttention selector correctly validates BOTH K and V cache
+    # types, but without FA_ALL_QUANTS it still requires K == V. Because the
+    # AutoTuner deliberately emits `-fa on`, automatic K/V asymmetry would be
+    # risky on NVIDIA CUDA systems (high- and low-VRAM alike): it can disable
+    # the FA kernel or abort depending on the model/backend. Keep auto KV
+    # symmetric on NVIDIA; AMD's common AutoTuner builds are Vulkan/ROCm and
+    # keep the asymmetric headroom win. Manual Expert pins are left untouched.
+    primary_vendor = (
+        primary_gpu.vendor if primary_gpu else system.primary_vendor
+    ).lower()
+    auto_asymmetric_kv = primary_vendor != "nvidia"
+
     kv_quant_strategy = "symmetric"
     if force_cache_k is not None and force_cache_v is not None:
         cache_k, cache_v = force_cache_k, force_cache_v
@@ -1548,7 +1560,7 @@ def compute_config(
             kv_budget_gb,
             model_ctx_limit,
             turbo=turbo_kv,
-            asymmetric=True,
+            asymmetric=auto_asymmetric_kv,
         )
         if force_cache_k is not None:
             cache_k = _turbo_quant_for(force_cache_k) if turbo_kv else force_cache_k
@@ -1580,9 +1592,7 @@ def compute_config(
     pin_clamped_to_budget: Optional[int] = None
     kv_budget_per_slot_gb = kv_budget_gb / n_parallel
     if actual_per_tok_mb > 0:
-        max_fit_ctx = int(
-            (kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb
-        )
+        max_fit_ctx = int((kv_budget_per_slot_gb * 1024 * 0.995) / actual_per_tok_mb)
     else:
         max_fit_ctx = profile_max
 
@@ -1663,9 +1673,7 @@ def compute_config(
                 f"{effective_vram_safety:.1f} GB ≈ {gpu_total:.1f} GB of "
                 f"{free_vram:.1f} GB free."
             )
-            warning = (
-                f"{warning} {tight}" if warning else tight
-            )
+            warning = f"{warning} {tight}" if warning else tight
 
     # ---- (4) Threads — weniger Threads für bessere Performance
     # start_llama.py verwendet: cpu_count // 2 (max 8 bei <16 cores)
@@ -2278,6 +2286,11 @@ def build_diffusion_command(
         str(config.ubatch),
     ]
 
+    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
+    # is set. Emit it explicitly so the terminal shows prompt/eval timings
+    # and tokens/s for single-shot diffusion runs.
+    cmd.append("--perf")
+
     # ---- multi-GPU placement (mirror build_command) ------------------
     # DiffusionGemma (25 GB) must boot on the 32 GB card. Without these
     # flags the binary defaults to Vulkan device 0 — often the smaller
@@ -2417,6 +2430,11 @@ def build_diffusion_server_command(
         "-ub",
         str(config.ubatch),
     ]
+
+    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
+    # is set. Emit it explicitly so the terminal keeps printing throughput
+    # details (tokens/s) for DiffusionGemma's persistent server too.
+    cmd.append("--perf")
 
     # ---- multi-GPU placement (mirror build_command) ------------------
     # DiffusionGemma (25 GB) must boot on the 32 GB card; without these
@@ -2558,12 +2576,13 @@ def build_command(
     # "unknown argument"; in that case drop the two tokens below.
     cmd += ["--fit", "off"]
 
-    # ---- Prometheus metrics endpoint ----------------------------------
-    # Exposes GET /metrics on the SAME host:port as the inference API
-    # (no separate port). Scraped by the System Tricorder for live
-    # tokens/s (llamacpp:predicted_tokens_seconds) and KV-cache fill
-    # (llamacpp:kv_cache_usage_ratio). Negligible overhead.
-    cmd.append("--metrics")
+    # ---- Performance timings + Prometheus metrics ---------------------
+    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
+    # is set. Emit it explicitly so terminal logs include prompt/eval timing
+    # and tokens/s again. Users can still append --no-perf if they want a
+    # quieter server. --metrics exposes GET /metrics on the SAME host:port
+    # as the inference API (no separate port) for live tokens/s and KV fill.
+    cmd += ["--perf", "--metrics"]
 
     # ---- Host-memory prompt caching (-cram / --cache-ram) -------------
     # ggerganov's PR #16391 (merged; rel #16117) added automatic prompt

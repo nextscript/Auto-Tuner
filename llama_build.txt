@@ -19,10 +19,23 @@ if (Test-Path .\$dir) { Remove-Item .\$dir -Recurse -Force }
 Rename-Item .\_tmp_llama $dir
 Write-Host "==> Build-Verzeichnis: $dir"
 
-Push-Location .\$dir\tools\ui
-npm ci
-npm run build
-Pop-Location
+# --- UI: layout-tolerant (tools/ui ab b9174, sonst tools/server/webui; sonst Prebuilt) ---
+$uiSrc = $null
+foreach ($cand in ("tools/ui", "tools/server/webui")) {
+    if (Test-Path .\$dir\$cand\package.json) { $uiSrc = $cand; break }
+}
+if ($uiSrc) {
+    Write-Host "==> UI aus Source bauen ($dir\$uiSrc)"
+    Push-Location .\$dir\$uiSrc
+    if (Test-Path package-lock.json) { npm ci } else { npm install }
+    if ($LASTEXITCODE -ne 0) { npm install }
+    npm run build
+    Pop-Location
+    $uiPrebuilt = "OFF"
+} else {
+    Write-Host "==> keine UI-Quellen in $dir — verwende Prebuilt-UI von HF"
+    $uiPrebuilt = "ON"
+}
 
 cmake -S .\$dir -B .\$dir\build `
   -G "Visual Studio 18 2026" `
@@ -36,7 +49,7 @@ cmake -S .\$dir -B .\$dir\build `
   -DBUILD_SHARED_LIBS=OFF `
   -DLLAMA_BUILD_SERVER=ON `
   -DLLAMA_BUILD_UI=ON `
-  -DLLAMA_USE_PREBUILT_UI=OFF `
+  -DLLAMA_USE_PREBUILT_UI=$uiPrebuilt `
   -DLLAMA_CURL=OFF `
   -DGGML_CCACHE=OFF `
   -DGGML_VULKAN_CHECK_RESULTS=OFF `

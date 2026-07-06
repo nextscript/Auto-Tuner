@@ -198,6 +198,7 @@ def _fake_system(
     ram_free: float = 48,
     vram_total: float = 24,
     vram_free: float = 22,
+    vendor: str = "amd",
 ):
     """Build a synthetic SystemInfo for tuner tests."""
     return SystemInfo(
@@ -211,7 +212,7 @@ def _fake_system(
             GPUInfo(
                 index=0,
                 name="Test GPU",
-                vendor="amd",
+                vendor=vendor,
                 total_vram_mb=int(vram_total * 1024),
                 free_vram_mb=int(vram_free * 1024),
             )
@@ -273,6 +274,43 @@ def test_user_ctx_override_wins(tmp_path) -> None:
     assert cfg.ctx == 8192
 
 
+def test_nvidia_auto_kv_stays_symmetric_for_cuda_flash_attention(tmp_path) -> None:
+    """NVIDIA CUDA builds default GGML_CUDA_FA_ALL_QUANTS=OFF, and b9888
+    validates V-cache types for FlashAttention too. Since AutoTuner emits
+    -fa on, automatic K/V asymmetry must stay off on NVIDIA unless the user
+    explicitly pins it in Expert mode.
+    """
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.6-27B-UD-Q8_K_XL", size_gb=18.0)
+    profile = match_profile(model.name, profiles)
+
+    amd_cfg = compute_config(
+        model,
+        _fake_system(
+            ram_total=128,
+            ram_free=100,
+            vram_total=64,
+            vram_free=64,
+            vendor="amd",
+        ),
+        profile,
+    )
+    nvidia_cfg = compute_config(
+        model,
+        _fake_system(
+            ram_total=128,
+            ram_free=100,
+            vram_total=64,
+            vram_free=64,
+            vendor="nvidia",
+        ),
+        profile,
+    )
+
+    assert amd_cfg.cache_k != amd_cfg.cache_v
+    assert nvidia_cfg.cache_k == nvidia_cfg.cache_v
+
+
 def test_devstral_uses_high_context_when_ram_is_plenty(tmp_path) -> None:
     """Regression test for the v1 bug: Devstral was capped at 16k context
     even with tons of free RAM. With a roomy system it must now reach far
@@ -305,6 +343,8 @@ def test_build_command_includes_essentials(tmp_path) -> None:
     assert "-ngl" in cmd
     assert "--port" in cmd and "12345" in cmd
     assert "-ctk" in cmd and "-ctv" in cmd
+    assert "--perf" in cmd
+    assert "--metrics" in cmd
 
 
 def test_build_command_passes_extra_args(tmp_path) -> None:
@@ -2489,6 +2529,7 @@ def test_build_diffusion_server_command_gemma_server() -> None:
     assert "-m" in cmd and "-c" in cmd and "-ngl" in cmd
     # Diffusion + HTTP binding
     assert "--diffusion-steps" in cmd
+    assert "--perf" in cmd
     assert "--host" in cmd
     assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
     assert "--port" in cmd
@@ -2555,6 +2596,7 @@ def test_build_diffusion_command_mainline_flags() -> None:
     assert "-m" in cmd
     assert "--diffusion-steps" in cmd
     assert "--diffusion-algorithm" in cmd
+    assert "--perf" in cmd
     # confidence → 4
     assert cmd[cmd.index("--diffusion-algorithm") + 1] == "4"
     assert "-p" in cmd
@@ -2874,7 +2916,9 @@ def test_multi_folder_settings_round_trip(_isolated_settings, tmp_path) -> None:
 
     llama = tmp_path / "ai-local"
     app_settings.set_llama_build_paths([(llama, False)])
-    assert app_settings.get_llama_build_paths() == [(llama.resolve(strict=False), False)]
+    assert app_settings.get_llama_build_paths() == [
+        (llama.resolve(strict=False), False)
+    ]
 
 
 def test_expert_override_round_trip(_isolated_settings) -> None:
@@ -3497,7 +3541,9 @@ def test_forced_gpu_token_matches_both_os_name_styles(tmp_path) -> None:
 # GUI updater
 
 
-def test_update_worker_archive_overlay_preserves_settings(tmp_path, monkeypatch) -> None:
+def test_update_worker_archive_overlay_preserves_settings(
+    tmp_path, monkeypatch
+) -> None:
     """Downloaded ZIP installs must update code without clobbering settings."""
     import shutil
     import zipfile
@@ -3544,8 +3590,9 @@ def test_update_worker_archive_overlay_preserves_settings(tmp_path, monkeypatch)
     monkeypatch.setattr(
         worker,
         "_run",
-        lambda cmd, check=True, timeout=600.0, cwd=None: pip_calls.append((cmd, cwd))
-        or "",
+        lambda cmd, check=True, timeout=600.0, cwd=None: (
+            pip_calls.append((cmd, cwd)) or ""
+        ),
     )
 
     finished = []

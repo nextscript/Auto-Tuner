@@ -115,6 +115,9 @@ Launch llama-server now? [Y/n]
 
 - **Interactive terminal menu** — pick from whatever GGUFs are in your
   models folder, no editing required.
+- **Visible throughput logs** — AutoTuner emits `--perf` on current
+  llama.cpp builds so the separate terminal keeps showing prompt/eval
+  timings and tokens/s; append `--no-perf` if you want quieter logs.
 - **Hardware auto-detection** — works on **AMD (ROCm)**, **NVIDIA**,
   **Intel**, and **Apple Silicon** (unified memory). Multi-GPU is
   supported via automatic `--tensor-split`. The split strategy depends on
@@ -255,8 +258,8 @@ You can disable vision (mmproj) support in two ways:
 ## Installation
 
 ```bash
-git clone https://github.com/<you>/llama-cpp-auto-tuner
-cd llama-cpp-auto-tuner
+git clone https://github.com/DaWasteh/Auto-Tuner.git
+cd "Auto-Tuner"
 pip install -r requirements.txt
 ```
 
@@ -688,7 +691,7 @@ notes: >
 Profiles with empty `patterns:` become the fallback when nothing else
 matches. See `settings/_default.yaml`.
 
-**Profiles bundled as of b9625** (arch string read from GGUF metadata):
+**Profiles currently bundled** (arch string read from GGUF metadata):
 
 | Profile file | Models | llama.cpp arch |
 |--------------|--------|----------------|
@@ -767,83 +770,41 @@ auto_tuner/
 
 ## Building llama.cpp and forks
 
-Recommended build settings for this system:
+AutoTuner ships **launch logic**, not a bundled llama.cpp binary. Put your
+`llama-server` / fork build in one of the configured build folders (GUI:
+**llama Builds**, or `LLAMA_CPP_DIR`) and AutoTuner discovers it. The
+repo keeps the build recipes in separate scripts so this README stays short:
 
-- Ninja generator
-- native CPU optimizations
-- static build
-- Release mode
-- 20 parallel build jobs
+| File | Purpose |
+|------|---------|
+| [`llama_build.txt`](llama_build.txt) | Mainline llama.cpp Vulkan build (Windows/AMD-friendly; versioned `bXXXX_llama.cpp`). |
+| [`turboquant_llama_build.txt`](turboquant_llama_build.txt) | TurboQuant KV-cache fork (`tq_bXXXX_llama.cpp`). |
+| [`ternary_bonsai_llama_build.txt`](ternary_bonsai_llama_build.txt) | PrismML Ternary/Bonsai fork (`2b_bXXXX_llama.cpp`), including the old-fork OpenSSL workaround. |
+| [`diffusion_llama_build.txt`](diffusion_llama_build.txt) | DiffusionGemma PR build with Vulkan. |
+| [`diffusion_hip_llama_build.txt`](diffusion_hip_llama_build.txt) | DiffusionGemma HIP/ROCm build for AMD when Vulkan hits the ~1 GiB single-allocation limit. |
+| [`setup_llamacpp_cuda.ps1`](setup_llamacpp_cuda.ps1) | Windows NVIDIA/CUDA one-shot setup helper (PowerShell/Admin; freak288-style script). |
+| [`setup_llamacpp_turboquant_cuda.ps1`](setup_llamacpp_turboquant_cuda.ps1) | Windows NVIDIA/CUDA TurboQuant setup helper. |
 
-```
-## Building llama.cpp and forks - Example
+The `*.txt` build recipes are PowerShell commands for the documented local
+workspace (`H:/LAB/ai-local` by default). They now handle both llama.cpp UI
+layouts automatically (`tools/ui` since b9174, `tools/server/webui` on older
+forks) and fall back to the prebuilt UI if the fork does not ship UI sources.
 
-# Example-System:
-# - Intel Core Ultra 9 285K
-# - AMD Radeon RX 9070 XT 16GB
-# - AMD Radeon R9700 AI Pro 32GB
-# - G.Skill Trident Z 48GB DDR5-8400MHz (2x24GB)
+Ubuntu/Linux users can either build upstream llama.cpp normally or adapt the
+same CMake flags from the recipes. The only AutoTuner requirement is that the
+resulting binary is discoverable, e.g. `LLAMA_CPP_DIR=/opt/ai-local/b9888_llama.cpp`
+with `build/bin/llama-server` inside.
 
-# Main-Fork b9739 (SPIRV-Headers required since b9194) - Windows
-cd H:\LAB\ai-local
-git clone https://github.com/KhronosGroup/SPIRV-Headers.git
-cmake -S .\SPIRV-Headers -B .\SPIRV-Headers\build `
-  -G "Visual Studio 18 2026" `
-  -A x64 `
-  -DCMAKE_INSTALL_PREFIX="H:/LAB/ai-local/SPIRV-Headers/install"
-cmake --build .\SPIRV-Headers\build --config Release
-cmake --install .\SPIRV-Headers\build --config Release
+## Server features (as of b9888)
 
-git clone https://github.com/ggml-org/llama.cpp.git
-# --- UI: aus Source bauen wenn UI-Quellen vorhanden, sonst Prebuilt von HF ---
-# Vor b9174 (16.05.2026) lag die UI unter tools/server/webui/,
-# ab b9174 unter tools/ui/. Aeltere Forks fuehren ggf. gar keine
-# UI-Quellen mit -> dann Prebuilt von HF holen.
-$uiSrc = $null
-foreach ($cand in ("tools/ui", "tools/server/webui")) {
-    if (Test-Path .\llama.cpp\$cand\package.json) { $uiSrc = $cand; break }
-}
-if ($uiSrc) {
-    Push-Location .\llama.cpp\$uiSrc
-    if (Test-Path package-lock.json) { npm ci } else { npm install }
-    npm run build
-    Pop-Location
-    $uiPrebuilt = "OFF"
-} else {
-    $uiPrebuilt = "ON"   # CMake laedt die fertige UI von HF
-}
-
-cmake -S .\llama.cpp -B .\llama.cpp\build `
-  -G "Visual Studio 18 2026" `
-  -A x64 `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DGGML_VULKAN=ON `
-  -DGGML_NATIVE=OFF `
-  -DGGML_AVX2=ON `
-  -DGGML_FMA=ON `
-  -DGGML_F16C=ON `
-  -DBUILD_SHARED_LIBS=OFF `
-  -DLLAMA_BUILD_SERVER=ON `
-  -DLLAMA_BUILD_UI=ON `
-  -DLLAMA_USE_PREBUILT_UI=$uiPrebuilt `
-  -DLLAMA_CURL=OFF `
-  -DGGML_CCACHE=OFF `
-  -DGGML_VULKAN_CHECK_RESULTS=OFF `
-  -DCMAKE_PREFIX_PATH="H:/LAB/ai-local/SPIRV-Headers/install"
-cmake --build .\llama.cpp\build --config Release --parallel 24
-
-For all the Forks i use i keep the txt-files in this repo with the spezific commands up-to-date.
-```
-
-## Server features (as of b9625)
-
-The following `llama-server` features are supported (from `tools/server/README.md`):
+The following `llama-server` features are supported (verified against `llama-server --help` / `tools/server/README.md`):
 
 | Flag | Support |
 |------|---------|
 | `-fa [on\|off\|auto]` | ✅ Emits the `-fa on` form |
 | `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ All in the dropdown |
 | `--fit off` | ✅ Always emitted so llama.cpp's own auto-fit pass (default `on`) doesn't silently re-adjust the computed values (AutoTuner is the authority) |
+| `--perf` | ✅ Explicitly emitted so llama.cpp b9888 prints prompt/eval timings and tokens/s in the terminal again. Users can still append `--no-perf` to quiet it. |
 | `--metrics` | ✅ Prometheus endpoint `GET /metrics` on the same host:port (see "Monitoring") |
 | `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391). Auto-on (`-1`, unlimited) for every **non-vision** model, switchable off via GUI checkbox. **Forced `0` for vision models** (incompatible with the mtmd path) |
 | `--reasoning on/off/auto` | ✅ Via dropdown |
@@ -865,6 +826,16 @@ The following `llama-server` features are supported (from `tools/server/README.m
 | `--rope-scaling yarn` | ✅ Already present |
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
+
+### Review b9840 → b9888
+
+Reviewed mainline up to **b9888** (`cb295bf`, CUDA FlashAttention K/V cache-type validation). No AutoTuner flag was removed or renamed upstream. Changes made for v4.7.9:
+
+- **Terminal throughput visibility restored:** llama.cpp now defaults libllama performance timings to off unless `--perf` is set. AutoTuner emits `--perf` for normal `llama-server`, `llama-diffusion-cli`, and `llama-diffusion-gemma-server`, so prompt/eval timings and tokens/s show in the terminal again. `--metrics` remains enabled for machine-readable monitoring.
+- **NVIDIA CUDA safety:** b9888 validates V-cache types for CUDA FlashAttention too. Since default CUDA builds have `GGML_CUDA_FA_ALL_QUANTS=OFF`, AutoTuner keeps automatic KV choices symmetric on NVIDIA (high- and low-VRAM) while preserving AMD/Vulkan asymmetric K/V choices for extra context. Expert-mode manual K/V pins still pass through unchanged.
+- **Tracked settings removed:** `autotuner_settings.json` is now only local user state (already gitignored) and is removed from Git tracking for GitHub releases.
+
+Relevant upstream commits in this range are backend/runtime fixes (CUDA Gemma E4B MTP FA, stale tensor-split params for draft models, tensor-parallel + `--n-cpu-moe`, Vulkan integer overflow, UI/MCP fixes). They do not require new AutoTuner flags beyond the `--perf` verbosity fix above.
 
 ### Review b9625 → b9840
 
