@@ -516,6 +516,51 @@ def test_mlock_disabled_when_gpu_present(tmp_path, monkeypatch) -> None:
     assert cfg.no_mmap is False
 
 
+def test_veto_unsafe_mlock_overrides_gui_reenabled_mlock(tmp_path, monkeypatch) -> None:
+    """A stale per-model override / expert checkbox can set cfg.mlock=True on a
+    GPU system AFTER compute_config's gate. veto_unsafe_mlock is the final net
+    that strips it again (the actual Mistral-Medium GUI crash)."""
+    from tuner import veto_unsafe_mlock
+
+    monkeypatch.setattr("tuner._memlock_limit_gb", lambda: None)
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Bonsai-8B", size_gb=5.0)
+    profile = match_profile(model.name, profiles)
+    system = _fake_system()  # has a GPU
+    cfg = compute_config(model, system, profile)
+    assert cfg.mlock is False  # compute_config already gated
+
+    # Simulate the GUI applying a persisted "mlock": true override.
+    cfg.mlock = True
+    cfg.no_mmap = True
+
+    assert veto_unsafe_mlock(cfg, system) is True
+    assert cfg.mlock is False
+    assert cfg.no_mmap is False
+
+
+def test_veto_unsafe_mlock_respects_force_and_cpu_only(tmp_path) -> None:
+    """--force-mlock bypasses the veto (patched builds); a CPU-only system has
+    no GPU host buffer, so mlock is left intact there too."""
+    from tuner import veto_unsafe_mlock
+
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Bonsai-8B", size_gb=5.0)
+    profile = match_profile(model.name, profiles)
+
+    gpu_cfg = compute_config(model, _fake_system(), profile)
+    gpu_cfg.mlock = True
+    gpu_cfg.no_mmap = True
+    assert veto_unsafe_mlock(gpu_cfg, _fake_system(), force_mlock=True) is False
+    assert gpu_cfg.mlock is True
+
+    cpu_cfg = compute_config(model, _fake_system(vram_total=0), profile)
+    cpu_cfg.mlock = True
+    cpu_cfg.no_mmap = True
+    assert veto_unsafe_mlock(cpu_cfg, _fake_system(vram_total=0)) is False
+    assert cpu_cfg.mlock is True
+
+
 @pytest.mark.skipif(os.name == "nt", reason="RLIMIT_MEMLOCK gate is POSIX-only")
 def test_mlock_disabled_when_memlock_limit_too_small(tmp_path, monkeypatch) -> None:
     """Desktop Linux defaults RLIMIT_MEMLOCK to 8 MiB; a non-root process

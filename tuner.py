@@ -1219,6 +1219,42 @@ def _kv_headroom_reserve(
 
 
 # ---------------------------------------------------------------------------
+# mlock safety
+
+
+def _mlock_unsafe_with_gpu(system: SystemInfo, force_mlock: bool) -> bool:
+    """True when enabling --mlock would abort this llama.cpp build.
+
+    A loaded GPU backend puts even CPU-resident weights into its pinned host
+    buffer, and b9895's Vulkan host allocation can hand back a NULL base
+    WITHOUT raising, so --mlock dies in llama_mlock::grow_to
+    (llama-mmap.cpp:744) — for ANY -ngl (even 0) and independent of
+    RLIMIT_MEMLOCK. ``--force-mlock`` is the opt-out for patched upstream
+    builds.
+    """
+    return bool(system.gpus) and not force_mlock
+
+
+def veto_unsafe_mlock(
+    config: "TunedConfig", system: SystemInfo, force_mlock: bool = False
+) -> bool:
+    """Final safety net: strip --mlock/--no-mmap from a config that would crash.
+
+    compute_config already applies this gate, but GUI per-model overrides,
+    expert-panel checkboxes and persisted settings can re-enable mlock on a
+    TunedConfig AFTER compute_config ran (a stale ``"mlock": true`` saved back
+    when an older llama.cpp only warned). Every launch path calls this right
+    before building the command. Returns True when it disabled mlock so the
+    caller can log it.
+    """
+    if config.mlock and _mlock_unsafe_with_gpu(system, force_mlock):
+        config.mlock = False
+        config.no_mmap = False
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main entry
 
 
@@ -2099,7 +2135,9 @@ def compute_config(
     # llama_mlock::grow_to stirbt an GGML_ASSERT(addr) (llama-mmap.cpp:744).
     # Bis das upstream gefixt ist: mit GPUs im System kein automatisches
     # mlock. --force-mlock übergeht das bewusst (z. B. für gefixte Builds).
-    if mlock and not force_mlock and system.gpus:
+    # Dieselbe Regel greift als finales Sicherheitsnetz in veto_unsafe_mlock(),
+    # falls GUI-Overrides mlock nach compute_config wieder einschalten.
+    if mlock and _mlock_unsafe_with_gpu(system, force_mlock):
         mlock = False
     # POSIX-Gate: mlock ist durch RLIMIT_MEMLOCK gedeckelt (Desktop-Linux
     # default: 8 MiB). Ein nicht-root Prozess kann damit kein Modell pinnen;

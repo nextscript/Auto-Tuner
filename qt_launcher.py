@@ -77,6 +77,7 @@ from tuner import (
     build_command,
     compute_config,
     prepare_command_for_binary,
+    veto_unsafe_mlock,
     TunedConfig,
 )
 from performance_target import (
@@ -5641,6 +5642,17 @@ class MainWindow(QMainWindow):
         # or compute_config just returned one.  The assert narrows the type
         # for static checkers (Pylance / mypy) that cannot prove this.
         assert cfg is not None
+
+        # Final mlock safety net. A stale per-model override or the expert
+        # --mlock checkbox can re-enable mlock AFTER compute_config's gate.
+        # On a GPU system that guarantees a GGML_ASSERT(addr) abort in
+        # llama_mlock::grow_to on this llama.cpp build (see veto_unsafe_mlock).
+        if self._system is not None and veto_unsafe_mlock(cfg, self._system):
+            self._log(
+                "[Compat] --mlock/--no-mmap deaktiviert: mit geladenem "
+                "GPU-Backend bricht dieser llama.cpp-Build sonst beim "
+                "Modell-Laden ab (llama_mlock::grow_to)."
+            )
 
         # ── Diffusion routing ────────────────────────────────────────
         # llama-diffusion-gemma-server (PR #24427) is a REAL persistent
