@@ -4,8 +4,12 @@ import math
 import re
 import platform
 import os
+import shutil
+import subprocess
+from functools import lru_cache
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 from hardware import SystemInfo, GPUInfo
 from scanner import ModelEntry
 from settings_loader import ModelProfile
@@ -53,6 +57,226 @@ MOE_KV_RESERVE_FRAC = 0.06
 # Reserving this headroom makes such models fall through to PARTIAL offload,
 # where the overflow layers spill to CPU and the server runs fine.
 FULL_OFF_HEADROOM_GB = 0.5
+
+
+# ---------------------------------------------------------------------------
+# llama.cpp CLI compatibility helpers
+
+# Flags for which the next argv token is a value. Used only when pruning a
+# command for an older llama.cpp binary whose --help output does not advertise
+# a flag the current AutoTuner knows about.
+_ARG_FLAGS_WITH_VALUES: Set[str] = {
+    "-a",
+    "-b",
+    "-c",
+    "-ctk",
+    "-ctv",
+    "-fa",
+    "-m",
+    "-md",
+    "-n",
+    "-ngl",
+    "-np",
+    "-p",
+    "-t",
+    "-tb",
+    "-ub",
+    "--alias",
+    "--batch-size",
+    "--cache-ram",
+    "--cache-type-k",
+    "--cache-type-v",
+    "--ctx-size",
+    "--diffusion-algorithm",
+    "--diffusion-block-length",
+    "--diffusion-eps",
+    "--diffusion-steps",
+    "--fit",
+    "--flash-attn",
+    "--gpu-layers",
+    "--host",
+    "--main-gpu",
+    "--min-p",
+    "--mmproj",
+    "--model",
+    "--model-draft",
+    "--n-cpu-moe",
+    "--n-gpu-layers",
+    "--numa",
+    "--parallel",
+    "--port",
+    "--predict",
+    "--presence-penalty",
+    "--repeat-penalty",
+    "--rope-scale",
+    "--rope-scaling",
+    "--spec-draft-n-max",
+    "--spec-draft-ngl",
+    "--spec-draft-p-min",
+    "--spec-ngram-map-k4v-min-hits",
+    "--spec-ngram-map-k4v-size-m",
+    "--spec-ngram-map-k4v-size-n",
+    "--spec-ngram-mod-n-match",
+    "--spec-ngram-mod-n-max",
+    "--spec-ngram-mod-n-min",
+    "--spec-type",
+    "--slot-prompt-similarity",
+    "--temp",
+    "--tensor-split",
+    "--threads",
+    "--threads-batch",
+    "--top-k",
+    "--top-p",
+    "--ubatch-size",
+}
+
+_FLAG_ALIAS_GROUPS: Tuple[Set[str], ...] = (
+    {"-a", "--alias"},
+    {"-b", "--batch-size"},
+    {"-c", "--ctx-size"},
+    {"-ctk", "--cache-type-k"},
+    {"-ctv", "--cache-type-v"},
+    {"-fa", "--flash-attn"},
+    {"-m", "--model"},
+    {"-md", "--model-draft"},
+    {"-n", "--predict"},
+    {"-ngl", "--gpu-layers", "--n-gpu-layers"},
+    {"-np", "--parallel"},
+    {"-p", "--prompt"},
+    {"-t", "--threads"},
+    {"-tb", "--threads-batch"},
+    {"-ub", "--ubatch-size"},
+    {"-cram", "--cache-ram"},
+)
+
+_FLAG_RE = re.compile(r"(?<![\w-])-{1,2}[A-Za-z][A-Za-z0-9_-]*")
+
+
+def _expand_supported_flag_aliases(flags: Set[str]) -> Set[str]:
+    """Add known llama.cpp short/long aliases to a parsed --help flag set."""
+    expanded = set(flags)
+    changed = True
+    while changed:
+        changed = False
+        for group in _FLAG_ALIAS_GROUPS:
+            if expanded & group and not group <= expanded:
+                expanded.update(group)
+                changed = True
+    return expanded
+
+
+def _flag_name(token: str) -> str:
+    """Return the flag part of an argv token, stripping an inline '=value'."""
+    return token.split("=", 1)[0]
+
+
+def _filter_command_for_supported_flags(
+    cmd: List[str], supported_flags: Set[str]
+) -> Tuple[List[str], List[str]]:
+    """Drop argv flags absent from a llama.cpp binary's advertised --help.
+
+    New AutoTuner releases intentionally use recent llama.cpp flags
+    (``--fit``, ``--cache-ram``, ``--perf``, ``--metrics``, newer
+    speculative-decoding knobs). Older or forked binaries abort on unknown
+    flags before they even load the model, which looks like a launch crash on
+    Ubuntu/macOS where there may be no separate terminal. This helper keeps the
+    command runnable by removing only arguments the selected binary does not
+    advertise. The caller logs the removed chunks so the user knows when an old
+    build is limiting features.
+    """
+    if not cmd or not supported_flags:
+        return list(cmd), []
+
+    supported = _expand_supported_flag_aliases(supported_flags)
+    # If help parsing failed badly (not even -m/--model appeared), do not risk
+    # mangling the command. Returning it unchanged is safer than stripping core
+    # model-loading arguments.
+    if "-m" not in supported and "--model" not in supported:
+        return list(cmd), []
+
+    filtered: List[str] = [cmd[0]]
+    removed: List[str] = []
+    i = 1
+    while i < len(cmd):
+        tok = cmd[i]
+        if tok.startswith("-") and tok not in ("-", "--"):
+            flag = _flag_name(tok)
+            if flag not in supported:
+                chunk = [tok]
+                i += 1
+                if "=" not in tok and flag in _ARG_FLAGS_WITH_VALUES and i < len(cmd):
+                    chunk.append(cmd[i])
+                    i += 1
+                removed.append(" ".join(chunk))
+                continue
+        filtered.append(tok)
+        i += 1
+    return filtered, removed
+
+
+def _resolve_probe_binary(binary: str) -> Optional[str]:
+    """Resolve a command's argv[0] to something we can safely run --help on."""
+    if not binary:
+        return None
+    p = Path(binary).expanduser()
+    if p.is_file():
+        if os.name != "nt" and not os.access(p, os.X_OK):
+            return None
+        return str(p)
+    return shutil.which(binary)
+
+
+@lru_cache(maxsize=32)
+def _probe_supported_flags_cached(
+    binary_path: str, mtime_ns: int, size: int
+) -> Optional[frozenset[str]]:
+    del mtime_ns, size  # cache key only; values are intentionally unused
+    kwargs: Dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        cp = subprocess.run(
+            [binary_path, "--help"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=6,
+            errors="replace",
+            **kwargs,
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return None
+    out = cp.stdout or ""
+    flags = set(_FLAG_RE.findall(out))
+    return frozenset(flags) if flags else None
+
+
+def _probe_supported_flags(binary: str) -> Optional[Set[str]]:
+    resolved = _resolve_probe_binary(binary)
+    if not resolved:
+        return None
+    try:
+        st = Path(resolved).stat()
+        probed = _probe_supported_flags_cached(resolved, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    return set(probed) if probed is not None else None
+
+
+def prepare_command_for_binary(cmd: List[str]) -> Tuple[List[str], List[str]]:
+    """Return ``cmd`` pruned for the selected binary plus removed chunks.
+
+    If the binary cannot be probed (missing, not executable, or --help times
+    out), the command is returned unchanged. This keeps explicit user paths and
+    very unusual forks working while still protecting normal launches from
+    older binaries that would crash on unknown arguments.
+    """
+    if not cmd:
+        return [], []
+    flags = _probe_supported_flags(cmd[0])
+    if not flags:
+        return list(cmd), []
+    return _filter_command_for_supported_flags(cmd, flags)
 
 
 # ---------------------------------------------------------------------------

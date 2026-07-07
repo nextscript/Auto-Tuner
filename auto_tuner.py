@@ -34,7 +34,14 @@ from hardware import detect_system, format_system, SystemInfo
 from launcher import launch
 from scanner import scan_models, group_entries, ModelEntry
 from settings_loader import load_profiles, match_profile, ModelProfile
-from tuner import build_command, build_diffusion_command, build_diffusion_server_command, compute_config, TunedConfig
+from tuner import (
+    build_command,
+    build_diffusion_command,
+    build_diffusion_server_command,
+    compute_config,
+    prepare_command_for_binary,
+    TunedConfig,
+)
 from performance_target import (
     resolve_performance_target,
     list_target_names,
@@ -317,15 +324,51 @@ def _pick_model(
 # ---------------------------------------------------------------------------
 # llama-server discovery
 
-_SERVER_SUBPATHS = [
-    "build/bin/Release/llama-server.exe",
-    "build/bin/Debug/llama-server.exe",
-    "build/bin/llama-server.exe",
-    "build/bin/llama-server",
-    "build/llama-server",
-    "llama-server.exe",
-    "llama-server",
-]
+def _native_binary_suffixes() -> Tuple[str, ...]:
+    """Executable suffixes to auto-discover on this OS, preferred first."""
+    if os.name == "nt":
+        return (".exe",)
+    # Never auto-select Windows .exe builds on Linux/macOS. Shared model/build
+    # folders can contain both Windows and native artifacts; launching the .exe
+    # from Ubuntu fails with PermissionError/Exec format error and looks like a
+    # model-load crash.
+    return ("",)
+
+
+def _binary_subpaths(binary_name: str) -> List[str]:
+    stem = binary_name[:-4] if binary_name.lower().endswith(".exe") else binary_name
+    bases = [
+        "build/bin/Release/",
+        "build/bin/Debug/",
+        "build/bin/",
+        "build/",
+        "",
+    ]
+    out: List[str] = []
+    for base in bases:
+        for suffix in _native_binary_suffixes():
+            candidate = f"{base}{stem}{suffix}"
+            if candidate not in out:
+                out.append(candidate)
+    return out
+
+
+_SERVER_SUBPATHS = _binary_subpaths("llama-server")
+
+
+def _is_runnable_binary(path: Path) -> bool:
+    """True for binaries this OS can launch directly."""
+    try:
+        if not path.is_file():
+            return False
+    except OSError:
+        return False
+    if os.name == "nt":
+        return True
+    if path.suffix.lower() == ".exe":
+        return False
+    return os.access(path, os.X_OK)
+
 
 # Diffusion models run through the single-shot llama-diffusion-cli example
 # binary, not llama-server. Same build tree, different target name.
@@ -354,19 +397,8 @@ def _diffusion_binary_for_arch(arch: Optional[str]) -> str:
 
 
 def _diffusion_subpaths_for(binary_name: str) -> List[str]:
-    """Build the candidate subpaths for a given diffusion binary name."""
-    bases = [
-        "build/bin/Release/",
-        "build/bin/Debug/",
-        "build/bin/",
-        "build/",
-        "",
-    ]
-    out: List[str] = []
-    for b in bases:
-        for ext in (".exe", ""):
-            out.append(f"{b}{binary_name}{ext}")
-    return out
+    """Build native candidate subpaths for a given diffusion binary name."""
+    return _binary_subpaths(binary_name)
 
 
 
@@ -476,7 +508,7 @@ def _fork_family(name: str) -> str:
 def _resolve_server_binary(user_value: str) -> str:
     """Turn a user-provided server name/path into something runnable."""
     p = Path(user_value).expanduser()
-    if p.is_absolute() and p.is_file():
+    if p.is_absolute() and _is_runnable_binary(p):
         return str(p)
 
     has_sep = os.sep in user_value or (
@@ -503,18 +535,18 @@ def _resolve_server_binary(user_value: str) -> str:
                     or _fork_family(fork_name).startswith(_fork_family(root_base))
                 ):
                     candidate = root / inner
-                    if candidate.is_file():
+                    if _is_runnable_binary(candidate):
                         _debug_print(f"Found candidate: {candidate}")
                         return str(candidate)
                     for sub in _SERVER_SUBPATHS:
                         candidate = root / sub
-                        if candidate.is_file():
+                        if _is_runnable_binary(candidate):
                             _debug_print(
                                 f"Found candidate in fork subpath: {candidate}"
                             )
                             return str(candidate)
                         candidate_with_inner = (root / sub) / inner
-                        if candidate_with_inner.is_file():
+                        if _is_runnable_binary(candidate_with_inner):
                             _debug_print(
                                 f"Found candidate in fork subpath with inner: {candidate_with_inner}"
                             )
@@ -540,7 +572,7 @@ def _resolve_server_binary(user_value: str) -> str:
 
     for a in anchors:
         candidate = a / p
-        if candidate.is_file():
+        if _is_runnable_binary(candidate):
             _debug_print(f"Found candidate in anchors: {candidate}")
             return str(candidate)
 
@@ -564,7 +596,7 @@ def _resolve_server_binary(user_value: str) -> str:
     for root in _candidate_search_roots():
         for sub in candidate_subpaths:
             candidate = root / sub
-            if candidate.is_file():
+            if _is_runnable_binary(candidate):
                 _debug_print(f"Found candidate in subpaths: {candidate}")
                 return str(candidate)
 
@@ -595,7 +627,7 @@ def _resolve_diffusion_binary(user_value: str, arch: Optional[str] = None) -> st
     # If the user passed an explicit binary name/path, honour it directly.
     resolved = _resolve_server_binary(user_value)
     # If the generic resolver already found a real file, use it.
-    if Path(resolved).is_file():
+    if _is_runnable_binary(Path(resolved)):
         return resolved
 
     # Build the ordered list of binary names to search for. An EXPLICIT
@@ -619,7 +651,7 @@ def _resolve_diffusion_binary(user_value: str, arch: Optional[str] = None) -> st
         for root in _candidate_search_roots():
             for sub in _diffusion_subpaths_for(binary_name):
                 candidate = root / sub
-                if candidate.is_file():
+                if _is_runnable_binary(candidate):
                     _debug_print(f"Found diffusion binary: {candidate}")
                     return str(candidate)
     # Last resort: a bare name might be on PATH.
@@ -743,7 +775,7 @@ def _discover_llama_forks() -> List[Tuple[str, Path]]:
                 continue
             # Must actually contain a runnable binary — otherwise it's a
             # stale checkout or a source-only clone without a build.
-            has_binary = any((rp / sub).is_file() for sub in _SERVER_SUBPATHS)
+            has_binary = any(_is_runnable_binary(rp / sub) for sub in _SERVER_SUBPATHS)
             if not has_binary:
                 # Debug aid: surface WHY a matching dir was skipped, so a
                 # missing fork in the menu is immediately diagnosable (e.g.
@@ -1336,7 +1368,7 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             diff_arch = (model.metadata or {}).get("general.architecture")
             diffusion_bin = _resolve_diffusion_binary(diff_request, arch=diff_arch)
 
-            if Path(diffusion_bin).is_file():
+            if _is_runnable_binary(Path(diffusion_bin)):
                 print(f"[AutoTuner] Found diffusion binary: {diffusion_bin}")
             elif not shutil.which(diffusion_bin):
                 print(
@@ -1370,7 +1402,7 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             gemma_server = _resolve_diffusion_binary(
                 "llama-diffusion-gemma-server", arch=diff_arch
             )
-            if Path(gemma_server).is_file():
+            if _is_runnable_binary(Path(gemma_server)):
                 print(f"[AutoTuner] Found diffusion-gemma-server: {gemma_server}")
             elif not shutil.which(gemma_server):
                 print(
@@ -1400,8 +1432,11 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
 
             if server != raw_server:
                 print(f"[AutoTuner] Found server binary: {server}")
-            elif not Path(server).is_file() and not shutil.which(server):
-                print(f"[AutoTuner] Warning: server binary '{server}' not found.")
+            elif not _is_runnable_binary(Path(server)) and not shutil.which(server):
+                print(
+                    f"[AutoTuner] Warning: server binary '{server}' not found "
+                    "or not executable on this OS."
+                )
                 print("  Pass --server /path/to/llama-server, set LLAMA_SERVER, or")
                 print("  set LLAMA_CPP_DIR to your llama.cpp checkout.")
 
@@ -1423,6 +1458,14 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 enable_speculative=not args.nodraft,
                 enable_ngram=use_ngram,
                 enable_prompt_cache=not getattr(args, "no_prompt_cache", False),
+            )
+
+        cmd, removed_args = prepare_command_for_binary(cmd)
+        if removed_args:
+            print(
+                "[AutoTuner] Compatibility: selected llama.cpp binary does not "
+                "advertise these argument(s); removed them: "
+                + "; ".join(removed_args)
             )
 
         if args.dry_run:
@@ -1488,7 +1531,16 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 last_exit_code = launch(cmd, env_overrides=cfg.env_overrides)
             else:
                 srv = ServerProcess(cmd, env_overrides=cfg.env_overrides)
-                srv.start()
+                try:
+                    srv.start()
+                except OSError as exc:
+                    print(
+                        f"[AutoTuner] ERROR: server binary '{cmd[0]}' could not "
+                        f"be started: {exc}",
+                        file=sys.stderr,
+                    )
+                    last_exit_code = 126
+                    continue
                 app = QApplication(sys.argv)
                 window = LogViewerWindow(srv)
                 window.show()

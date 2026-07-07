@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hardware import SystemInfo
 from performance_target import PerformanceTarget
@@ -39,6 +39,7 @@ def kv_per_token_mb_f16(params_billion: float) -> float: ...
 def kv_per_token_mb_from_metadata(md: Dict[str, Any]) -> float: ...
 def kv_quant_factor(quant: str) -> float: ...
 def _moe_expert_count(model: ModelEntry) -> int: ...
+def prepare_command_for_binary(cmd: List[str]) -> Tuple[List[str], List[str]]: ...
 
 # ---------------------------------------------------------------------------
 # TunedConfig

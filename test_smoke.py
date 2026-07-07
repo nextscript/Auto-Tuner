@@ -10,6 +10,7 @@ runner. They cover:
 
 from __future__ import annotations
 
+import os
 import struct
 import sys
 from pathlib import Path
@@ -355,6 +356,54 @@ def test_build_command_passes_extra_args(tmp_path) -> None:
     cmd = build_command(model, cfg, profile, extra_args=["--metrics", "--log-disable"])
     assert "--metrics" in cmd
     assert "--log-disable" in cmd
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell-script fake binary")
+def test_prepare_command_for_binary_prunes_unsupported_flags(tmp_path) -> None:
+    """Older llama.cpp builds abort on unknown flags before loading a model.
+    The launch path should remove only flags absent from the selected binary's
+    --help while keeping core supported arguments and their values.
+    """
+    from tuner import prepare_command_for_binary
+
+    fake = tmp_path / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    fake.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "-m, --model\n"
+        "-c, --ctx-size\n"
+        "-ngl, --gpu-layers\n"
+        "--host\n"
+        "--port\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    if os.name != "nt":
+        fake.chmod(0o755)
+
+    cmd = [
+        str(fake),
+        "-m",
+        "model.gguf",
+        "--fit",
+        "off",
+        "--cache-ram",
+        "-1",
+        "--host",
+        "127.0.0.1",
+        "--metrics",
+        "--port",
+        "1234",
+    ]
+    filtered, removed = prepare_command_for_binary(cmd)
+
+    assert "--fit" not in filtered and "off" not in filtered
+    assert "--cache-ram" not in filtered and "-1" not in filtered
+    assert "--metrics" not in filtered
+    assert ["-m", "model.gguf"] == filtered[1:3]
+    assert "--host" in filtered and "127.0.0.1" in filtered
+    assert "--port" in filtered and "1234" in filtered
+    assert removed == ["--fit off", "--cache-ram -1", "--metrics"]
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +987,18 @@ def test_force_gpu_unknown_name_falls_back_to_auto(tmp_path) -> None:
 # llama-server resolver
 
 
+def _fake_llama_server_path(fork_root: Path) -> Path:
+    binary = "llama-server.exe" if os.name == "nt" else "llama-server"
+    return fork_root / "build" / "bin" / "Release" / binary
+
+
+def _write_fake_server(path: Path) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    if os.name != "nt":
+        path.chmod(path.stat().st_mode | 0o755)
+
+
 def test_resolver_returns_input_when_nothing_matches(tmp_path, monkeypatch) -> None:
     """When the binary can't be found anywhere, the resolver echoes the
     original input — `launch()` then prints a clean 'not found' error
@@ -958,17 +1019,8 @@ def test_resolver_finds_binary_in_sibling_llama_cpp(tmp_path, monkeypatch) -> No
     # Build the tree: tmp/Auto Tuner/, tmp/ai-local/llama.cpp/build/...
     auto_dir = tmp_path / "Auto Tuner"
     auto_dir.mkdir()
-    server = (
-        tmp_path
-        / "ai-local"
-        / "llama.cpp"
-        / "build"
-        / "bin"
-        / "Release"
-        / "llama-server.exe"
-    )
-    server.parent.mkdir(parents=True)
-    server.write_text("")
+    server = _fake_llama_server_path(tmp_path / "ai-local" / "llama.cpp")
+    _write_fake_server(server)
 
     monkeypatch.chdir(auto_dir)
     monkeypatch.delenv("LLAMA_CPP_DIR", raising=False)
@@ -989,27 +1041,10 @@ def test_resolver_distinguishes_between_llama_and_1b_llama(
 
     auto_dir = tmp_path / "Auto Tuner"
     auto_dir.mkdir()
-    regular = (
-        tmp_path
-        / "ai-local"
-        / "llama.cpp"
-        / "build"
-        / "bin"
-        / "Release"
-        / "llama-server.exe"
-    )
-    bitnet = (
-        tmp_path
-        / "ai-local"
-        / "1b_llama.cpp"
-        / "build"
-        / "bin"
-        / "Release"
-        / "llama-server.exe"
-    )
+    regular = _fake_llama_server_path(tmp_path / "ai-local" / "llama.cpp")
+    bitnet = _fake_llama_server_path(tmp_path / "ai-local" / "1b_llama.cpp")
     for s in (regular, bitnet):
-        s.parent.mkdir(parents=True)
-        s.write_text("")
+        _write_fake_server(s)
 
     monkeypatch.chdir(auto_dir)
     monkeypatch.delenv("LLAMA_CPP_DIR", raising=False)
@@ -1019,8 +1054,38 @@ def test_resolver_distinguishes_between_llama_and_1b_llama(
     assert Path(res1).resolve() == regular.resolve()
 
     # Profile-style relative path must hit the BitNet fork
-    res2 = _resolve_server_binary("1b_llama.cpp/build/bin/Release/llama-server.exe")
+    res2 = _resolve_server_binary(f"1b_llama.cpp/build/bin/Release/{bitnet.name}")
     assert Path(res2).resolve() == bitnet.resolve()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only executable filtering")
+def test_resolver_ignores_windows_exe_on_posix(tmp_path, monkeypatch) -> None:
+    """A shared llama.cpp folder may contain only Windows .exe builds.
+    Linux/macOS must not auto-select them, otherwise model launch fails with
+    PermissionError / Exec format error and looks like a model-load crash.
+    """
+    from auto_tuner import _resolve_server_binary
+
+    auto_dir = tmp_path / "Auto Tuner"
+    auto_dir.mkdir()
+    win_only = (
+        tmp_path
+        / "ai-local"
+        / "llama.cpp"
+        / "build"
+        / "bin"
+        / "Release"
+        / "llama-server.exe"
+    )
+    win_only.parent.mkdir(parents=True)
+    win_only.write_text("not a native binary", encoding="utf-8")
+    win_only.chmod(0o755)
+
+    monkeypatch.chdir(auto_dir)
+    monkeypatch.setenv("LLAMA_CPP_DIR", str(tmp_path / "ai-local"))
+    monkeypatch.setenv("PATH", "")
+
+    assert _resolve_server_binary("llama-server") == "llama-server"
 
 
 def test_resolver_matches_versioned_fork_dir(tmp_path, monkeypatch) -> None:
@@ -1037,27 +1102,10 @@ def test_resolver_matches_versioned_fork_dir(tmp_path, monkeypatch) -> None:
 
     auto_dir = tmp_path / "Auto Tuner"
     auto_dir.mkdir()
-    fork2b = (
-        tmp_path
-        / "ai-local"
-        / "2b_b8840_llama.cpp"
-        / "build"
-        / "bin"
-        / "Release"
-        / "llama-server.exe"
-    )
-    fork1b = (
-        tmp_path
-        / "ai-local"
-        / "1b_llama.cpp"
-        / "build"
-        / "bin"
-        / "Release"
-        / "llama-server.exe"
-    )
+    fork2b = _fake_llama_server_path(tmp_path / "ai-local" / "2b_b8840_llama.cpp")
+    fork1b = _fake_llama_server_path(tmp_path / "ai-local" / "1b_llama.cpp")
     for s in (fork2b, fork1b):
-        s.parent.mkdir(parents=True)
-        s.write_text("")
+        _write_fake_server(s)
 
     monkeypatch.chdir(auto_dir)
     monkeypatch.delenv("LLAMA_CPP_DIR", raising=False)
@@ -2676,9 +2724,16 @@ def test_diffusion_resolver_picks_gemma_binary_for_diffusiongemma() -> None:
     for arch in ("dream", "llada", "rnd1", None):
         assert at._diffusion_binary_for_arch(arch) == "llama-diffusion-cli"
 
-    # Subpath builder produces the gemma binary name when asked.
+    # Subpath builder produces the native gemma binary name when asked.
     subs = at._diffusion_subpaths_for("llama-diffusion-gemma-cli")
-    assert any("llama-diffusion-gemma-cli.exe" in s for s in subs)
+    expected_name = (
+        "llama-diffusion-gemma-cli.exe"
+        if os.name == "nt"
+        else "llama-diffusion-gemma-cli"
+    )
+    assert any(s.endswith(expected_name) for s in subs)
+    if os.name != "nt":
+        assert not any(s.endswith(".exe") for s in subs)
 
 
 def test_build_diffusion_server_command_gemma_server() -> None:
@@ -3790,3 +3845,27 @@ def test_update_worker_archive_overlay_preserves_settings(
     assert (app / "autotuner_settings.json").read_text(encoding="utf-8") == "USER"
     assert (app / ".autotuner_update.json").exists()
     assert pip_calls, "requirements.txt change should reinstall dependencies"
+
+
+def test_binary_update_worker_picks_macos_asset_not_linux(monkeypatch) -> None:
+    """A frozen macOS build must not download the Linux release asset."""
+    import qt_launcher
+
+    worker = qt_launcher._BinaryUpdateWorker()
+    assets = [
+        {"name": "AutoTuner-Windows-x64.zip"},
+        {"name": "AutoTuner-Linux-x64.zip"},
+        {"name": "AutoTuner-macOS.zip"},
+    ]
+    monkeypatch.setattr(qt_launcher.platform, "system", lambda: "Darwin")
+
+    assert worker._pick_asset(assets) == {"name": "AutoTuner-macOS.zip"}
+
+
+def test_binary_update_worker_macos_missing_asset_returns_none(monkeypatch) -> None:
+    import qt_launcher
+
+    worker = qt_launcher._BinaryUpdateWorker()
+    monkeypatch.setattr(qt_launcher.platform, "system", lambda: "Darwin")
+
+    assert worker._pick_asset([{"name": "AutoTuner-Linux-x64.zip"}]) is None

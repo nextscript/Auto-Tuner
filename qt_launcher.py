@@ -73,7 +73,12 @@ from scanner import (
     is_draft_compatible,
 )
 from settings_loader import load_profiles, match_profile, ModelProfile
-from tuner import build_command, compute_config, TunedConfig
+from tuner import (
+    build_command,
+    compute_config,
+    prepare_command_for_binary,
+    TunedConfig,
+)
 from performance_target import (
     PERFORMANCE_TARGETS,
     list_target_names,
@@ -132,19 +137,29 @@ def _default_models_path() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Terminal process — spawns llama-server in its own visible terminal window
+# Terminal process — spawns llama-server detached from the GUI
 
 
 class _TerminalProcess:
-    """Spawn llama-server in an independent terminal (CREATE_NEW_CONSOLE on
-    Windows, start_new_session on Unix). No stdout pipe — the user sees the
-    full server output in the separate window; our log panel shows status only.
+    """Spawn llama-server in an independent process group.
+
+    Windows opens a separate console so the user sees native server output.
+    Linux/macOS desktop launches usually have no usable terminal, so stdout and
+    stderr are redirected to a per-launch log file instead of disappearing.
     """
 
     def __init__(self, cmd: List[str], env_overrides: Optional[dict] = None) -> None:
         self.cmd = cmd
         self.env_overrides: dict = env_overrides or {}
         self.proc: Optional[subprocess.Popen] = None
+        self.log_path: Optional[Path] = None
+
+    def _open_posix_log(self):
+        log_dir = app_settings.app_data_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        self.log_path = log_dir / f"llama-server-{stamp}.log"
+        return self.log_path.open("a", encoding="utf-8", buffering=1)
 
     def start(self) -> None:
         env = os.environ.copy()
@@ -154,7 +169,14 @@ class _TerminalProcess:
             flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
             self.proc = subprocess.Popen(self.cmd, creationflags=flags, env=env)
         else:
-            self.proc = subprocess.Popen(self.cmd, start_new_session=True, env=env)
+            with self._open_posix_log() as log_fh:
+                self.proc = subprocess.Popen(
+                    self.cmd,
+                    start_new_session=True,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                )
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -173,6 +195,26 @@ class _TerminalProcess:
                 os.kill(-self.proc.pid, signal.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
+
+        # Capture in a local variable BEFORE clearing self.proc — the daemon
+        # thread runs after self.proc is already None.
+        proc = self.proc
+        assert proc is not None
+        self.proc = None
+
+        def _wait() -> None:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    if os.name == "nt":
+                        proc.kill()
+                    else:
+                        os.kill(-proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+        threading.Thread(target=_wait, daemon=True).start()
 
 
 class _PathListDialog(QDialog):
@@ -316,22 +358,6 @@ class _PathListDialog(QDialog):
                 path = Path(str(item.text()))
             out.append((path, item.checkState() == Qt.CheckState.Checked))
         return out
-
-        # Capture in a local variable BEFORE clearing self.proc —
-        # the daemon thread runs after self.proc is already None.
-        _proc = self.proc
-        self.proc = None
-
-        def _wait() -> None:
-            try:
-                _proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    _proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-
-        threading.Thread(target=_wait, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -947,11 +973,11 @@ class _BinaryUpdateWorker(QObject):
       1. asks GitHub for the latest Release of ``GITHUB_REPO``;
       2. compares the Release ``tag_name`` against :data:`VERSION`;
       3. picks the asset matching the host OS (Windows ``.exe`` / Linux
-         binary) — AutoTuner runs on Windows 10/11 AND Ubuntu, so the asset
-         selection must be OS-aware;
+         binary / macOS app or binary) — AutoTuner runs on Windows, Ubuntu
+         and macOS, so the asset selection must be OS-aware;
       4. downloads it to a temp file next to the running binary (same
          volume → atomic ``move``);
-      5. writes a tiny swap shim (``.bat`` on Windows, ``.sh`` on Linux)
+      5. writes a tiny swap shim (``.bat`` on Windows, ``.sh`` on POSIX)
          that waits for this process to exit, replaces the binary, and
          relaunches it — because Windows locks the running ``.exe`` and
          the process cannot overwrite itself;
@@ -1024,16 +1050,18 @@ class _BinaryUpdateWorker(QObject):
         """Choose the release asset for the current OS.
 
         Prefers a per-OS **zip** asset (e.g. ``AutoTuner-Windows-x64.zip``,
-        ``AutoTuner-Linux-x64.zip``) — a single asset that serves BOTH the
-        beginner download AND the in-app auto-update (the worker extracts the
-        binary from the zip). Falls back to a raw binary asset for older
-        releases that ship an unpacked ``.exe`` / Linux binary.
+        ``AutoTuner-Linux-x64.zip``, ``AutoTuner-macOS-arm64.zip``) — a
+        single asset that serves BOTH the beginner download AND the in-app
+        auto-update (the worker extracts the binary from the zip). Falls back
+        to a raw binary asset for older releases that ship an unpacked
+        ``.exe`` / Linux / macOS binary.
 
         Windows → name contains ``windows`` or ends ``.exe``.
         Linux   → name contains ``linux`` (zip or raw ELF).
+        macOS   → name contains ``macos``, ``darwin`` or ``osx``.
         """
-        is_windows = os.name == "nt"
-        if is_windows:
+        system = platform.system().lower()
+        if os.name == "nt" or system == "windows":
             for a in assets:
                 name = str(a.get("name", "")).lower()
                 if "windows" in name:
@@ -1043,7 +1071,14 @@ class _BinaryUpdateWorker(QObject):
                 if name.endswith(".exe"):
                     return a
             return None
-        # Linux / other
+        if system == "darwin":
+            for a in assets:
+                name = str(a.get("name", "")).lower()
+                if any(token in name for token in ("macos", "darwin", "osx")):
+                    return a
+            return None
+        # Linux / other POSIX: do NOT pick this branch on macOS, otherwise a
+        # frozen macOS build would download the Linux updater asset.
         for a in assets:
             name = str(a.get("name", "")).lower()
             if "linux" in name:
@@ -1060,8 +1095,10 @@ class _BinaryUpdateWorker(QObject):
         Accepts the binary at the archive root OR inside one top folder
         (the common ``AutoTuner-Windows-x64/AutoTuner.exe`` layout that
         Compress-Archive / zip produce). On Windows the member must end in
-        ``.exe``; on Linux it is the ``AutoTuner-Linux`` / ``AutoTuner`` ELF.
-        Extracts next to the running binary (same volume → atomic swap).
+        ``.exe``; on Linux it is the ``AutoTuner-Linux`` / ``AutoTuner`` ELF;
+        on macOS it is the app bundle's inner Mach-O or a raw
+        ``AutoTuner-macOS`` binary. Extracts next to the running binary (same
+        volume → atomic swap).
         """
         member_name: Optional[str] = None
         with zipfile.ZipFile(zip_path) as zf:
@@ -1071,6 +1108,12 @@ class _BinaryUpdateWorker(QObject):
                 base = Path(info.filename).name.lower()
                 if os.name == "nt":
                     if base.endswith(".exe"):
+                        member_name = info.filename
+                        break
+                elif platform.system() == "Darwin":
+                    if base in ("autotuner-macos", "autotuner") or base.endswith(
+                        ("-macos", "-darwin")
+                    ):
                         member_name = info.filename
                         break
                 else:
@@ -3192,21 +3235,41 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     @staticmethod
     def _llama_binary_subpaths() -> Tuple[str, ...]:
-        # Mirrors auto_tuner._SERVER_SUBPATHS — update both if paths change.
-        return (
-            "build/bin/Release/llama-server.exe",
-            "build/bin/Debug/llama-server.exe",
-            "build/bin/llama-server.exe",
-            "build/bin/llama-server",
-            "build/llama-server",
-            "llama-server.exe",  # prebuilt / release-zip drops
-            "llama-server",
+        # Mirrors auto_tuner._SERVER_SUBPATHS — native binaries only on
+        # Linux/macOS so a shared Windows build tree cannot be auto-launched.
+        bases = (
+            "build/bin/Release/",
+            "build/bin/Debug/",
+            "build/bin/",
+            "build/",
+            "",
         )
+        suffixes = (".exe",) if os.name == "nt" else ("",)
+        out: List[str] = []
+        for base in bases:
+            for suffix in suffixes:
+                sub = f"{base}llama-server{suffix}"
+                if sub not in out:
+                    out.append(sub)
+        return tuple(out)
+
+    @staticmethod
+    def _is_runnable_binary(path: Path) -> bool:
+        try:
+            if not path.is_file():
+                return False
+        except OSError:
+            return False
+        if os.name == "nt":
+            return True
+        if path.suffix.lower() == ".exe":
+            return False
+        return os.access(path, os.X_OK)
 
     @classmethod
     def _is_llama_build_dir(cls, path: Path) -> bool:
         return path.is_dir() and any(
-            (path / sub).is_file() for sub in cls._llama_binary_subpaths()
+            cls._is_runnable_binary(path / sub) for sub in cls._llama_binary_subpaths()
         )
 
     @staticmethod
@@ -3993,8 +4056,8 @@ class MainWindow(QMainWindow):
             "AutoTuner update",
             f"GitHub nach einer neuen AutoTuner-Version suchen?\n\n"
             f"Läuft: v{VERSION} auf {platform.system()}. Bei einem neuen "
-            "Release wird das passende Binary (.exe / Linux) geladen und "
-            "nach dem Neustart ausgetauscht. Deine Einstellungen "
+            "Release wird das passende Binary (.exe / Linux / macOS) geladen "
+            "und nach dem Neustart ausgetauscht. Deine Einstellungen "
             "(autotuner_settings.json) bleiben erhalten.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
@@ -5662,7 +5725,7 @@ class MainWindow(QMainWindow):
                 f"[Diffusion-Server] binary: 'llama-diffusion-gemma-server' "
                 f"→ {gemma_server_bin} (arch={arch!r})"
             )
-            if not Path(gemma_server_bin).is_file() and not shutil.which(
+            if not self._is_runnable_binary(Path(gemma_server_bin)) and not shutil.which(
                 gemma_server_bin
             ):
                 self._log(
@@ -5707,6 +5770,13 @@ class MainWindow(QMainWindow):
                 enable_prompt_cache=use_prompt_cache,
             )
 
+        cmd, removed_args = prepare_command_for_binary(cmd)
+        for removed in removed_args:
+            self._log(
+                "[Compat] Selected llama.cpp binary does not advertise "
+                f"argument(s); removed: {removed}"
+            )
+
         self._log("\n" + "─" * 60)
         self._log(f"Starting: {' '.join(cmd)}")
         self._log(
@@ -5730,11 +5800,28 @@ class MainWindow(QMainWindow):
             self._log(f"[Error] Binary not found: {cmd[0]}")
             self._log("  → Check fork selection or set LLAMA_CPP_DIR / LLAMA_SERVER")
             return
+        except OSError as exc:
+            self._log(f"[Error] Could not start binary: {cmd[0]} ({exc})")
+            self._log(
+                "  → Check that the selected llama.cpp build matches this OS/CPU "
+                "and is executable."
+            )
+            QMessageBox.warning(
+                self,
+                "llama-server konnte nicht starten",
+                f"{cmd[0]}\n\n{exc}\n\n"
+                "Prüfe, ob der gewählte llama.cpp-Build zu diesem Betriebssystem "
+                "passt und ausführbar ist.",
+            )
+            return
 
         pid = proc.proc.pid if proc.proc else "?"
         base_url = f"http://{host}:{port}"
         self._log(f"[AutoTuner] Server started — PID: {pid}")
-        self._log("[AutoTuner] Server output → separate terminal window")
+        if proc.log_path is not None:
+            self._log(f"[AutoTuner] Server output → {proc.log_path}")
+        else:
+            self._log("[AutoTuner] Server output → separate terminal window")
         self._log(f"[AutoTuner] Web UI → {base_url}")
 
         # Register the new server. `_server`/`_server_base_url` always point
@@ -5805,7 +5892,7 @@ class MainWindow(QMainWindow):
         diffusion_bin = resolve_diffusion(request, arch=arch)
         self._log(f"[Diffusion] binary: {request!r} → {diffusion_bin} (arch={arch!r})")
 
-        if not Path(diffusion_bin).is_file() and not shutil.which(diffusion_bin):
+        if not self._is_runnable_binary(Path(diffusion_bin)) and not shutil.which(diffusion_bin):
             self._log(f"[Diffusion] Binary not found: {diffusion_bin}")
             QMessageBox.warning(
                 self,
@@ -5846,6 +5933,13 @@ class MainWindow(QMainWindow):
             prompt=prompt,
         )
 
+        cmd, removed_args = prepare_command_for_binary(cmd)
+        for removed in removed_args:
+            self._log(
+                "[Compat] Selected llama.cpp binary does not advertise "
+                f"argument(s); removed: {removed}"
+            )
+
         self._log("\n" + "─" * 60)
         self._log(f"Diffusion: {' '.join(cmd)}")
         if cfg.env_overrides:
@@ -5862,10 +5956,23 @@ class MainWindow(QMainWindow):
             self._log(f"[Error] Binary not found: {cmd[0]}")
             self._log("  → Check fork selection or set LLAMA_CPP_DIR")
             return
+        except OSError as exc:
+            self._log(f"[Error] Could not start binary: {cmd[0]} ({exc})")
+            QMessageBox.warning(
+                self,
+                "Diffusion-Binary konnte nicht starten",
+                f"{cmd[0]}\n\n{exc}\n\n"
+                "Prüfe, ob der gewählte llama.cpp-Build zu diesem Betriebssystem "
+                "passt und ausführbar ist.",
+            )
+            return
 
         pid = proc.proc.pid if proc.proc else "?"
         self._log(f"[Diffusion] Started — PID: {pid}")
-        self._log("[Diffusion] Output → separate terminal window")
+        if proc.log_path is not None:
+            self._log(f"[Diffusion] Output → {proc.log_path}")
+        else:
+            self._log("[Diffusion] Output → separate terminal window")
         self._log(
             "[Diffusion] Single-shot run; the process exits when generation completes."
         )

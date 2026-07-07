@@ -14,6 +14,7 @@ __pycache__/
 dist/*
 !dist/AutoTuner.exe
 !dist/AutoTuner-Linux
+!dist/AutoTuner-macOS
 build/
 wheels/
 pip-wheel-metadata/
@@ -74,8 +75,9 @@ BitNet/
 autotuner_settings.json
 .autotuner_update.json
 llama.log
+logs/
 
-# PyInstaller (compiled .exe / Linux binary) — build_exe.py output
+# PyInstaller (compiled .exe / Linux/macOS binary) — build_exe.py output
 *.spec
 autotuner_console.log
 autotuner_console.log.*

@@ -27,13 +27,11 @@ class ServerProcess:
         assert self.proc is not None
         assert not self._stop_event.is_set()
         try:
-            # stdout
+            # stdout includes stderr (Popen uses stderr=STDOUT). Reading a
+            # single pipe avoids the classic deadlock where stderr fills while
+            # stdout is still open.
             if self.proc.stdout is not None:
                 for line in self.proc.stdout:  # type: ignore[attr-defined]
-                    self.log_queue.put(line)
-            # stderr
-            if self.proc.stderr is not None:
-                for line in self.proc.stderr:  # type: ignore[attr-defined]
                     self.log_queue.put(line)
         except Exception:
             pass
@@ -55,7 +53,7 @@ class ServerProcess:
                 self.cmd,
                 creationflags=flags,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
             )
@@ -63,7 +61,7 @@ class ServerProcess:
             self.proc = subprocess.Popen(
                 self.cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 start_new_session=True,
                 text=True,
                 env=env,

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Build a standalone, noconsole AutoTuner binary with PyInstaller.
 
-Produces a **one-file** artifact that beginners can run without a Python
+Produces a standalone artifact that beginners can run without a Python
 install or a console window:
 
-  * Windows  → ``dist/AutoTuner.exe``      (``--windowed`` = no console)
-  * Linux    → ``dist/AutoTuner-Linux``     (ELF, no terminal)
+  * Windows  → ``dist/AutoTuner.exe``
+  * Linux    → ``dist/AutoTuner-Linux``
+  * macOS    → ``dist/AutoTuner-macOS`` or ``dist/AutoTuner-macOS.app``
 
-PyInstaller cannot cross-compile — build the Windows ``.exe`` ON Windows
-and the Linux binary ON Linux. Publish BOTH as assets of the same GitHub
-Release (tag ``v<VERSION>`` from ``autotuner_version.py``); the in-app
-updater picks the matching asset for the host OS at runtime
-(``_BinaryUpdateWorker``).
+PyInstaller cannot cross-compile — build each artifact ON its target OS.
+Publish the per-OS assets under the same GitHub Release (tag ``v<VERSION>``
+from ``autotuner_version.py``); the in-app updater picks the matching asset
+for the host OS at runtime (``_BinaryUpdateWorker``).
 
 Usage
 -----
@@ -48,8 +48,12 @@ BUILD = REPO_ROOT / "build"
 
 
 def _exe_name() -> str:
-    # Windows → AutoTuner.exe ; Linux → AutoTuner-Linux (no extension).
-    return "AutoTuner" if os.name == "nt" else "AutoTuner-Linux"
+    system = platform.system()
+    if os.name == "nt":
+        return "AutoTuner"
+    if system == "Darwin":
+        return "AutoTuner-macOS"
+    return "AutoTuner-Linux"
 
 
 def _ensure_pyinstaller() -> None:
@@ -141,9 +145,16 @@ def main() -> int:
         print(f"[build] PyInstaller failed: {exc}", file=sys.stderr)
         return exc.returncode or 1
 
-    out = DIST / (_exe_name() + (".exe" if os.name == "nt" else ""))
+    expected = DIST / (_exe_name() + (".exe" if os.name == "nt" else ""))
+    app_bundle = DIST / f"{_exe_name()}.app"
+    out = app_bundle if app_bundle.exists() else expected
     if out.exists():
-        size_mb = out.stat().st_size / (1024 * 1024)
+        if out.is_dir():
+            size_mb = sum(p.stat().st_size for p in out.rglob("*") if p.is_file()) / (
+                1024 * 1024
+            )
+        else:
+            size_mb = out.stat().st_size / (1024 * 1024)
         print(
             f"\n[build] OK — {out} ({size_mb:.1f} MB)\n"
             f"[build] Publish this as a GitHub Release asset tagged v{VERSION}.\n"
@@ -152,7 +163,11 @@ def main() -> int:
         )
         return 0
 
-    print(f"[build] Expected output not found: {out}", file=sys.stderr)
+    print(
+        f"[build] Expected output not found: {expected}"
+        + (f" or {app_bundle}" if platform.system() == "Darwin" else ""),
+        file=sys.stderr,
+    )
     return 1
 
 

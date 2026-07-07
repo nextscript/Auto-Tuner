@@ -1,6 +1,6 @@
 name: Release
 
-# Build the noconsole AutoTuner binaries (Windows .exe + Linux) and publish
+# Build the noconsole AutoTuner binaries (Windows .exe + Linux + macOS) and publish
 # them as downloadable, zipped GitHub-Release assets. The per-OS zips serve
 # BOTH the beginner download ("entpacken und doppelklicken") AND the in-app
 # auto-update (the _BinaryUpdateWorker downloads the zip and extracts the
@@ -38,6 +38,9 @@ jobs:
           - runner: ubuntu-latest
             os-label: Linux
             artifact: AutoTuner-Linux-x64.zip
+          - runner: macos-latest
+            os-label: macOS
+            artifact: AutoTuner-macOS.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -107,6 +110,28 @@ jobs:
           EOF
           (cd stage && zip -r ../${{ matrix.artifact }} AutoTuner)
 
+      - name: Stage zip contents (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p stage/AutoTuner
+          if [ -d dist/AutoTuner-macOS.app ]; then
+            cp -R dist/AutoTuner-macOS.app stage/AutoTuner/
+            launch_hint='open AutoTuner-macOS.app'
+          else
+            cp dist/AutoTuner-macOS stage/AutoTuner/
+            chmod +x stage/AutoTuner/AutoTuner-macOS
+            launch_hint='./AutoTuner-macOS'
+          fi
+          cat > "stage/AutoTuner/ReadMe - AutoTuner.txt" <<EOF
+          AutoTuner v${{ steps.ver.outputs.version }}  (macOS)
+
+          1. Entpacke diese ZIP an einen beliebigen Ort.
+          2. Starte AutoTuner mit: $launch_hint
+          3. Updates holst du später einfach oben in der Toolbar ueber den
+             Update-Button. Deine Einstellungen bleiben erhalten.
+          EOF
+          (cd stage && zip -r ../${{ matrix.artifact }} AutoTuner)
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -160,6 +185,7 @@ jobs:
           files: |
             assets/AutoTuner-Windows-x64.zip
             assets/AutoTuner-Linux-x64.zip
+            assets/AutoTuner-macOS.zip
           body: |
             ## AutoTuner v${{ steps.ver.outputs.version }}
 
@@ -169,6 +195,7 @@ jobs:
             | -- | ----- |
             | Windows 10/11 | `AutoTuner-Windows-x64.zip` (→ `AutoTuner.exe`) |
             | Ubuntu / Linux | `AutoTuner-Linux-x64.zip` (→ `AutoTuner-Linux`) |
+            | macOS | `AutoTuner-macOS.zip` (→ `AutoTuner-macOS.app` or `AutoTuner-macOS`) |
 
             In der kompilierten Version funktioniert der **Update-Button**:
             er lädt automatisch das zum OS passende Release-ZIP und tauscht

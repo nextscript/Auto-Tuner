@@ -182,6 +182,13 @@ def launch(cmd: List[str], env_overrides: Optional[dict] = None) -> int:
             file=sys.stderr,
         )
         return 127
+    except OSError as exc:
+        print(
+            f"[AutoTuner] ERROR: server binary '{cmd[0]}' could not be started: {exc}\n"
+            "  Check that the selected llama.cpp build matches this OS/CPU and is executable.",
+            file=sys.stderr,
+        )
+        return 126
 
     print(f"[AutoTuner] llama-server PID: {proc.pid}")
     print(
