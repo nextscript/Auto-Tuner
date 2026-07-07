@@ -456,6 +456,49 @@ def test_filter_command_removes_stray_value_of_unknown_flag() -> None:
     assert removed == ["--some-fork-knob 42"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX pipe/pump streaming path")
+def test_terminal_process_streams_output_live(tmp_path, monkeypatch) -> None:
+    """POSIX GUI launches must mirror server output live to the on_output
+    callback (GUI log panel) AND persist it in the per-launch log file, so
+    tokens/s and prompt-processing progress are visible while running."""
+    import time
+
+    import qt_launcher
+
+    monkeypatch.setattr(qt_launcher.app_settings, "app_data_dir", lambda: tmp_path)
+    script = tmp_path / "fake-server.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "echo 'prompt processing, n_tokens = 1024, 150.2 tokens per second'\n"
+        "echo 'generation: 42.0 t/s' 1>&2\n",  # stderr must be merged too
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+    lines: list = []
+    proc = qt_launcher._TerminalProcess([str(script)], on_output=lines.append)
+    proc.start()
+    assert proc.proc is not None
+    proc.proc.wait(timeout=10)
+    deadline = time.monotonic() + 5
+    while len(lines) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert lines == [
+        "prompt processing, n_tokens = 1024, 150.2 tokens per second",
+        "generation: 42.0 t/s",
+    ]
+    assert proc.log_path is not None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        content = proc.log_path.read_text(encoding="utf-8")
+        if "42.0 t/s" in content:
+            break
+        time.sleep(0.05)
+    assert "150.2 tokens per second" in content
+    assert "42.0 t/s" in content
+
+
 @pytest.mark.skipif(os.name == "nt", reason="RLIMIT_MEMLOCK gate is POSIX-only")
 def test_mlock_disabled_when_memlock_limit_too_small(tmp_path, monkeypatch) -> None:
     """Desktop Linux defaults RLIMIT_MEMLOCK to 8 MiB; --mlock then aborts

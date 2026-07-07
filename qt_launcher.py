@@ -28,7 +28,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, cast, Tuple
+from typing import Callable, Dict, List, Optional, cast, Tuple
 
 from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QCloseEvent, QFont
@@ -144,13 +144,23 @@ class _TerminalProcess:
     """Spawn llama-server in an independent process group.
 
     Windows opens a separate console so the user sees native server output.
-    Linux/macOS desktop launches usually have no usable terminal, so stdout and
-    stderr are redirected to a per-launch log file instead of disappearing.
+    On Linux/macOS the server output is streamed live: every line goes to a
+    per-launch log file (recoverable after a crash), to our own stdout (so a
+    terminal that launched the GUI shows tokens/s, prompt-processing progress
+    and generation timings as before) and to an optional ``on_output``
+    callback (the GUI log panel). Desktop launches without a terminal still
+    have the log file + panel.
     """
 
-    def __init__(self, cmd: List[str], env_overrides: Optional[dict] = None) -> None:
+    def __init__(
+        self,
+        cmd: List[str],
+        env_overrides: Optional[dict] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.cmd = cmd
         self.env_overrides: dict = env_overrides or {}
+        self.on_output = on_output
         self.proc: Optional[subprocess.Popen] = None
         self.log_path: Optional[Path] = None
 
@@ -168,15 +178,58 @@ class _TerminalProcess:
         if os.name == "nt":
             flags = subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
             self.proc = subprocess.Popen(self.cmd, creationflags=flags, env=env)
-        else:
-            with self._open_posix_log() as log_fh:
-                self.proc = subprocess.Popen(
-                    self.cmd,
-                    start_new_session=True,
-                    stdout=log_fh,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                )
+            return
+        log_fh = self._open_posix_log()
+        try:
+            self.proc = subprocess.Popen(
+                self.cmd,
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                env=env,
+            )
+        except BaseException:
+            log_fh.close()
+            raise
+        threading.Thread(
+            target=self._pump_output,
+            args=(self.proc, log_fh),
+            daemon=True,
+        ).start()
+
+    def _pump_output(self, proc: subprocess.Popen, log_fh) -> None:
+        """Mirror every server line to log file, own stdout and callback.
+
+        Runs on a daemon thread; reading a single merged pipe (stderr=STDOUT)
+        avoids the two-pipe deadlock. The callback must be thread-safe — the
+        GUI passes a pyqtSignal.emit, which queues into the Qt main thread.
+        """
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                try:
+                    log_fh.write(line)
+                except (OSError, ValueError):
+                    pass
+                try:
+                    # Frozen --windowed builds can have sys.stdout = None.
+                    if sys.stdout is not None:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                except (OSError, ValueError):
+                    pass
+                if self.on_output is not None:
+                    try:
+                        self.on_output(line.rstrip("\n"))
+                    except Exception:
+                        pass
+        finally:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -5798,7 +5851,11 @@ class MainWindow(QMainWindow):
             for k, v in cfg.env_overrides.items():
                 self._log(f"Env     : {k}={v}")
 
-        proc = _TerminalProcess(cmd, env_overrides=cfg.env_overrides)
+        # _bg_log.emit is thread-safe (queued into the GUI thread) — the pump
+        # thread streams every server line live into the log panel below.
+        proc = _TerminalProcess(
+            cmd, env_overrides=cfg.env_overrides, on_output=self._bg_log.emit
+        )
         try:
             proc.start()
         except FileNotFoundError:
@@ -5824,7 +5881,10 @@ class MainWindow(QMainWindow):
         base_url = f"http://{host}:{port}"
         self._log(f"[AutoTuner] Server started — PID: {pid}")
         if proc.log_path is not None:
-            self._log(f"[AutoTuner] Server output → {proc.log_path}")
+            self._log(
+                "[AutoTuner] Server output → live below + terminal, "
+                f"log file: {proc.log_path}"
+            )
         else:
             self._log("[AutoTuner] Server output → separate terminal window")
         self._log(f"[AutoTuner] Web UI → {base_url}")
@@ -5954,7 +6014,9 @@ class MainWindow(QMainWindow):
         # Run in a terminal window like the server path, but do NOT register
         # it as a server (no port / health / switcher entry). It exits on
         # its own when generation finishes.
-        proc = _TerminalProcess(cmd, env_overrides=cfg.env_overrides)
+        proc = _TerminalProcess(
+            cmd, env_overrides=cfg.env_overrides, on_output=self._bg_log.emit
+        )
         try:
             proc.start()
         except FileNotFoundError:
@@ -5975,7 +6037,10 @@ class MainWindow(QMainWindow):
         pid = proc.proc.pid if proc.proc else "?"
         self._log(f"[Diffusion] Started — PID: {pid}")
         if proc.log_path is not None:
-            self._log(f"[Diffusion] Output → {proc.log_path}")
+            self._log(
+                "[Diffusion] Output → live below + terminal, "
+                f"log file: {proc.log_path}"
+            )
         else:
             self._log("[Diffusion] Output → separate terminal window")
         self._log(
