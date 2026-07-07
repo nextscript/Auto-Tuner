@@ -456,6 +456,37 @@ def test_filter_command_removes_stray_value_of_unknown_flag() -> None:
     assert removed == ["--some-fork-knob 42"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="RLIMIT_MEMLOCK gate is POSIX-only")
+def test_mlock_disabled_when_memlock_limit_too_small(tmp_path, monkeypatch) -> None:
+    """Desktop Linux defaults RLIMIT_MEMLOCK to 8 MiB; --mlock then aborts
+    llama.cpp b9895 with GGML_ASSERT(addr) in llama_mlock::grow_to during
+    tensor load. The tuner must not emit --mlock/--no-mmap in that case."""
+    import tuner
+
+    monkeypatch.setattr(tuner, "_memlock_limit_gb", lambda: 8 / 1024)
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Bonsai-8B", size_gb=5.0)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    assert cfg.mlock is False
+    assert cfg.no_mmap is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="RLIMIT_MEMLOCK gate is POSIX-only")
+def test_mlock_allowed_when_memlock_unlimited(tmp_path, monkeypatch) -> None:
+    """With RLIM_INFINITY the gate must not disable the mlock feature for a
+    fully offloaded model that passes the resource checks."""
+    import tuner
+
+    monkeypatch.setattr(tuner, "_memlock_limit_gb", lambda: None)
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Bonsai-8B", size_gb=5.0)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+    assert cfg.mlock is True
+    assert cfg.no_mmap is True
+
+
 # ---------------------------------------------------------------------------
 # MTP detection (scanner.metadata_has_embedded_mtp) — tri-state scan logic
 

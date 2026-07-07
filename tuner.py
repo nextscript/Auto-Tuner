@@ -287,6 +287,25 @@ def _probe_supported_flags(binary: str) -> Optional[Set[str]]:
     return set(probed) if probed is not None else None
 
 
+def _memlock_limit_gb() -> Optional[float]:
+    """Soft RLIMIT_MEMLOCK in GB on POSIX; ``None`` = unlimited/not applicable.
+
+    Desktop Linux distros (Ubuntu/Debian/Arch/Fedora) default to a tiny
+    limit (8 MiB), so a non-root process can never mlock a model there.
+    """
+    if platform.system() == "Windows":
+        return None
+    try:
+        import resource
+
+        soft, _hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    except (ImportError, AttributeError, OSError, ValueError):
+        return None
+    if soft in (resource.RLIM_INFINITY, -1):
+        return None
+    return soft / (1024**3)
+
+
 def prepare_command_for_binary(cmd: List[str]) -> Tuple[List[str], List[str]]:
     """Return ``cmd`` pruned for the selected binary plus removed chunks.
 
@@ -2071,6 +2090,17 @@ def compute_config(
                 and ram_resident_gb < (system.free_ram_gb - 8)
                 and (not is_windows or is_admin)
             )
+    # POSIX-Gate: mlock ist durch RLIMIT_MEMLOCK gedeckelt (Desktop-Linux
+    # default: 8 MiB). Ein nicht-root Prozess kann damit kein Modell pinnen —
+    # und llama.cpp (b9895, --mlock + --no-mmap) bricht dann mit
+    # GGML_ASSERT(addr) in llama_mlock::grow_to beim Tensor-Laden ab, statt
+    # nur zu warnen. mlock daher nur aktivieren, wenn das Limit das komplette
+    # Modell abdeckt (root/CAP_IPC_LOCK umgeht das Limit → is_admin reicht).
+    if mlock and not is_windows and not is_admin:
+        memlock_limit_gb = _memlock_limit_gb()
+        model_total_gb = ram_resident_gb + vram_resident_gb
+        if memlock_limit_gb is not None and memlock_limit_gb < model_total_gb + 0.25:
+            mlock = False
     no_mmap = mlock
 
     # ---- (4d) Multi-GPU placement & device visibility.
