@@ -1,0 +1,75 @@
+display_name: "Leanstral 1.5 (Mistral, Lean4/proof MoE)"
+patterns:
+  - leanstral
+
+# Leanstral 1.5 (Release 03.07.2026): sparse MoE, 119B total / 6.5B active
+# (A6B), 128 Experten mit 4 aktiv pro Token. MLA-Attention (vLLM-Backend
+# FLASH_ATTN_MLA, DeepSeek-Style Multi-Head Latent Attention) — der KV-Cache
+# ist dadurch sehr kompakt. Nativer Kontext 256k; der Tuner clamped ohnehin
+# auf den GGUF-Wert.
+max_context: 262144
+
+# MLA hält den KV-Cache klein, daher ist q8_0 hier billig UND sinnvoll:
+# Formale Beweise / Lean-Compiler-Feedback reagieren empfindlich auf
+# Quantisierungs-Rauschen im Cache, und q8_0 bewahrt die Präzision über die
+# sehr langen Proof-Search-Läufe (Test-Time-Scaling bis in den Millionen-
+# Token-Bereich). Wer trotzdem VRAM sparen muss, kann in der GUI runtergehen.
+recommended_kv_quant: q8_0
+
+# Sampling-Profile pro Modus.
+# Leanstral ist ein Reasoning-/Proof-Modell mit per-Request konfigurierbarem
+# reasoning_effort (none/high) — dieselbe Mechanik wie Mistral Medium 3.5.
+# Mistral veröffentlicht für Leanstral keine expliziten Sampler-Defaults;
+# die Werte folgen daher den Mistral-Reasoning-Konventionen.
+sampling:
+  chat:
+    # "chat" = interaktives Proof-Engineering / Autoformalisierung /
+    # Math-Reasoning (reasoning_effort=high). temp 0.7 ist Mistrals Default
+    # für den High-Reasoning-Modus (analog Medium 3.5 / Magistral).
+    temperature: 0.7
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    # Mistral: Repetition-/Presence-Penalties auf 1.0/0.0 lassen, außer es
+    # gibt sichtbares Looping — höhere Penalty schadet der Output-Qualität.
+    repeat_penalty: 1.0
+  coding:
+    # "coding" = Code-Agent-Modus (Dateien editieren, bash/Lean-LSP-Tool-
+    # Calls, Fehler/Ziele inspizieren). Deterministischer für stabile Diffs
+    # und Tool-Calls.
+    temperature: 0.2
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # --jinja aktiviert das korrekte Chat-Template inkl. sauberer Trennung des
+  # Reasoning-Blocks in reasoning_content und erlaubt das Durchreichen von
+  # chat-template-kwargs (reasoning_effort). Ohne --jinja landet der [THINK]-
+  # Block im normalen content-Feld.
+  - --jinja
+
+# Speculative decoding: Leanstral-GGUFs bringen (Stand Release) keinen
+# integrierten MTP-Head mit — greift also nur mit separatem Draft-Modell.
+# Vulkan-sichere Defaults beibehalten (2 Token, p_min 0.75).
+draft_max: 2
+draft_p_min: 0.75
+
+notes: >
+  Leanstral 1.5 (Mistral, 03.07.2026) — Apache-2.0 Lean-4-Code-Agent- und
+  Theorembeweis-Modell. Sparse MoE: 119B total / 6.5B aktiv (A6B), 128
+  Experten, 4 aktiv pro Token, MLA-Attention (DeepSeek-Style), 256k Kontext,
+  multimodaler Input (Text+Bild → optional passende mmproj-Datei laden, in
+  der GUI als mmproj zuordnen; ohne mmproj läuft nur der Text-Pfad).
+  Trainiert mit CISPO-RL in einer Multiturn-Proof-Umgebung (Lean-Compiler-
+  Feedback) und einer Code-Agent-Umgebung (Filesystem + Lean-LSP). Saturiert
+  miniF2F, löst 587/672 PutnamBench, SOTA auf FATE-H.
+  Chat-Profil = High-Reasoning/Proof-Modus (temp 0.7), Coding-Profil =
+  deterministischer Code-Agent (temp 0.2). Reasoning-Modus explizit setzen:
+    -- --chat-template-kwargs '{"reasoning_effort":"high"}'
+  HINWEIS zum Test-Time-Scaling: Leanstral skaliert monoton mit dem Token-
+  Budget (244 gelöste Probleme bei 200k → 587 bei 4M auf PutnamBench). Für
+  pass@k-Proof-Search (viele Beweis-Kandidaten samplen) lohnt es sich, die
+  Temperatur Richtung 1.0 anzuheben, um diverse Beweiswege zu erzeugen —
+  im Chat-Modus per  -- --temp 1.0 .  Vibe CLI (Mistral): vibe --agent lean.
