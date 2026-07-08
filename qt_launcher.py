@@ -2562,6 +2562,10 @@ class MainWindow(QMainWindow):
     _sysinfo_ready = pyqtSignal(object)  # SystemInfo
     _bg_log = pyqtSignal(str)  # log message from background thread
 
+    _FORK_COMBO_BASE_TOOLTIP = "Default llama.cpp fork (auto-overridden by profile)"
+    _FORK_COMBO_MIN_WIDTH = 220
+    _FORK_COMBO_TEXT_PADDING = 72
+
     def __init__(self, models_path: Path, settings_path: Path) -> None:
         super().__init__()
         self.setWindowTitle("AutoTuner Qt Launcher")
@@ -2693,10 +2697,11 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addWidget(QLabel(" Fork:"))
         self._fork_combo = QComboBox()
-        self._fork_combo.setMinimumWidth(140)
-        self._fork_combo.setToolTip(
-            "Default llama.cpp fork (auto-overridden by profile)"
+        self._fork_combo.setMinimumWidth(self._FORK_COMBO_MIN_WIDTH)
+        self._fork_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
         )
+        self._fork_combo.setToolTip(self._FORK_COMBO_BASE_TOOLTIP)
         self._fork_combo.currentIndexChanged.connect(self._on_fork_changed)
         tb.addWidget(self._fork_combo)
 
@@ -3437,6 +3442,7 @@ class MainWindow(QMainWindow):
         if not forks:
             self._fork_combo.addItem("not found", userData=None)
             self._fork_path = None
+            self._refresh_fork_combo_width()
             self._fork_combo.blockSignals(False)
             return
 
@@ -3644,12 +3650,34 @@ class MainWindow(QMainWindow):
             self._fork_path = None
             self._log("[Warning] No llama.cpp forks found. Set LLAMA_CPP_DIR.")
         self._fork_combo.blockSignals(False)
+        self._refresh_fork_combo_width()
 
         self._start_hardware_detection()
 
     # ------------------------------------------------------------------
     # Fork selection
     # ------------------------------------------------------------------
+    def _refresh_fork_combo_width(self) -> None:
+        """Keep the selected fork name fully readable in the toolbar combo."""
+        text = self._fork_combo.currentText().strip()
+        text_width = (
+            self._fork_combo.fontMetrics().horizontalAdvance(text) if text else 0
+        )
+        width = max(
+            self._FORK_COMBO_MIN_WIDTH,
+            text_width + self._FORK_COMBO_TEXT_PADDING,
+        )
+        self._fork_combo.setMinimumWidth(width)
+        self._fork_combo.updateGeometry()
+
+        tooltip = self._FORK_COMBO_BASE_TOOLTIP
+        if text:
+            tooltip += f"\nActive: {text}"
+        path = self._fork_combo.currentData()
+        if path is not None:
+            tooltip += f"\nPath: {path}"
+        self._fork_combo.setToolTip(tooltip)
+
     def _on_fork_changed(self, index: int) -> None:
         self._fork_manual_override = True
         self._apply_fork(index)
@@ -3664,6 +3692,7 @@ class MainWindow(QMainWindow):
                 self._log(f"[Warning] Could not save fork path: {exc}")
 
     def _apply_fork(self, index: int) -> None:
+        self._refresh_fork_combo_width()
         path: Optional[Path] = self._fork_combo.itemData(index)
         if path is not None:
             os.environ["LLAMA_CPP_DIR"] = str(path)
