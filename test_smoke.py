@@ -420,6 +420,19 @@ def test_build_command_passes_extra_args(tmp_path) -> None:
     assert "--log-disable" in cmd
 
 
+def test_build_command_metrics_and_slots_toggles(tmp_path) -> None:
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Bonsai-8B", size_gb=4.0)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+
+    cfg.metrics_enabled = False
+    cfg.slots_api_enabled = True
+    cmd = build_command(model, cfg, profile)
+    assert "--metrics" not in cmd
+    assert "--slots" in cmd
+
+
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell-script fake binary")
 def test_prepare_command_for_binary_prunes_unsupported_flags(tmp_path) -> None:
     """Older llama.cpp builds abort on unknown flags before loading a model.
@@ -3555,6 +3568,8 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
         "ubatch": 1234,  # must be APPLIED
         "flash_attn": True,
         "mlock": True,
+        "metrics_enabled": False,
+        "slots_api_enabled": True,
         "numa": "isolate",
         "temperature": 0.33,
         "top_k": 7,
@@ -3572,6 +3587,8 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
     assert out.ubatch == 1234
     assert out.flash_attn is True
     assert out.mlock is True
+    assert out.metrics_enabled is False
+    assert out.slots_api_enabled is True
     assert out.numa == "isolate"
     assert out.sampling["temperature"] == 0.33
     assert out.sampling["top_k"] == 7
@@ -3595,6 +3612,8 @@ def test_expert_cfg_from_values_is_frozen_manual(tmp_path) -> None:
         "rope_scaling": True,
         "rope_factor": 2.0,
         "flash_attn": False,
+        "metrics_enabled": False,
+        "slots_api_enabled": True,
         "numa": "off",
         "temperature": 0.8,
         "top_k": 40,
@@ -3613,6 +3632,8 @@ def test_expert_cfg_from_values_is_frozen_manual(tmp_path) -> None:
     assert cfg.rope_scaling is True
     assert cfg.rope_scale_factor == 2.0
     assert cfg.flash_attn is False
+    assert cfg.metrics_enabled is False
+    assert cfg.slots_api_enabled is True
     assert cfg.numa is None  # 'off' → None
     assert cfg.sampling["temperature"] == 0.8
     assert cfg.kv_quant_strategy == "manual"
@@ -3658,6 +3679,8 @@ def test_manual_config_helper_matches_disk_restore(tmp_path) -> None:
         "no_mmap": False,
         "jinja": True,
         "verbose": False,
+        "metrics_enabled": True,
+        "slots_api_enabled": True,
         "numa": "off",
         "rope_scaling": False,
         "rope_factor": 1.0,

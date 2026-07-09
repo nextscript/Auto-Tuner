@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1454,7 +1455,8 @@ def _clean_model_name(name: str) -> str:
 # batch_threads, batch, ubatch, flash_attn, mlock, no_mmap, jinja,
 # verbose, numa, rope_scaling, rope_factor, temperature, top_k,
 # top_p, min_p, repeat_penalty, presence_penalty, reasoning,
-# think_budget, parallel_enabled, parallel_count, extras.
+# think_budget, parallel_enabled, parallel_count, metrics_enabled,
+# slots_api_enabled, extras.
 
 
 def _expert_sampling_from_values(vals: dict) -> dict:
@@ -1537,6 +1539,12 @@ def apply_expert_values(cfg: TunedConfig, vals: dict) -> TunedConfig:
         cfg.numa = None if numa_choice == "off" else numa_choice
         cfg.sampling = _expert_sampling_from_values(vals)
         cfg.extra_cli_flags = _expert_extras_from_values(vals)
+        cfg.metrics_enabled = bool(
+            vals.get("metrics_enabled", getattr(cfg, "metrics_enabled", True))
+        )
+        cfg.slots_api_enabled = bool(
+            vals.get("slots_api_enabled", getattr(cfg, "slots_api_enabled", False))
+        )
         # Parallel-slots override (--parallel / -np). When enabled, pin
         # the count and mark it forced so the panel can render the
         # checkbox state; when disabled, leave whatever compute_config
@@ -1938,6 +1946,21 @@ class ExpertPanel(QWidget):
         self._chk_verbose = QCheckBox("--verbose")
         _add("", self._chk_verbose, "Verbose llama-server logging.")
 
+        self._chk_metrics = QCheckBox("--metrics (/metrics)")
+        _add(
+            "",
+            self._chk_metrics,
+            "Expose Prometheus metrics at GET /metrics on the same host:port.",
+        )
+
+        self._chk_slots_api = QCheckBox("--slots (/slots API)")
+        _add(
+            "",
+            self._chk_slots_api,
+            "Enable llama-server's GET /slots endpoint. The launcher will poll it "
+            "to show busy/total slot state when the selected build supports it.",
+        )
+
         self._cb_numa = QComboBox()
         self._cb_numa.addItems(self._NUMA_OPTIONS)
         _add("NUMA", self._cb_numa, "--numa policy (off = no flag).")
@@ -2064,7 +2087,8 @@ class ExpertPanel(QWidget):
             cb.currentTextChanged.connect(self._schedule_save)
         for chk in (
             self._chk_fa, self._chk_mlock, self._chk_no_mmap, self._chk_jinja,
-            self._chk_verbose, self._chk_rope, self._chk_parallel,
+            self._chk_verbose, self._chk_metrics, self._chk_slots_api,
+            self._chk_rope, self._chk_parallel,
         ):
             chk.toggled.connect(self._schedule_save)
         self._le_extra.textChanged.connect(self._schedule_save)
@@ -2170,8 +2194,15 @@ class ExpertPanel(QWidget):
             self._chk_fa.setChecked(cfg.flash_attn)
             self._chk_mlock.setChecked(cfg.mlock)
             self._chk_no_mmap.setChecked(cfg.no_mmap)
-            self._chk_jinja.setChecked("--jinja" in (cfg.extra_cli_flags or []))
-            self._chk_verbose.setChecked("--verbose" in (cfg.extra_cli_flags or []))
+            extras_in = list(cfg.extra_cli_flags or [])
+            self._chk_jinja.setChecked("--jinja" in extras_in)
+            self._chk_verbose.setChecked("--verbose" in extras_in)
+            self._chk_metrics.setChecked(
+                bool(getattr(cfg, "metrics_enabled", True)) or "--metrics" in extras_in
+            )
+            self._chk_slots_api.setChecked(
+                bool(getattr(cfg, "slots_api_enabled", False)) or "--slots" in extras_in
+            )
             self._set_combo(self._cb_numa, cfg.numa or "off")
 
             self._chk_rope.setChecked(cfg.rope_scaling)
@@ -2191,7 +2222,6 @@ class ExpertPanel(QWidget):
             # Reasoning + think-budget: parse them out of extra_cli_flags
             # so the dedicated dropdowns show the right state and the
             # free-form field below doesn't display the raw flags.
-            extras_in = list(cfg.extra_cli_flags or [])
             reasoning_value, think_budget_value, leftover_extras = (
                 self._parse_reasoning_from_extras(extras_in)
             )
@@ -2200,7 +2230,7 @@ class ExpertPanel(QWidget):
 
             # Extra CLI: filter out the flags we already model as
             # checkboxes / dedicated widgets so they don't appear twice.
-            modeled = {"--jinja", "--verbose"}
+            modeled = {"--jinja", "--verbose", "--metrics", "--slots"}
             free_flags = [f for f in leftover_extras if f not in modeled]
             self._le_extra.setText(" ".join(free_flags))
         finally:
@@ -2418,6 +2448,8 @@ class ExpertPanel(QWidget):
             "no_mmap": self._chk_no_mmap.isChecked(),
             "jinja": self._chk_jinja.isChecked(),
             "verbose": self._chk_verbose.isChecked(),
+            "metrics_enabled": self._chk_metrics.isChecked(),
+            "slots_api_enabled": self._chk_slots_api.isChecked(),
             "numa": self._cb_numa.currentText(),
             "rope_scaling": self._chk_rope.isChecked(),
             "rope_factor": self._sp_rope_factor.value(),
@@ -5000,6 +5032,8 @@ class MainWindow(QMainWindow):
             f"Parallel slots   : {cfg.n_parallel}"
             + (" (manual)" if getattr(cfg, "n_parallel_forced", False) else "")
             + "  (--parallel / -np)",
+            f"HTTP diagnostics: metrics={'on' if cfg.metrics_enabled else 'off'}  "
+            f"slots={'on' if cfg.slots_api_enabled else 'off'}",
             f"Flash attention : {'on' if cfg.flash_attn else 'off'}",
         ]
         if cfg.mlock:
@@ -5878,9 +5912,12 @@ class MainWindow(QMainWindow):
 
         self._log("\n" + "─" * 60)
         self._log(f"Starting: {' '.join(cmd)}")
+        metrics_active = "--metrics" in cmd
+        slots_active = "--slots" in cmd
         self._log(
             f"Options : vision={use_vision} draft={use_draft} thinking={use_thinking} "
             f"ngram={use_ngram} prompt_cache={use_prompt_cache} "
+            f"metrics={metrics_active} slots_api={slots_active} "
             f"mode={self._current_mode()}"
         )
         self._log(
@@ -5942,6 +5979,10 @@ class MainWindow(QMainWindow):
             "model": entry.name,
             "gpu": getattr(self, "_last_pinned_gpu", None),
             "vram_gb": float(cfg.estimated_model_vram_gb) + float(cfg.kv_vram_gb),
+            "metrics_enabled": metrics_active,
+            "slots_api_enabled": slots_active,
+            "slots_summary": "",
+            "slots_next_probe": 0.0,
         }
         self._next_server_id += 1
         self._servers.append(record)
@@ -6187,6 +6228,9 @@ class MainWindow(QMainWindow):
                 f"#{r.get('id')}  :{r.get('port')}  {ready}  "
                 f"{_clean_model_name(str(r.get('model', '?')))}"
             )
+            slots_summary = r.get("slots_summary")
+            if slots_summary:
+                label += f"  slots {slots_summary}"
             if gpu:
                 label += f"  [{gpu}]"
             combo.addItem(label, r.get("id"))
@@ -6295,6 +6339,11 @@ class MainWindow(QMainWindow):
                     f"[AutoTuner] Server ready (/health → 200) — "
                     f"port {record.get('port')}."
                 )
+                if record.get("slots_api_enabled"):
+                    self._log(
+                        f"[AutoTuner] /slots monitoring enabled — "
+                        f"{record.get('base_url')}/slots"
+                    )
                 self._refresh_server_combo()  # flip the …→✓ marker in the list
                 if record is self._servers[-1]:
                     self._server_ready = True
@@ -6302,6 +6351,66 @@ class MainWindow(QMainWindow):
                         f"Ready — PID {pid} — {base_url}  "
                         f"({len(self._servers)} server(s) running)"
                     )
+
+        # If enabled, poll /slots at a lower cadence than the 500 ms process
+        # liveness check. This keeps the server switcher useful for continuous
+        # batching without hammering the local HTTP API.
+        refreshed_slots = False
+        for record in self._servers:
+            if record.get("ready") and record.get("slots_api_enabled"):
+                refreshed_slots = self._poll_slots_endpoint(record) or refreshed_slots
+        if refreshed_slots:
+            self._refresh_server_combo()
+
+    def _poll_slots_endpoint(self, record: dict) -> bool:
+        """Poll GET /slots for a server record and cache a compact summary.
+
+        Returns True when the displayed summary changed. The endpoint shape has
+        varied between llama.cpp builds, so this accepts either a raw list or a
+        dict containing a ``slots`` list and treats unknown slot fields as idle.
+        """
+        now = time.monotonic()
+        if now < float(record.get("slots_next_probe", 0.0) or 0.0):
+            return False
+        record["slots_next_probe"] = now + 2.0
+        base_url = record.get("base_url")
+        if not base_url:
+            return False
+        old = str(record.get("slots_summary", "") or "")
+        try:
+            with urllib.request.urlopen(f"{base_url}/slots", timeout=0.4) as resp:
+                payload = json.loads(
+                    resp.read().decode("utf-8", errors="replace") or "[]"
+                )
+        except Exception as exc:
+            if not record.get("slots_error_logged"):
+                self._log(
+                    f"[AutoTuner] /slots not reachable on port {record.get('port')}: {exc}"
+                )
+                record["slots_error_logged"] = True
+            return False
+
+        slots = payload.get("slots") if isinstance(payload, dict) else payload
+        if not isinstance(slots, list):
+            return False
+
+        busy_states = {"busy", "processing", "receiving", "generating", "decoding"}
+        busy = 0
+        for slot in slots:
+            if not isinstance(slot, dict):
+                continue
+            state = str(slot.get("state", slot.get("status", ""))).lower()
+            if (
+                bool(slot.get("is_processing"))
+                or bool(slot.get("processing"))
+                or state in busy_states
+            ):
+                busy += 1
+        summary = f"{busy}/{len(slots)} busy"
+        if summary != old:
+            record["slots_summary"] = summary
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Log helper

@@ -651,7 +651,7 @@ The tuner intelligently selects the best binary based on your model and settings
 - **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
 
 Example — run Devstral, override context, and pass an extra flag
-(`--metrics` is now added automatically, so this just shows pass-through):
+(`--metrics` is enabled by default, so this just shows pass-through):
 
 ```bash
 python auto_tuner.py --model Devstral --ctx 131072 -y -- --verbose
@@ -1160,15 +1160,19 @@ The iGPU/NPU would only make sense as a **separate, standalone**
 background model — not in the main inference path. This separation is
 intentional.
 
-### Monitoring (`/health` + `/metrics`)
+### Monitoring (`/health` + `/metrics` + optional `/slots`)
 
-At launch the AutoTuner appends `--metrics`, so `llama-server` exposes two
-HTTP endpoints on the same `host:port` as the inference API (there is **no**
-separate metrics port):
+The Expert settings include diagnostics toggles for `--metrics` and `--slots`.
+Metrics stay enabled by default; `/slots` is opt-in because not every
+llama.cpp build exposes that endpoint unless `--slots` is passed. All endpoints
+use the same `host:port` as the inference API (there is **no** separate metrics
+port):
 
 - **`GET /health`** — `503` while loading, `200` when the model is ready.
   The Qt GUI polls this endpoint and switches the status from *Loading
   model* to *Ready* (see above).
+- **`GET /slots`** — when `--slots` is enabled, the Qt GUI polls this endpoint
+  and shows a compact `busy/total` slot summary in the server dropdown.
 - **`GET /metrics`** — Prometheus text format. The most important metrics
   (single-model mode, prefix `llamacpp:`):
 

@@ -780,6 +780,13 @@ class TunedConfig:
     # from the performance target's default.
     n_parallel_forced: bool = False
 
+    # HTTP diagnostics toggles. Metrics default on because AutoTuner has
+    # historically exposed GET /metrics by default. The /slots endpoint is
+    # opt-in: llama.cpp treats it as an operational/debug API and some builds
+    # require --slots before exposing it.
+    metrics_enabled: bool = True
+    slots_api_enabled: bool = False
+
     warning: Optional[str] = None
 
 
@@ -2828,6 +2835,8 @@ def build_diffusion_server_command(
     port: int = 8080,
     alias: Optional[str] = None,
     extra_args: Optional[List[str]] = None,
+    enable_metrics: Optional[bool] = None,
+    enable_slots_api: Optional[bool] = None,
 ) -> List[str]:
     """Build a ``llama-diffusion-gemma-server`` command line.
 
@@ -2901,10 +2910,23 @@ def build_diffusion_server_command(
     # ---- HTTP binding -------------------------------------------------
     cmd += ["--host", host, "--port", str(port)]
 
-    # ---- readable alias / Prometheus metrics -------------------------
+    # ---- readable alias / optional diagnostics endpoints --------------
     if alias:
         cmd += ["-a", alias]
-    cmd += ["--metrics"]
+    metrics_on = (
+        bool(getattr(config, "metrics_enabled", True))
+        if enable_metrics is None
+        else bool(enable_metrics)
+    )
+    slots_on = (
+        bool(getattr(config, "slots_api_enabled", False))
+        if enable_slots_api is None
+        else bool(enable_slots_api)
+    )
+    if metrics_on:
+        cmd.append("--metrics")
+    if slots_on:
+        cmd.append("--slots")
 
     # ---- user CLI passthrough (highest precedence) -------------------
     if extra_args:
@@ -2927,6 +2949,8 @@ def build_command(
     enable_ngram: bool = False,
     enable_prompt_cache: bool = True,
     prompt_cache_ram_mib: int = -1,
+    enable_metrics: Optional[bool] = None,
+    enable_slots_api: Optional[bool] = None,
 ) -> List[str]:
     """Build the llama-server command line for ``model`` and ``config``.
 
@@ -3005,13 +3029,29 @@ def build_command(
     # "unknown argument"; in that case drop the two tokens below.
     cmd += ["--fit", "off"]
 
-    # ---- Performance timings + Prometheus metrics ---------------------
+    # ---- Performance timings + optional diagnostics endpoints ----------
     # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
     # is set. Emit it explicitly so terminal logs include prompt/eval timing
     # and tokens/s again. Users can still append --no-perf if they want a
     # quieter server. --metrics exposes GET /metrics on the SAME host:port
     # as the inference API (no separate port) for live tokens/s and KV fill.
-    cmd += ["--perf", "--metrics"]
+    # --slots enables GET /slots on builds that gate the endpoint behind an
+    # explicit flag; the GUI can poll it for per-slot busy/idle state.
+    cmd.append("--perf")
+    metrics_on = (
+        bool(getattr(config, "metrics_enabled", True))
+        if enable_metrics is None
+        else bool(enable_metrics)
+    )
+    slots_on = (
+        bool(getattr(config, "slots_api_enabled", False))
+        if enable_slots_api is None
+        else bool(enable_slots_api)
+    )
+    if metrics_on:
+        cmd.append("--metrics")
+    if slots_on:
+        cmd.append("--slots")
 
     # ---- Host-memory prompt caching (-cram / --cache-ram) -------------
     # ggerganov's PR #16391 (merged; rel #16117) added automatic prompt

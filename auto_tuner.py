@@ -977,6 +977,18 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "always off for vision models (incompatible with mtmd).",
     )
     p.add_argument(
+        "--no-metrics",
+        action="store_true",
+        dest="no_metrics",
+        help="Do not pass --metrics; disables the GET /metrics endpoint.",
+    )
+    p.add_argument(
+        "--slots-api",
+        action="store_true",
+        dest="slots_api",
+        help="Pass --slots so llama-server exposes GET /slots when supported.",
+    )
+    p.add_argument(
         "--force-mlock",
         action="store_true",
         help="Force --mlock / --no-mmap even for full-GPU-offload models "
@@ -1424,6 +1436,8 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 host=args.host,
                 port=args.port,
                 extra_args=extra,
+                enable_metrics=not getattr(args, "no_metrics", False),
+                enable_slots_api=bool(getattr(args, "slots_api", False)),
             )
         else:
             # ── Binary resolution (server path) ──────────────────────────
@@ -1461,6 +1475,8 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 enable_speculative=not args.nodraft,
                 enable_ngram=use_ngram,
                 enable_prompt_cache=not getattr(args, "no_prompt_cache", False),
+                enable_metrics=not getattr(args, "no_metrics", False),
+                enable_slots_api=bool(getattr(args, "slots_api", False)),
             )
 
         cmd, removed_args = prepare_command_for_binary(cmd)

@@ -95,6 +95,8 @@ class TunedConfig:
     n_parallel: int = ...
     # True when n_parallel was pinned by the Expert panel override.
     n_parallel_forced: bool = ...
+    metrics_enabled: bool = ...
+    slots_api_enabled: bool = ...
     warning: Optional[str] = ...
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,22 @@ def build_command(
     enable_ngram: bool = ...,
     enable_prompt_cache: bool = ...,
     prompt_cache_ram_mib: int = ...,
+    enable_metrics: Optional[bool] = ...,
+    enable_slots_api: Optional[bool] = ...,
+) -> List[str]: ...
+
+
+def build_diffusion_server_command(
+    model: ModelEntry,
+    config: TunedConfig,
+    profile: ModelProfile,
+    server_binary: str = ...,
+    host: str = ...,
+    port: int = ...,
+    alias: Optional[str] = ...,
+    extra_args: Optional[List[str]] = ...,
+    enable_metrics: Optional[bool] = ...,
+    enable_slots_api: Optional[bool] = ...,
 ) -> List[str]: ...
 def build_diffusion_command(
     model: ModelEntry,
