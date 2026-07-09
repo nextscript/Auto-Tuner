@@ -322,6 +322,78 @@ def prepare_command_for_binary(cmd: List[str]) -> Tuple[List[str], List[str]]:
     return _filter_command_for_supported_flags(cmd, flags)
 
 
+def gemma_draft_needs_ik_fork(
+    model_name: str, use_draft: bool, resolved_binary: str
+) -> bool:
+    """True only when a Gemma-4 + external-drafter launch must fall back to
+    the legacy ik_llama.cpp fork.
+
+    Mainline llama.cpp runs the Gemma-4 drafter natively since PR #23398
+    (standalone ``gemma4-assistant`` MTP head via ``--spec-type draft-mtp``;
+    a plain sibling drafter is auto-detected from ``-md``). The historic
+    unconditional redirect to ik_llama.cpp therefore only remains correct
+    for builds too old to advertise ``--spec-type`` (pre-b9190). We probe
+    the resolved binary's ``--help``; when the probe fails (binary missing /
+    timeout) we do NOT redirect — the selected fork stays authoritative,
+    matching prepare_command_for_binary's philosophy.
+    """
+    if not use_draft:
+        return False
+    n = model_name.lower()
+    if "gemma-4" not in n and "gemma4" not in n:
+        return False
+    flags = _probe_supported_flags(resolved_binary)
+    return flags is not None and "--spec-type" not in flags
+
+
+def match_gpu_by_token(
+    token: Optional[str], gpus: List[GPUInfo]
+) -> Optional[GPUInfo]:
+    """Resolve a user GPU pin token ("9070", "R9700", full driver string)
+    to a detected card, robust across OS name styles.
+
+    The pin is persisted as a name-derived token, but the SAME card is
+    called "AMD Radeon AI PRO R9700" by Windows WMI, "Radeon AI PRO R9700"
+    by Linux lspci/DRM and "AMD Radeon AI PRO R9700 (RADV NAVI48)" by Mesa.
+    A one-directional substring test (the old force_gpu matching) silently
+    dropped the pin after switching OS, and the launch then fell back to
+    auto-placement — the "manual GPU selection doesn't stick" report.
+    Match exact → substring (either direction) → shared model-number token
+    ("r9700", "9070", "3060ti"), mirroring the priority-map matching in
+    compute_config. Returns None when nothing matches (auto behaviour).
+    """
+    if not token or not gpus:
+        return None
+    needle = token.strip().lower()
+    if not needle:
+        return None
+    for g in gpus:
+        if g.name.strip().lower() == needle:
+            return g
+    for g in gpus:
+        g_lower = g.name.strip().lower()
+        if g_lower and (needle in g_lower or g_lower in needle):
+            return g
+    # Model-number tokens: any alnum token containing a digit that both
+    # names share identifies the card across driver-string variants. The
+    # needle side comes from a user pin / stored token and never contains
+    # the Mesa "(RADV NAVI48)" generation suffix, so generation tokens
+    # shared by two cards of the same chip cannot cause a false match.
+    n_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", needle) if any(c.isdigit() for c in t)
+    }
+    if n_tokens:
+        for g in gpus:
+            g_tokens = {
+                t
+                for t in re.findall(r"[a-z0-9]+", g.name.lower())
+                if any(c.isdigit() for c in t)
+            }
+            if g_tokens & n_tokens:
+                return g
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Model-size helpers
 
@@ -1442,17 +1514,14 @@ def compute_config(
     def _gpu_score(g: GPUInfo) -> float:
         return _gpu_priority(g) * g.total_vram_mb
 
-    # Resolve an explicit user pin (force_gpu) up front. Matched case-
-    # insensitively against the card name; substring match is allowed so the
-    # user can pass a short label ("R9700", "9070") instead of the full
-    # driver string. None / unknown name → no forced pin (auto behaviour).
+    # Resolve an explicit user pin (force_gpu) up front. Matched via
+    # match_gpu_by_token — exact → bidirectional substring → shared
+    # model-number token — so a short label ("R9700", "9070") AND a full
+    # driver string from the other OS's name style both resolve to the
+    # same physical card. None / unknown name → no forced pin (auto).
     forced_gpu: Optional[GPUInfo] = None
     if force_gpu and has_gpu and system.gpus:
-        needle = force_gpu.strip().lower()
-        if needle:
-            forced_gpu = next(
-                (g for g in system.gpus if needle in g.name.lower()), None
-            )
+        forced_gpu = match_gpu_by_token(force_gpu, system.gpus)
 
     primary_gpu: Optional[GPUInfo] = None
     primary_free_vram_gb = free_vram  # default = summed (single-GPU / CPU)
@@ -3101,23 +3170,37 @@ def build_command(
     # active types and emit a single token (e.g. "draft-mtp,ngram-map-k4v").
     #
     # Vision / draft compatibility:
-    #   - External draft (Path A, -md) conflicts with --mmproj in llama.cpp:
-    #     both try to load a second model and the server aborts. When vision
-    #     is loaded, we skip Path A entirely.
+    #   - OLD builds (before the --spec-type speculative rework, pre-b9190)
+    #     abort when -md and --mmproj are both given ("speculative decoding
+    #     is not supported with multimodal") — Path A is skipped for those.
+    #   - CURRENT builds load draft + mmproj side by side: verified against
+    #     b9940 server-context.cpp — the draft/MTP context and mtmd_init
+    #     coexist and can_speculate() ignores mctx entirely. Path A must
+    #     stay ACTIVE there: every Gemma 4 GGUF ships with an mmproj, so the
+    #     old unconditional "vision wins" skip silently disabled the Gemma
+    #     drafter whenever the Vision checkbox was on — the "Gemma drafter
+    #     doesn't work on mainline" report. VRAM for both graphs is already
+    #     budgeted by compute_config (vision_vram_gb + draft_vram_gb).
     #   - Integrated MTP (Path B) embeds the drafter inside the main GGUF —
-    #     no second model-load conflict. Vision and embedded MTP can coexist;
-    #     Qwen3.6-MTP models in fact require the mmproj to work correctly.
+    #     no second model-load conflict on any build. Vision and embedded MTP
+    #     can coexist; Qwen3.6-MTP models in fact require the mmproj.
     #   - n-gram (Path C) loads no model at all → always compatible.
     draft_val = getattr(profile, "draft_max", 0) or 2
     draft_p_min = getattr(profile, "draft_p_min", 0.75) or 0.75
     vision_loaded = model.mmproj is not None
-    # Path A: sibling drafter — skip when vision is active.
-    # Loading *two separate model files* (-m + -md) while also loading a
-    # vision encoder (--mmproj) puts three large graphs in VRAM at once and
-    # can exhaust memory. Integrated MTP (Path B) does not have this problem
-    # because the draft head is already inside the main GGUF — there is no
-    # second model file to load.
-    use_external = enable_speculative and draft_model is not None and not vision_loaded
+    # Path A gating with vision: allow -md alongside --mmproj only when the
+    # selected binary advertises --spec-type (the new spec system, whose
+    # server no longer rejects the combination). Unprobeable binaries keep
+    # the conservative skip so an old build never aborts at startup.
+    vision_blocks_external = vision_loaded
+    if vision_loaded and enable_speculative and draft_model is not None:
+        _bin_flags = _probe_supported_flags(server_binary)
+        vision_blocks_external = not (
+            _bin_flags is not None and "--spec-type" in _bin_flags
+        )
+    use_external = (
+        enable_speculative and draft_model is not None and not vision_blocks_external
+    )
     # An external drafter that is a standalone MTP head (Gemma 4
     # gemma4-assistant: gemma-4-…-MTP-BF16, mtp-gemma-4-…) is NOT auto-detected
     # by mainline from -md alone — it loads with the dedicated draft-mtp path

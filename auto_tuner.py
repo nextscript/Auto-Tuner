@@ -39,6 +39,7 @@ from tuner import (
     build_diffusion_command,
     build_diffusion_server_command,
     compute_config,
+    gemma_draft_needs_ik_fork,
     prepare_command_for_binary,
     TunedConfig,
 )
@@ -1336,26 +1337,29 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
             """Choose the llama-server binary for this model.
 
             Priority:
-              1. Gemma 4 WITH external draft  → ik_llama.cpp (external drafter
-                 still requires the fork; integrated MTP now works in mainline b9190+)
-              2. server_binary from YAML profile
-              3. Fallback: whatever the user selected / args.server
+              1. server_binary from YAML profile
+              2. Whatever the user selected / args.server — for Gemma 4 WITH
+                 external draft this is probed for --spec-type first: mainline
+                 runs the drafter natively since PR #23398 (b9190+), so only a
+                 build too old to advertise --spec-type still falls back to
+                 the legacy ik_llama.cpp fork.
             """
-            # Gemma 4 needs ik_llama.cpp only when an external sibling drafter is active.
-            # Integrated MTP (Qwen3.6-MTP filenames) uses --spec-type draft-mtp and
-            # works in mainline llama.cpp b9190+ without any special fork.
-            if "gemma-4" in model_name.lower() or "gemma4" in model_name.lower():
-                if use_draft_flag:
-                    return (
-                        profile.server_binary
-                        if profile.server_binary
-                        else "ik_llama.cpp/llama-server"
-                    )
-                # Without draft, use whichever fork the user selected
-
             # Explicit server_binary in YAML always wins
             if profile.server_binary:
                 return profile.server_binary
+
+            # Gemma 4 + external drafter: use the selected build when it
+            # advertises --spec-type (mainline b9190+ handles the
+            # gemma4-assistant head via --spec-type draft-mtp); redirect to
+            # ik_llama.cpp only for genuinely old builds.
+            if gemma_draft_needs_ik_fork(
+                model_name, use_draft_flag, _resolve_server_binary(args.server)
+            ):
+                print(
+                    "[AutoTuner] Selected build advertises no --spec-type "
+                    "(pre-b9190) — Gemma-4 drafter falls back to ik_llama.cpp."
+                )
+                return "ik_llama.cpp/llama-server"
 
             # Default: let _resolve_server_binary find it in LLAMA_CPP_DIR
             return args.server

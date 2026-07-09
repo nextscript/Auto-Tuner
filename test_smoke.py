@@ -3421,6 +3421,42 @@ def test_multi_folder_settings_round_trip(_isolated_settings, tmp_path) -> None:
     ]
 
 
+def test_path_settings_are_os_namespaced(_isolated_settings, tmp_path) -> None:
+    """The settings JSON is shared between the Windows and Linux boots of a
+    dual-boot machine. Path settings must live under per-OS keys so one OS's
+    absolute paths never clobber the other's (the '/run/media/…' models_path
+    read on Windows report)."""
+    import json
+
+    import app_settings
+
+    models = tmp_path / "models"
+    models.mkdir()
+    app_settings.set_models_path(models)
+
+    raw = json.loads(_isolated_settings.read_text(encoding="utf-8"))
+    os_key = f"models_path.{app_settings._OS_KEY_SUFFIX}"
+    assert raw[os_key] == str(models.resolve())
+    # Legacy mirror kept for older AutoTuner versions on the same OS.
+    assert raw["models_path"] == str(models.resolve())
+    assert app_settings.get_models_path() == models.resolve()
+
+    # Simulate the OTHER OS overwriting the legacy key with its own path
+    # (old-version behaviour): the per-OS key must win unchanged.
+    raw["models_path"] = "/run/media/dawasteh/OneDrive/models"
+    _isolated_settings.write_text(
+        json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    assert app_settings.get_models_path() == models.resolve()
+
+    # Legacy-only file (pre-namespacing) still resolves as fallback.
+    legacy_only = {"models_path": str(models.resolve())}
+    _isolated_settings.write_text(
+        json.dumps(legacy_only, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    assert app_settings.get_models_path() == models.resolve()
+
+
 def test_expert_override_round_trip(_isolated_settings) -> None:
     import app_settings
 
@@ -4045,6 +4081,195 @@ def test_forced_gpu_token_matches_both_os_name_styles(tmp_path) -> None:
         assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "0", (
             f"pin '9070' must select the 9070 XT (Vulkan0) for names={names}"
         )
+
+
+def test_match_gpu_by_token_cross_os_styles() -> None:
+    """The shared pin matcher must resolve short tokens AND a full driver
+    string from the other OS's name style to the same physical card — the
+    one-directional substring it replaces silently dropped the pin after an
+    OS switch (launch fell back to auto-placement)."""
+    from tuner import match_gpu_by_token
+
+    gpus = [
+        GPUInfo(
+            index=0,
+            name="AMD Radeon RX 9070 XT",
+            vendor="amd",
+            total_vram_mb=16304,
+            free_vram_mb=15400,
+            hip_index=0,
+        ),
+        GPUInfo(
+            index=1,
+            name="Radeon AI PRO R9700 (RADV NAVI48)",
+            vendor="amd",
+            total_vram_mb=32624,
+            free_vram_mb=31700,
+            hip_index=1,
+        ),
+    ]
+    # Short tokens (what the GUI dropdown persists).
+    assert match_gpu_by_token("9070", gpus) is gpus[0]
+    assert match_gpu_by_token("R9700", gpus) is gpus[1]
+    # Full Windows-WMI name against the Mesa/RADV style: neither is a
+    # substring of the other → the shared model-number token must hit.
+    assert match_gpu_by_token("AMD Radeon AI PRO R9700", gpus) is gpus[1]
+    # Unknown / empty pins mean auto behaviour.
+    assert match_gpu_by_token("4090", gpus) is None
+    assert match_gpu_by_token("", gpus) is None
+    assert match_gpu_by_token(None, gpus) is None
+
+
+def test_forced_gpu_full_other_os_name_still_pins(tmp_path) -> None:
+    """force_gpu persisted as a full Windows driver name must still pin the
+    right card when the detected names use the Linux/Mesa style."""
+    sysinfo = SystemInfo(
+        os_name="test",
+        cpu_name="Test CPU",
+        cpu_cores_physical=16,
+        cpu_cores_logical=32,
+        total_ram_gb=48,
+        free_ram_gb=40,
+        gpus=[
+            GPUInfo(
+                index=0,
+                name="Radeon RX 9070 XT (RADV NAVI48)",
+                vendor="amd",
+                total_vram_mb=16304,
+                free_vram_mb=15400,
+                hip_index=0,
+            ),
+            GPUInfo(
+                index=1,
+                name="Radeon AI PRO R9700 (RADV NAVI48)",
+                vendor="amd",
+                total_vram_mb=32624,
+                free_vram_mb=31700,
+                hip_index=1,
+            ),
+        ],
+    )
+    model = _fake_model(tmp_path, "Pin-9B-Q8_crossos", size_gb=9.0)
+    profile = match_profile(
+        model.name, load_profiles(SETTINGS_DIR), getattr(model, "architecture", "")
+    )
+    cfg = compute_config(
+        model=model,
+        system=sysinfo,
+        profile=profile,
+        force_gpu="AMD Radeon AI PRO R9700",
+    )
+    assert cfg.env_overrides.get("GGML_VK_VISIBLE_DEVICES") == "1", (
+        f"full Windows name must pin the R9700 (Vulkan1): {cfg.env_overrides}"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell-script fake binary")
+def test_gemma_draft_ik_fallback_only_for_pre_spec_type_builds(tmp_path) -> None:
+    """Gemma-4 + external drafter must use the SELECTED fork when its binary
+    advertises --spec-type (mainline b9190+/PR #23398); only a build without
+    the flag still needs the legacy ik_llama.cpp redirect. The old
+    unconditional redirect broke Gemma drafting on current mainline."""
+    from tuner import gemma_draft_needs_ik_fork
+
+    modern = tmp_path / "llama-server"
+    modern.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "-m, --model\n"
+        "-md, --model-draft\n"
+        "--spec-type\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    modern.chmod(0o755)
+
+    legacy = tmp_path / "legacy" / "llama-server"
+    legacy.parent.mkdir()
+    legacy.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "-m, --model\n"
+        "-md, --model-draft\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    legacy.chmod(0o755)
+
+    # Modern build (advertises --spec-type) → stay on the selected fork.
+    assert not gemma_draft_needs_ik_fork("gemma-4-12B-it-Q8_0", True, str(modern))
+    # Old build without --spec-type → legacy ik_llama.cpp fallback.
+    assert gemma_draft_needs_ik_fork("gemma-4-12B-it-Q8_0", True, str(legacy))
+    # No draft / non-Gemma model → never redirect.
+    assert not gemma_draft_needs_ik_fork("gemma-4-12B-it-Q8_0", False, str(legacy))
+    assert not gemma_draft_needs_ik_fork("Qwen3.6-27B-Q8_0", True, str(legacy))
+    # Unprobeable binary → keep the selected fork (no blind redirect).
+    assert not gemma_draft_needs_ik_fork(
+        "gemma-4-12B-it-Q8_0", True, str(tmp_path / "missing" / "llama-server")
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell-script fake binary")
+def test_vision_no_longer_suppresses_external_draft_on_spec_type_builds(
+    tmp_path,
+) -> None:
+    """-md + --mmproj coexist on --spec-type builds (verified against b9940
+    server sources). The old unconditional 'vision wins' skip silently
+    disabled the Gemma-4 drafter whenever Vision was on; only builds without
+    --spec-type may still drop Path A."""
+    modern = tmp_path / "llama-server"
+    modern.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "-m, --model\n"
+        "-md, --model-draft\n"
+        "--mmproj\n"
+        "--spec-type\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    modern.chmod(0o755)
+
+    legacy = tmp_path / "legacy" / "llama-server"
+    legacy.parent.mkdir()
+    legacy.write_text(
+        "#!/bin/sh\n"
+        "cat <<'EOF'\n"
+        "-m, --model\n"
+        "-md, --model-draft\n"
+        "--mmproj\n"
+        "EOF\n",
+        encoding="utf-8",
+    )
+    legacy.chmod(0o755)
+
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "gemma-4-12B-it-Q8_0", size_gb=13.0)
+    mmproj = tmp_path / "mmproj-gemma-4-12B-F16.gguf"
+    _write_minimal_gguf(mmproj)
+    model.mmproj = mmproj
+    draft = _fake_model(tmp_path, "mtp-gemma-4-12B-it-qat-UD", size_gb=0.6)
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+
+    # Modern build: vision AND external drafter together.
+    cmd = build_command(
+        model, cfg, profile, draft_model=draft, server_binary=str(modern)
+    )
+    assert "-md" in cmd and "--mmproj" in cmd
+
+    # Legacy build (no --spec-type): conservative skip stays — -md dropped.
+    cmd = build_command(
+        model, cfg, profile, draft_model=draft, server_binary=str(legacy)
+    )
+    assert "-md" not in cmd and "--mmproj" in cmd
+
+    # Vision off: drafter active regardless of the build.
+    model_novis = _fake_model(tmp_path, "gemma-4-12B-it-Q8_0-novis", size_gb=13.0)
+    cmd = build_command(
+        model_novis, cfg, profile, draft_model=draft, server_binary=str(legacy)
+    )
+    assert "-md" in cmd
 
 
 # ---------------------------------------------------------------------------

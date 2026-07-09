@@ -75,8 +75,11 @@ from scanner import (
 )
 from settings_loader import load_profiles, match_profile, ModelProfile
 from tuner import (
+    _probe_supported_flags,
     build_command,
     compute_config,
+    gemma_draft_needs_ik_fork,
+    match_gpu_by_token,
     prepare_command_for_binary,
     veto_unsafe_mlock,
     TunedConfig,
@@ -4382,11 +4385,18 @@ class MainWindow(QMainWindow):
         draft_effectively_on = has_external_draft and (
             draft_override if draft_override is not None else draft_default
         )
-        # External draft (-md) conflicts with --mmproj in llama.cpp: both
-        # try to load a second model and the server aborts. Integrated MTP
-        # lives inside the main GGUF — no second-model conflict, so vision
-        # is safe (and Qwen3.6-MTP models require it to work correctly).
-        vision_blocked = draft_effectively_on and not is_embedded_mtp
+        # External draft (-md) + --mmproj: only OLD builds (pre --spec-type,
+        # b9190) abort on that combination — current mainline loads draft
+        # and vision side by side (verified against b9940 server sources),
+        # and build_command gates -md on the same probe. Blocking here on a
+        # modern build forced users to choose between Vision and the Gemma-4
+        # drafter for no reason. Integrated MTP was never blocked (in-GGUF,
+        # no second model-load; Qwen3.6-MTP even requires vision).
+        vision_blocked = (
+            draft_effectively_on
+            and not is_embedded_mtp
+            and not self._selected_binary_supports_spec_type()
+        )
         has_vision = mmproj is not None and not vision_blocked
         # Default: enable vision when mmproj is present and not blocked.
         # For embedded-MTP models default to True (they need vision).
@@ -5405,24 +5415,49 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Binary resolution
     # ------------------------------------------------------------------
+    def _selected_binary_supports_spec_type(self) -> bool:
+        """True when the selected fork's llama-server advertises --spec-type.
+
+        Those builds (mainline b9190+) load -md and --mmproj together, so
+        the GUI must not enforce the legacy vision/draft mutual exclusion.
+        The probe is lru-cached per binary (path+mtime), so calling this on
+        every checkbox refresh is cheap after the first hit.
+        """
+        try:
+            _, resolve, _ = _get_fork_tools()
+            flags = _probe_supported_flags(resolve("llama-server"))
+        except Exception:
+            return False
+        return flags is not None and "--spec-type" in flags
+
     def _resolve_binary(
         self, profile: ModelProfile, use_draft: bool, model_name: str
     ) -> str:
-        # ik_llama.cpp is only required for Gemma 4 with an *external* sibling drafter.
-        # Integrated MTP (Qwen3.6-MTP) uses --spec-type draft-mtp and works in mainline b9190+.
+        # Gemma 4 + external drafter runs in MAINLINE since PR #23398
+        # (--spec-type draft-mtp for the gemma4-assistant head; plain sibling
+        # drafters are auto-detected from -md). The old unconditional
+        # redirect to ik_llama.cpp silently overrode the fork dropdown and
+        # broke Gemma drafting on current mainline builds (b9190+) — the
+        # ik build's --help has no --spec-type, so the prune stripped
+        # "draft-mtp" and the assistant head aborted at load. Now the
+        # SELECTED fork is used whenever it advertises --spec-type; only a
+        # genuinely old build still falls back to ik_llama.cpp.
         try:
             _, resolve, _ = _get_fork_tools()
         except Exception:
             return "llama-server"
-        if (
-            "gemma-4" in model_name.lower() or "gemma4" in model_name.lower()
-        ) and use_draft:
-            spec = profile.server_binary or "ik_llama.cpp/llama-server"
-        elif profile.server_binary:
-            spec = profile.server_binary
-        else:
-            spec = "llama-server"
+        spec = profile.server_binary or "llama-server"
         resolved = resolve(spec)
+        if not profile.server_binary and gemma_draft_needs_ik_fork(
+            model_name, use_draft, resolved
+        ):
+            legacy = resolve("ik_llama.cpp/llama-server")
+            self._log(
+                "[Binary] Ausgewählter Build kennt kein --spec-type "
+                "(pre-b9190) — Gemma-4-Drafter braucht dort ik_llama.cpp: "
+                f"→ {legacy}"
+            )
+            return legacy
         self._log(f"[Binary] {spec!r} → {resolved}")
         return resolved
 
@@ -5752,10 +5787,17 @@ class MainWindow(QMainWindow):
         forced_token = app_settings.get_forced_gpu()
         forced_here = None
         if forced_token and self._system is not None:
-            needle = forced_token.strip().lower()
-            forced_here = next(
-                (g for g in self._system.gpus if needle in g.name.lower()), None
-            )
+            # Same OS-robust matcher compute_config uses for force_gpu, so
+            # the launch path and the placement pass agree on which card a
+            # token like "9070" / "R9700" means — also when the persisted
+            # token came from the other OS's driver-name style.
+            forced_here = match_gpu_by_token(forced_token, self._system.gpus)
+            if forced_here is None:
+                self._log(
+                    f"[Balance] GPU-Pin '{forced_token}' matcht keine der "
+                    "erkannten Karten — falle auf Auto-Placement zurück. "
+                    "Pin im GPU-Dropdown neu setzen."
+                )
         if forced_here is not None:
             need = (
                 float(cfg.estimated_model_vram_gb)
@@ -5908,6 +5950,22 @@ class MainWindow(QMainWindow):
             self._log(
                 "[Compat] Selected llama.cpp binary does not advertise "
                 f"argument(s); removed: {removed}"
+            )
+
+        # Draft angefordert, aber kein -md im finalen Kommando → laut sagen
+        # statt still ohne Drafter zu starten (das war der „Gemma-Drafter
+        # geht nicht"-Fall: Vision + alter Build unterdrückte Path A stumm).
+        if (
+            use_draft
+            and self._current_draft is not None
+            and "-md" not in cmd
+            and "--model-draft" not in cmd
+        ):
+            self._log(
+                "[Draft] Externer Drafter ist NICHT aktiv: der gewählte Build "
+                "kombiniert -md nicht mit Vision/--mmproj (pre-b9190) oder "
+                "kennt das Argument nicht. Vision-Checkbox deaktivieren oder "
+                "einen aktuellen mainline-Build (--spec-type) wählen."
             )
 
         self._log("\n" + "─" * 60)

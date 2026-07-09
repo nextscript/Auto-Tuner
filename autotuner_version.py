@@ -20,7 +20,7 @@ from __future__ import annotations
 
 #: Semantic version of the running build. Compared against GitHub Release
 #: ``tag_name`` (with a leading ``v`` stripped).
-VERSION = "4.9.2"
+VERSION = "4.9.3"
 
 #: GitHub repository used for BOTH the source-ZIP updater (dev installs)
 #: and the binary release assets (compiled .exe / Linux binary).

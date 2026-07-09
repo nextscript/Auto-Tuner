@@ -128,17 +128,49 @@ def _update(key: str, value: Any) -> None:
 # ---------------------------------------------------------------------------
 # Convenience accessors
 
+# OS-namespaced path keys. The settings JSON is portable and on dual-boot
+# machines SHARED between the Windows and the Linux boot (it lives next to
+# the script on the data partition). An absolute path saved on one OS is
+# invalid on the other, so a single key ping-ponged: every boot the "other"
+# OS lost its models/fork selection ("/run/media/…" read on Windows, "L:\…"
+# read on Ubuntu) and overwrote the entry when the user re-picked it.
+# Path-valued settings are therefore stored per-OS ("models_path.windows" /
+# "models_path.linux"); the plain legacy key is still read as a fallback so
+# existing files migrate seamlessly, and it is mirrored on write so an older
+# AutoTuner version on the same OS keeps working.
+
+_OS_KEY_SUFFIX = "windows" if os.name == "nt" else "linux"
+
+
+def _os_path_key(key: str) -> str:
+    return f"{key}.{_OS_KEY_SUFFIX}"
+
+
+def _get_os_path(key: str) -> Optional[Path]:
+    """Read a per-OS path setting (legacy plain key as fallback); must exist."""
+    s = load_settings()
+    for k in (_os_path_key(key), key):
+        p = s.get(k)
+        if p:
+            pp = Path(p)
+            if pp.exists():
+                return pp
+    return None
+
+
+def _set_os_path(key: str, value: str) -> None:
+    s = load_settings()
+    s[_os_path_key(key)] = value
+    s[key] = value  # legacy mirror for older AutoTuner versions
+    save_settings(s)
+
 
 def get_models_path() -> Optional[Path]:
-    p = load_settings().get("models_path")
-    if not p:
-        return None
-    pp = Path(p)
-    return pp if pp.exists() else None
+    return _get_os_path("models_path")
 
 
 def set_models_path(path: Path) -> None:
-    _update("models_path", str(path.resolve()))
+    _set_os_path("models_path", str(path.resolve()))
 
 
 PathEnabled = Tuple[Path, bool]
@@ -152,7 +184,13 @@ def _read_path_list(key: str) -> List[PathEnabled]:
     paths are skipped; missing folders are kept so the GUI can still show and
     edit a removable stale entry.
     """
-    raw = load_settings().get(key)
+    s = load_settings()
+    raw = s.get(_os_path_key(key))
+    if not isinstance(raw, list) or not raw:
+        # Legacy fallback: plain key written before per-OS namespacing (or by
+        # an older version). Stale other-OS entries surface as editable
+        # missing folders in the GUI, exactly like before.
+        raw = s.get(key)
     if not isinstance(raw, list):
         return []
     out: List[PathEnabled] = []
@@ -194,7 +232,10 @@ def _write_path_list(key: str, paths: List[PathEnabled]) -> None:
             continue
         seen.add(key_text)
         clean.append({"path": str(rp), "enabled": bool(enabled)})
-    _update(key, clean)
+    s = load_settings()
+    s[_os_path_key(key)] = clean
+    s[key] = clean  # legacy mirror for older AutoTuner versions
+    save_settings(s)
 
 
 def get_model_paths() -> List[PathEnabled]:
@@ -217,15 +258,11 @@ def set_model_paths(paths: List[PathEnabled]) -> None:
 
 
 def get_fork_path() -> Optional[Path]:
-    p = load_settings().get("fork_path")
-    if not p:
-        return None
-    pp = Path(p)
-    return pp if pp.exists() else None
+    return _get_os_path("fork_path")
 
 
 def set_fork_path(path: Path) -> None:
-    _update("fork_path", str(path.resolve()))
+    _set_os_path("fork_path", str(path.resolve()))
 
 
 # ---------------------------------------------------------------------------
@@ -244,21 +281,21 @@ def set_fork_path(path: Path) -> None:
 
 
 def get_fork_container_path() -> Optional[Path]:
-    p = load_settings().get("fork_container_path")
-    if not p:
-        return None
-    pp = Path(p)
-    return pp if pp.exists() else None
+    return _get_os_path("fork_container_path")
 
 
 def set_fork_container_path(path: Path) -> None:
-    _update("fork_container_path", str(path.resolve()))
+    _set_os_path("fork_container_path", str(path.resolve()))
 
 
 def clear_fork_container_path() -> None:
     s = load_settings()
-    if "fork_container_path" in s:
-        s.pop("fork_container_path", None)
+    changed = False
+    for k in (_os_path_key("fork_container_path"), "fork_container_path"):
+        if k in s:
+            s.pop(k, None)
+            changed = True
+    if changed:
         save_settings(s)
 
 

@@ -1,5 +1,5 @@
 Auflistung der Ordnerpfade für Volume OneDrive
-Volumeseriennummer : 000000D0 36CA:A260
+Volumeseriennummer : 00000085 36CA:A260
 I:.
 |   get_metadata.py
 |   modelstree.md
@@ -86,7 +86,7 @@ I:.
 +---EpistemeAI
 |       VibeCoder-20b-RL1_0_MXFP4_MOE.gguf
 |       
-+---Frankenmerger
++---Finetunes
 |       gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-MTP-BF16.gguf
 |       gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-Q8_0.gguf
 |       gemma4-31b-Fable-5-Q8_0.gguf
@@ -94,12 +94,14 @@ I:.
 |       mmproj-Qwable-9B-Claude-Fable-5-f16.gguf
 |       mmproj-Qwopus3.5-9B-coder-Exp-F32.gguf
 |       mmproj-Qwythos-9B-Claude-Mythos-5-1M-F16.gguf
+|       mmproj-ThinkingCap-Qwen3.6-27B-f16.gguf
 |       Qwable-27b_Q4_K_M.gguf
 |       Qwable-9B-Claude-Fable-5-bf16.gguf
 |       Qwen3.6-27B-MTP-pi-reasoning-Q6_K.gguf
 |       Qwopus3.5-9B-coder-Exp-BF16.gguf
 |       Qwopus3.5-9B-coder-Exp-Q8_0.gguf
 |       Qwythos-9B-Claude-Mythos-5-1M-MTP-BF16.gguf
+|       ThinkingCap-Qwen3.6-27B-Q4_K_M.gguf
 |       
 +---Google
 |   |   gemma-4-12b-it-BF16.gguf
@@ -158,14 +160,24 @@ I:.
 |   |       mmproj-Devstral-Small-2-24B-Instruct-2512-BF16.gguf
 |   |       mmproj-Devstral-Small-2-24B-Instruct-2512-UD-F32.gguf
 |   |       
+|   +---Leanstral 1.5
+|   |       Leanstral-1.5-119B-A6B-Q4_K_M.gguf
+|   |       mmproj-Leanstral-1.5-119b-BF16.gguf
+|   |       
 |   +---Ministral
 |   |       Ministral-3-14B-Reasoning-2512-Q6_K.gguf
 |   |       mmproj-Ministral-3-14B-Reasoning-2512-F16.gguf
 |   |       
-|   \---Mistral-Medium
-|           Mistral-Medium-3.5-128B-UD-Q3_K_XL-00001-of-00003.gguf
-|           Mistral-Medium-3.5-128B-UD-Q3_K_XL-00002-of-00003.gguf
-|           Mistral-Medium-3.5-128B-UD-Q3_K_XL-00003-of-00003.gguf
+|   +---Mistral-Medium
+|   |       Mistral-Medium-3.5-128B-UD-Q3_K_XL-00001-of-00003.gguf
+|   |       Mistral-Medium-3.5-128B-UD-Q3_K_XL-00002-of-00003.gguf
+|   |       Mistral-Medium-3.5-128B-UD-Q3_K_XL-00003-of-00003.gguf
+|   |       
+|   \---Mistral-Smal 4
+|           Mistral-Small-4-119B-2603-UD-Q3_K_XL-00001-of-00003.gguf
+|           Mistral-Small-4-119B-2603-UD-Q3_K_XL-00002-of-00003.gguf
+|           Mistral-Small-4-119B-2603-UD-Q3_K_XL-00003-of-00003.gguf
+|           mmproj-Mistral-Small-4-119B-2603-UD-F32.gguf
 |           
 +---NVIDIA
 |       mmproj-NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16.gguf
@@ -173,12 +185,6 @@ I:.
 |       
 +---OpenAI
 |       gpt-oss-20b-UD-Q8_K_XL.gguf
-|       
-+---Stepfun-AI
-|       mmproj-Step-3.7-Flash-UD-F16.gguf
-|       Step-3.7-Flash-UD-IQ3_S-00001-of-00003.gguf
-|       Step-3.7-Flash-UD-IQ3_S-00002-of-00003.gguf
-|       Step-3.7-Flash-UD-IQ3_S-00003-of-00003.gguf
 |       
 +---tencent
 |       HY-MT2-7B-Q8_0.gguf
