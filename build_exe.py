@@ -122,6 +122,7 @@ def main() -> int:
         "hardware",
         "tuner",
         "app_settings",
+        "startup_manager",
         "autotuner_version",
     ]
 

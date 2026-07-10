@@ -228,6 +228,11 @@ Launch llama-server now? [Y/n]
   per-splitter persistence.
 - **Global font size** — persistent font size (clamped 7..22), applied
   immediately on app start (no flash of the default).
+- **Application settings** — the **⚙ Settings** toolbar button (also available
+  in the Windows title-bar system menu) controls per-user login autostart on
+  Windows, Linux, and macOS, plus optional **X → notification area/system
+  tray** behavior. Both options are disabled by default; the tray menu and the
+  dedicated **Quit** button always exit normally.
 - **Reasoning effort** — selectable per model: `auto` / `off` /
   `minimal` / `low` / `medium` / `high` / `extra_high`. Think-budget
   (spin-box, -1 = off, 0 = stop immediately, N = token budget) in the
@@ -758,6 +763,7 @@ auto_tuner/
 ├── tuner.py             # config calculation + llama-server command builder
 ├── launcher.py          # subprocess + Ctrl+C handling (Windows + Unix)
 ├── app_settings.py      # persistent GUI prefs (autotuner_settings.json)
+├── startup_manager.py   # Windows/Linux/macOS login autostart integration
 ...
 ├── settings/
 │   ├── _default.yaml

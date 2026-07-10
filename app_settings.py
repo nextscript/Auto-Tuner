@@ -25,6 +25,8 @@ Public API:
     set_mmproj_selection(model_name, filename)
     get_font_size()        -> Optional[int]
     set_font_size(int)
+    get_minimize_on_close() -> bool
+    set_minimize_on_close(bool)
     get_base_port()        -> int
     set_base_port(int)
     get_port_offset()      -> int
@@ -814,6 +816,24 @@ def set_font_size(size: int) -> None:
         return
     n = max(_FONT_SIZE_MIN, min(_FONT_SIZE_MAX, n))
     _update("font_size", n)
+
+
+# ---------------------------------------------------------------------------
+# Application behaviour
+
+
+def get_minimize_on_close() -> bool:
+    """Return whether title-bar X should hide in the notification area.
+
+    This is deliberately opt-in: missing settings and non-boolean legacy
+    values both resolve to ``False``.
+    """
+    return load_settings().get("minimize_on_close") is True
+
+
+def set_minimize_on_close(enabled: bool) -> None:
+    """Persist the opt-in X-to-notification-area behaviour."""
+    _update("minimize_on_close", bool(enabled))
 
 
 # ---------------------------------------------------------------------------

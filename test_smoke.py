@@ -3457,6 +3457,124 @@ def test_path_settings_are_os_namespaced(_isolated_settings, tmp_path) -> None:
     assert app_settings.get_models_path() == models.resolve()
 
 
+def test_application_close_preference_is_opt_in(_isolated_settings) -> None:
+    import app_settings
+
+    assert app_settings.get_minimize_on_close() is False
+    app_settings.set_minimize_on_close(True)
+    assert app_settings.get_minimize_on_close() is True
+    app_settings.set_minimize_on_close(False)
+    assert app_settings.get_minimize_on_close() is False
+
+
+def test_system_tray_support_is_native_on_windows_and_macos(monkeypatch) -> None:
+    import types
+
+    import qt_launcher
+
+    # Qt may transiently report False while Explorer/Finder restarts. Icons
+    # created in that interval are registered automatically when it returns.
+    unavailable = types.SimpleNamespace(isSystemTrayAvailable=lambda: False)
+    monkeypatch.setattr(qt_launcher, "QSystemTrayIcon", unavailable)
+    monkeypatch.setattr(qt_launcher.sys, "platform", "win32")
+    assert qt_launcher._system_tray_supported() is True
+    monkeypatch.setattr(qt_launcher.sys, "platform", "darwin")
+    assert qt_launcher._system_tray_supported() is True
+    monkeypatch.setattr(qt_launcher.sys, "platform", "linux")
+    assert qt_launcher._system_tray_supported() is False
+
+
+def test_linux_autostart_desktop_round_trip(tmp_path, monkeypatch) -> None:
+    import startup_manager
+
+    desktop = tmp_path / "autostart" / "AutoTuner.desktop"
+    monkeypatch.setattr(startup_manager.sys, "platform", "linux")
+    monkeypatch.setattr(startup_manager, "_linux_autostart_path", lambda: desktop)
+    monkeypatch.setattr(
+        startup_manager,
+        "launch_arguments",
+        lambda: ["/opt/Auto Tuner/python3", "/opt/Auto Tuner/qt_launcher.py"],
+    )
+
+    assert startup_manager.is_autostart_enabled() is False
+    startup_manager.set_autostart_enabled(True)
+    text = desktop.read_text(encoding="utf-8")
+    assert 'Exec="/opt/Auto Tuner/python3" "/opt/Auto Tuner/qt_launcher.py"' in text
+    assert startup_manager.is_autostart_enabled() is True
+    startup_manager.set_autostart_enabled(False)
+    assert desktop.exists() is False
+
+
+def test_windows_autostart_registry_round_trip(monkeypatch) -> None:
+    import subprocess
+    import sys
+    import types
+
+    import startup_manager
+
+    values = {}
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def _query_value(_key, name):
+        if name not in values:
+            raise FileNotFoundError(name)
+        return values[name], 1
+
+    fake_winreg = types.SimpleNamespace(
+        HKEY_CURRENT_USER=object(),
+        KEY_SET_VALUE=2,
+        REG_SZ=1,
+        OpenKey=lambda *_args: _Key(),
+        CreateKey=lambda *_args: _Key(),
+        QueryValueEx=_query_value,
+        SetValueEx=lambda _key, name, _reserved, _kind, value: values.__setitem__(
+            name, value
+        ),
+        DeleteValue=lambda _key, name: values.pop(name),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
+    monkeypatch.setattr(startup_manager.sys, "platform", "win32")
+    args = [r"C:\Program Files\AutoTuner\AutoTuner.exe"]
+    monkeypatch.setattr(startup_manager, "launch_arguments", lambda: args)
+
+    assert startup_manager.is_autostart_enabled() is False
+    startup_manager.set_autostart_enabled(True)
+    assert values["AutoTuner"] == subprocess.list2cmdline(args)
+    assert startup_manager.is_autostart_enabled() is True
+    startup_manager.set_autostart_enabled(False)
+    assert startup_manager.is_autostart_enabled() is False
+
+
+def test_macos_autostart_launch_agent_round_trip(tmp_path, monkeypatch) -> None:
+    import plistlib
+
+    import startup_manager
+
+    launch_agent = tmp_path / "LaunchAgents" / "com.dawasteh.autotuner.plist"
+    args = ["/Applications/AutoTuner.app/Contents/MacOS/AutoTuner"]
+    monkeypatch.setattr(startup_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        startup_manager, "_macos_launch_agent_path", lambda: launch_agent
+    )
+    monkeypatch.setattr(startup_manager, "launch_arguments", lambda: args)
+
+    assert startup_manager.is_autostart_enabled() is False
+    startup_manager.set_autostart_enabled(True)
+    with launch_agent.open("rb") as fh:
+        payload = plistlib.load(fh)
+    assert payload["Label"] == "com.dawasteh.autotuner"
+    assert payload["ProgramArguments"] == args
+    assert payload["RunAtLoad"] is True
+    startup_manager.set_autostart_enabled(False)
+    assert launch_agent.exists() is False
+
+
 def test_expert_override_round_trip(_isolated_settings) -> None:
     import app_settings
 

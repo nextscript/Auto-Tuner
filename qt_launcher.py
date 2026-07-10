@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, cast, Tuple
 
 from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QCloseEvent, QFont, QIcon
+from PyQt6.QtGui import QAction, QCloseEvent, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -58,6 +59,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QSystemTrayIcon,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -91,6 +93,7 @@ from performance_target import (
     DEFAULT_TARGET_NAME,
 )
 import app_settings
+import startup_manager
 from autotuner_version import VERSION, GITHUB_REPO, USER_AGENT
 
 
@@ -114,6 +117,19 @@ def _default_settings_path() -> Path:
     # When frozen (PyInstaller), ``__file__`` resolves into the throw-away
     # ``_MEIPASS`` extraction folder where bundled read-only resources live.
     return _bundled_resource("settings")
+
+
+def _system_tray_supported() -> bool:
+    """Return whether this desktop can host a notification-area icon.
+
+    Windows and macOS always provide the native host. Qt may briefly report
+    False there while Explorer/Finder is restarting; a QSystemTrayIcon created
+    during that window is added automatically once the host returns. Linux
+    desktop environments genuinely vary, so trust Qt's runtime probe there.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return True
+    return QSystemTrayIcon.isSystemTrayAvailable()
 
 
 def _default_models_path() -> Path:
@@ -419,6 +435,65 @@ class _PathListDialog(QDialog):
                 path = Path(str(item.text()))
             out.append((path, item.checkState() == Qt.CheckState.Checked))
         return out
+
+
+class _ApplicationSettingsDialog(QDialog):
+    """Small application-level settings dialog (all options are opt-in)."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            "Application behaviour for this installation. Both options are "
+            "disabled by default."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.autostart_checkbox = QCheckBox(
+            f"Start AutoTuner automatically after {startup_manager.platform_name()} login"
+        )
+        self.autostart_was_enabled = startup_manager.is_autostart_enabled()
+        self.autostart_checkbox.setChecked(self.autostart_was_enabled)
+        self.autostart_checkbox.setToolTip(
+            "Registers AutoTuner only for the current user. No administrator "
+            "permissions are required."
+        )
+        layout.addWidget(self.autostart_checkbox)
+
+        self.minimize_checkbox = QCheckBox(
+            "Hide in the notification area when the title-bar X is pressed"
+        )
+        tray_available = _system_tray_supported()
+        self.minimize_checkbox.setChecked(
+            app_settings.get_minimize_on_close() and tray_available
+        )
+        self.minimize_checkbox.setEnabled(tray_available)
+        if tray_available:
+            self.minimize_checkbox.setToolTip(
+                "Keeps AutoTuner and running servers active in the system tray. "
+                "Use the tray menu or Quit button to exit the application."
+            )
+        else:
+            self.minimize_checkbox.setText(
+                self.minimize_checkbox.text() + " (not available on this desktop)"
+            )
+            self.minimize_checkbox.setToolTip(
+                "The current desktop environment does not provide a system tray."
+            )
+        layout.addWidget(self.minimize_checkbox)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 # ---------------------------------------------------------------------------
@@ -2603,6 +2678,7 @@ class MainWindow(QMainWindow):
     _FORK_COMBO_BASE_TOOLTIP = "Default llama.cpp fork (auto-overridden by profile)"
     _FORK_COMBO_MIN_WIDTH = 220
     _FORK_COMBO_TEXT_PADDING = 72
+    _WIN_SETTINGS_COMMAND_ID = 0x1FFE
 
     def __init__(self, models_path: Path, settings_path: Path) -> None:
         super().__init__()
@@ -2687,6 +2763,13 @@ class MainWindow(QMainWindow):
         self._sysinfo_busy = False
         # Persisted font size — falls back to 10pt on first launch.
         self._font_size = app_settings.get_font_size()
+        # Explicit Quit bypasses the optional X→minimize behaviour. The flag
+        # remains False for ordinary title-bar close requests.
+        self._force_quit = False
+        self._tray_icon: Optional[QSystemTrayIcon] = None
+        self._tray_menu: Optional[QMenu] = None
+        self._tray_hint_shown = False
+        self._tray_restore_maximized = False
 
         self._build_ui()
         # Wire background → GUI signals BEFORE the first scan kicks off,
@@ -2719,6 +2802,7 @@ class MainWindow(QMainWindow):
             ("📂 Models folder", self._browse_models),
             ("🔄 Refresh", self._start_scan),
             ("⬆ Update", self._start_update),
+            ("⚙ Settings", self._open_application_settings),
         ):
             btn = QPushButton(label)
             btn.clicked.connect(slot)
@@ -3162,7 +3246,7 @@ class MainWindow(QMainWindow):
 
         self._btn_quit = QPushButton("Quit")
         self._btn_quit.setFixedHeight(32)
-        self._btn_quit.clicked.connect(self.close)
+        self._btn_quit.clicked.connect(self._request_quit)
         bl.addWidget(self._btn_quit)
 
         # ── Root ───────────────────────────────────────────────────────
@@ -3181,6 +3265,174 @@ class MainWindow(QMainWindow):
 
         # Re-apply the inner pane arrangement now that every splitter exists.
         self._restore_splitter_states()
+
+    def _open_application_settings(self) -> None:
+        """Open and persist application-level startup/window behaviour."""
+        dialog = _ApplicationSettingsDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            autostart_enabled = dialog.autostart_checkbox.isChecked()
+            if autostart_enabled != dialog.autostart_was_enabled:
+                startup_manager.set_autostart_enabled(autostart_enabled)
+        except startup_manager.AutostartError as exc:
+            QMessageBox.critical(self, "Autostart", str(exc))
+            return
+
+        minimize_to_tray = dialog.minimize_checkbox.isChecked()
+        app_settings.set_minimize_on_close(minimize_to_tray)
+        if not minimize_to_tray:
+            self._destroy_tray_icon()
+        self._status.showMessage("Settings saved", 3000)
+
+    def _ensure_tray_icon(self) -> bool:
+        """Create and show the notification-area icon on demand."""
+        if self._tray_icon is not None:
+            if not self._tray_icon.isVisible():
+                self._tray_icon.show()
+            return True
+        if not _system_tray_supported():
+            return False
+
+        icon = self.windowIcon()
+        app = cast(Optional[QApplication], QApplication.instance())
+        if icon.isNull() and app is not None:
+            icon = app.windowIcon()
+        if icon.isNull():
+            fallback = _bundled_resource("assets", "AutoTuner.png")
+            if fallback.is_file():
+                icon = QIcon(str(fallback))
+        if icon.isNull():
+            return False
+
+        tray = QSystemTrayIcon(icon, self)
+        tray.setToolTip("AutoTuner")
+        menu = QMenu()
+        show_action = QAction("Show AutoTuner", menu)
+        show_action.triggered.connect(self._restore_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        quit_action = QAction("Quit", menu)
+        quit_action.triggered.connect(self._request_quit)
+        menu.addAction(quit_action)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._on_tray_activated)
+
+        # Keep explicit references: on some PyQt/Python combinations the menu
+        # can otherwise be garbage-collected while the native tray icon lives.
+        self._tray_icon = tray
+        self._tray_menu = menu
+        tray.show()
+        return True
+
+    def _hide_to_tray(self) -> bool:
+        """Hide the main window while keeping the process reachable via tray."""
+        if not self._ensure_tray_icon():
+            return False
+        self._tray_restore_maximized = self.isMaximized()
+        self.hide()
+        if not self._tray_hint_shown and self._tray_icon is not None:
+            if QSystemTrayIcon.supportsMessages():
+                self._tray_icon.showMessage(
+                    "AutoTuner is still running",
+                    "Use the notification-area icon to restore or quit AutoTuner.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    4000,
+                )
+            self._tray_hint_shown = True
+        return True
+
+    def _restore_from_tray(self) -> None:
+        """Restore and focus the main window from the notification area."""
+        if self._tray_restore_maximized:
+            self.showMaximized()
+        else:
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(
+        self, reason: QSystemTrayIcon.ActivationReason
+    ) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._restore_from_tray()
+
+    def _destroy_tray_icon(self) -> None:
+        """Remove the native tray icon and release its menu."""
+        if self._tray_icon is not None:
+            self._tray_icon.hide()
+            self._tray_icon.deleteLater()
+        self._tray_icon = None
+        self._tray_menu = None
+
+    def _install_windows_system_menu(self) -> None:
+        """Add Settings above Close in Windows' title-bar system menu."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.GetSystemMenu.argtypes = [wintypes.HWND, wintypes.BOOL]
+            user32.GetSystemMenu.restype = wintypes.HMENU
+            user32.GetMenuItemCount.argtypes = [wintypes.HMENU]
+            user32.GetMenuItemCount.restype = ctypes.c_int
+            user32.InsertMenuW.argtypes = [
+                wintypes.HMENU,
+                wintypes.UINT,
+                wintypes.UINT,
+                ctypes.c_size_t,
+                wintypes.LPCWSTR,
+            ]
+            user32.InsertMenuW.restype = wintypes.BOOL
+            user32.DrawMenuBar.argtypes = [wintypes.HWND]
+            user32.DrawMenuBar.restype = wintypes.BOOL
+
+            hwnd = wintypes.HWND(int(self.winId()))
+            menu = user32.GetSystemMenu(hwnd, False)
+            if not menu:
+                return
+            count = user32.GetMenuItemCount(menu)
+            # Standard order ends in: Maximize, separator, Close. Insert just
+            # before that separator, matching the location shown by the user.
+            position = max(0, count - 2)
+            mf_byposition = 0x00000400
+            mf_string = 0x00000000
+            user32.InsertMenuW(
+                menu,
+                position,
+                mf_byposition | mf_string,
+                self._WIN_SETTINGS_COMMAND_ID,
+                "Settings…",
+            )
+            user32.DrawMenuBar(hwnd)
+        except (AttributeError, OSError, TypeError, ValueError):
+            # The normal toolbar Settings button remains available.
+            pass
+
+    def nativeEvent(self, event_type, message):  # noqa: N802
+        """Handle the custom Settings command in the Windows system menu."""
+        if sys.platform == "win32":
+            try:
+                from ctypes import wintypes
+
+                msg = wintypes.MSG.from_address(int(message))
+                if (
+                    msg.message == 0x0112  # WM_SYSCOMMAND
+                    and int(msg.wParam) == self._WIN_SETTINGS_COMMAND_ID
+                ):
+                    QTimer.singleShot(0, self._open_application_settings)
+                    return True, 0
+            except (AttributeError, TypeError, ValueError):
+                pass
+        # Calling QWidget.nativeEvent() after inspecting the MSG crashes in
+        # PyQt 6.11 on Windows; False delegates normal processing to Qt.
+        return False, 0
 
     # ------------------------------------------------------------------
     # Window geometry persistence
@@ -6485,11 +6737,39 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Window close
     # ------------------------------------------------------------------
+    def _request_quit(self) -> None:
+        """Exit explicitly, even when title-bar X is configured for the tray."""
+        # A server-confirmation dialog needs a visible parent when Quit came
+        # from the tray menu. Avoid flashing the window when no server exists.
+        if not self.isVisible() and self._servers:
+            self._restore_from_tray()
+        self._force_quit = True
+        self.close()
+
     def closeEvent(self, a0: QCloseEvent | None) -> None:  # noqa: N802
         # Snapshot the current window layout BEFORE any potential
         # "are you sure?" dialog, so even an Escape-out of that dialog
         # has saved state. The save itself never blocks the close.
         self._persist_window_geometry()
+
+        # This preference applies only to an ordinary title-bar/system-menu
+        # close. The dedicated Quit actions and signal handler set
+        # ``_force_quit`` and continue through the normal shutdown path.
+        if app_settings.get_minimize_on_close() and not self._force_quit:
+            if self._hide_to_tray():
+                if a0 is not None:
+                    a0.ignore()
+                return
+            QMessageBox.warning(
+                self,
+                "Notification area unavailable",
+                "This desktop does not currently provide a system tray, so "
+                "AutoTuner cannot be hidden there. Disable the option in "
+                "Settings or enable tray support in your desktop environment.",
+            )
+            if a0 is not None:
+                a0.ignore()
+            return
 
         # Stop periodic timers first so no new background work is started
         # while we're tearing down.  Both timers are children of self so Qt
@@ -6543,11 +6823,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
+                self._force_quit = False
+                # Closing was cancelled; restore the periodic work stopped at
+                # the start of this method so the live window keeps updating.
+                self._poll_timer.start(500)
+                self._sysinfo_timer.start(6000)
                 if a0 is not None:
                     a0.ignore()
                 return
             self._stop_all_servers()
 
+        self._destroy_tray_icon()
         if a0 is not None:
             a0.accept()
 
@@ -6637,6 +6923,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     if not app.windowIcon().isNull():
         window.setWindowIcon(app.windowIcon())
     window.show()
+    # The HWND is stable only after show(); installing the custom Windows
+    # system-menu command earlier can hand GetSystemMenu an unrealized handle.
+    window._install_windows_system_menu()
 
     # ── Ctrl+C / SIGTERM: stop the servers BEFORE the GUI dies ──────────
     # llama-server children are spawned with start_new_session (Unix) /
@@ -6659,7 +6948,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             window._stop_all_servers()
         except Exception:
             pass
-        app.quit()
+        window._request_quit()
 
     for _sig_name in ("SIGINT", "SIGTERM"):
         _sig = getattr(signal, _sig_name, None)
