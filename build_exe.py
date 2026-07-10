@@ -23,9 +23,10 @@ Usage
     python build_exe.py
 
 The script cleans ``build/`` and ``dist/`` first and refuses to run if
-PyInstaller is missing. Settings profiles (``settings/*.yaml``) are
-bundled as read-only data; user state stays in ``app_settings.app_data_dir``
-(next to the binary) and is preserved across updates.
+PyInstaller is missing. Settings profiles (``settings/*.yaml``) and the
+application icon are bundled as read-only data; user state stays in
+``app_settings.app_data_dir`` (next to the binary) and is preserved across
+updates.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ from autotuner_version import VERSION
 REPO_ROOT = Path(__file__).resolve().parent
 ENTRY = REPO_ROOT / "qt_launcher.py"
 SETTINGS_DIR = REPO_ROOT / "settings"
+ASSETS_DIR = REPO_ROOT / "assets"
+ICON_ICO = ASSETS_DIR / "AutoTuner.ico"
 DIST = REPO_ROOT / "dist"
 BUILD = REPO_ROOT / "build"
 
@@ -86,6 +89,12 @@ def main() -> int:
     if not SETTINGS_DIR.is_dir():
         print(f"[build] settings/ not found at {SETTINGS_DIR}", file=sys.stderr)
         return 1
+    if not ASSETS_DIR.is_dir():
+        print(f"[build] assets/ not found at {ASSETS_DIR}", file=sys.stderr)
+        return 1
+    if os.name == "nt" and not ICON_ICO.is_file():
+        print(f"[build] Windows icon not found at {ICON_ICO}", file=sys.stderr)
+        return 1
 
     print(f"[build] AutoTuner v{VERSION} on {platform.system()} ({platform.machine()})")
     _clean()
@@ -95,6 +104,7 @@ def main() -> int:
     # available inside the frozen _MEIPASS folder.
     sep = ";" if os.name == "nt" else ":"
     add_data_settings = f"{SETTINGS_DIR}{sep}settings"
+    add_data_assets = f"{ASSETS_DIR}{sep}assets"
 
     # Local modules that are only imported lazily (inside functions) and
     # that PyInstaller's static analysis can occasionally miss. Listing
@@ -131,11 +141,18 @@ def main() -> int:
         str(BUILD),
         "--add-data",
         add_data_settings,
+        "--add-data",
+        add_data_assets,
         "--paths",
         str(REPO_ROOT),
     ]
     for mod in hidden_imports:
         cmd += ["--hidden-import", mod]
+    # Embed a real multi-resolution ICO in the Windows executable so Explorer,
+    # shortcuts, and the taskbar use AutoTuner branding instead of the default
+    # PyInstaller icon. Other platforms get the bundled PNG at runtime via Qt.
+    if os.name == "nt":
+        cmd += ["--icon", str(ICON_ICO)]
     cmd.append(str(ENTRY))
 
     print("[build] $ " + " ".join(cmd))

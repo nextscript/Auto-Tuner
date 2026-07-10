@@ -371,9 +371,10 @@ python build_exe.py
 # → Windows: dist/AutoTuner.exe   |   Linux: dist/AutoTuner-Linux
 ```
 
-`build_exe.py` bündelt `settings/*.yaml` als read-only Daten mit. Nutzer-State
-(`autotuner_settings.json`, Logs) liegt persistent neben dem Binary und bleibt
-bei Updates erhalten.
+`build_exe.py` bündelt `settings/*.yaml` und das App-Icon aus `assets/` als
+read-only Daten mit; unter Windows wird `assets/AutoTuner.ico` zusätzlich in
+die `.exe` eingebettet. Nutzer-State (`autotuner_settings.json`, Logs) liegt
+persistent neben dem Binary und bleibt bei Updates erhalten.
 
 ### Release / Auto-Update
 

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, cast, Tuple
 
 from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QCloseEvent, QFont
+from PyQt6.QtGui import QCloseEvent, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -105,12 +105,15 @@ def _get_fork_tools():
     return _discover_llama_forks, _resolve_server_binary, _resolve_diffusion_binary
 
 
+def _bundled_resource(*parts: str) -> Path:
+    """Return a source-tree or PyInstaller-bundled resource path."""
+    return Path(__file__).resolve().parent.joinpath(*parts)
+
+
 def _default_settings_path() -> Path:
     # When frozen (PyInstaller), ``__file__`` resolves into the throw-away
-    # ``_MEIPASS`` extraction folder where the bundled ``settings/`` profiles
-    # live — so this works for both source and frozen builds. The profiles are
-    # read-only; user-writable state goes through ``app_settings.app_data_dir``.
-    return Path(__file__).resolve().parent / "settings"
+    # ``_MEIPASS`` extraction folder where bundled read-only resources live.
+    return _bundled_resource("settings")
 
 
 def _default_models_path() -> Path:
@@ -6587,10 +6590,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     p.add_argument("--settings-path", default=str(_default_settings_path()))
     args = p.parse_args(argv if argv is not None else sys.argv[1:])
 
-    # Hide the parent console on Windows when launched via python.exe
+    # Hide the parent console on Windows when launched via python.exe. A stable
+    # AppUserModelID also makes Windows use our icon for the running taskbar app
+    # instead of grouping it under python.exe / the PyInstaller bootloader.
     if os.name == "nt":
         try:
             import ctypes
+
+            set_app_id = (
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+            )
+            set_app_id.argtypes = [ctypes.c_wchar_p]
+            set_app_id.restype = ctypes.c_long
+            set_app_id("DaWasteh.AutoTuner")
 
             hwnd = ctypes.windll.kernel32.GetConsoleWindow()
             if hwnd:
@@ -6600,6 +6612,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("AutoTuner")
+    icon_path = _bundled_resource("assets", "AutoTuner.png")
+    if icon_path.is_file():
+        app_icon = QIcon(str(icon_path))
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
     # Apply persisted font size to the WHOLE app before we build any
     # widgets — that way every QLabel / QPushButton / dropdown picks
     # up the user's chosen size on the very first paint instead of
@@ -6615,6 +6632,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         models_path=Path(args.models_path),
         settings_path=Path(args.settings_path),
     )
+    # Explicitly set it as well as QApplication's icon for consistent title-bar
+    # and taskbar behavior across Windows, Linux window managers, and macOS.
+    if not app.windowIcon().isNull():
+        window.setWindowIcon(app.windowIcon())
     window.show()
 
     # ── Ctrl+C / SIGTERM: stop the servers BEFORE the GUI dies ──────────
