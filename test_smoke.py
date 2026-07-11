@@ -3288,12 +3288,12 @@ def test_deepseek2_family_does_not_collide() -> None:
 
 
 def test_hunyuan_dense_vs_moe_split() -> None:
-    """Hunyuan-MT (dense, translation, top_p 0.6) and Hunyuan-A13B (MoE,
-    chat, top_p 0.8) must use different profiles. The dense profile must no
-    longer swallow the MoE model."""
+    """Hunyuan-MT (dense, translation, top_p 0.6), Hunyuan-A13B (MoE, chat,
+    top_p 0.8) and the new Hy-MT2 family (hy_v3, top_p 1.0) must all use
+    different profiles."""
     profiles = load_profiles(SETTINGS_DIR)
 
-    mt = match_profile("Hy-MT2-7B-UD-Q8_K_XL.gguf", profiles, "hunyuan-dense")
+    mt = match_profile("Hunyuan-MT-7B-UD-Q8_K_XL.gguf", profiles, "hunyuan-dense")
     assert "Hunyuan-MT" in mt.display_name
     # dense MT profile keeps the translation sampling (top_p 0.6)
     assert mt.sampling["chat"]["top_p"] == 0.6
@@ -3302,6 +3302,39 @@ def test_hunyuan_dense_vs_moe_split() -> None:
     assert "A13B" in a13b.display_name
     # MoE chat profile uses top_p 0.8 (NOT the translation 0.6)
     assert a13b.sampling["chat"]["top_p"] == 0.8
+
+    # Hy-MT2 (May 2026, arch hy_v3): the longer "hy-mt2" pattern must beat
+    # the old "hy-mt" pattern in hunyuan.yaml, for all sizes incl. the
+    # 30B-A3B MoE. Official sampling is top_p 1.0 / top_k off / rep 1.0.
+    for fname in ("Hy-MT2-30B-A3B-Q4_K_M.gguf", "Hy-MT2-7B-UD-Q8_K_XL.gguf"):
+        mt2 = match_profile(fname, profiles, "hy_v3")
+        assert "Hy-MT2" in mt2.display_name, fname
+        assert mt2.sampling["chat"]["top_p"] == 1.0, fname
+        assert mt2.sampling["chat"]["repeat_penalty"] == 1.0, fname
+
+    # arch_fallback: a hy_v3 re-quant without a matching filename must still
+    # land on the Hy-MT2 profile (not hunyuan-dense, not _default).
+    requant = match_profile("some-translation-requant.gguf", profiles, "hy_v3")
+    assert "Hy-MT2" in requant.display_name
+
+
+def test_agents_a1_profile() -> None:
+    """Agents-A1 (Qwen3.5-35B-A3B based) gets its own profile via filename
+    pattern; generic qwen35moe re-quants must still land on qwen3_5-3_6."""
+    profiles = load_profiles(SETTINGS_DIR)
+
+    a1 = match_profile("Agents-A1-Q4_K_M.gguf", profiles, "qwen35moe")
+    assert "Agents-A1" in a1.display_name
+    # official card sampling: temp 0.85 / top_p 0.95 / top_k 20
+    assert a1.sampling["chat"]["temperature"] == 0.85
+    assert a1.sampling["chat"]["top_p"] == 0.95
+    # must NOT claim the shared qwen35moe arch (would hijack generic
+    # Qwen3.5 re-quants from qwen3_5-3_6.yaml — same rule as ornith.yaml)
+    assert "qwen35moe" not in a1.arch_fallback
+    assert "qwen35" not in a1.arch_fallback
+
+    generic = match_profile("random-qwen-requant.gguf", profiles, "qwen35moe")
+    assert "Qwen3.5" in generic.display_name
 
 
 def test_ling_2_0_mainline_vs_2_6_fork() -> None:

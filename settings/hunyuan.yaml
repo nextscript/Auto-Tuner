@@ -9,6 +9,9 @@ patterns:
 # -> eigenes hunyuan-moe.yaml). Früher stand hier das breite Pattern
 # "hunyuan", das fälschlich auch A13B-MoE mit den Übersetzer-Settings
 # (top_p 0.6) gefangen hätte.
+# HINWEIS: Die NEUE Hy-MT2-Generation (Mai 2026: 1.8B/7B/30B-A3B, Arch
+# "hy_v3", top_p 1.0) hat ein eigenes hy-mt2.yaml — dessen Pattern
+# "hy-mt2" ist länger als das "hy-mt" hier und gewinnt daher im Matcher.
 arch_fallback:
   - hunyuan-dense
   - hunyuan_dense

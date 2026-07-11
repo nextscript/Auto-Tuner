@@ -1,0 +1,95 @@
+display_name: "Agents-A1 (InternScience, agentic)"
+patterns:
+  - agents-a1
+  - agents_a1
+
+# KEIN arch_fallback. Agents-A1 ist KEINE eigene Architektur — die GGUFs
+# laden unter general.architecture "qwen35moe" (Basis: Qwen3.5-35B-A3B,
+# Hybrid: GatedDeltaNet + Full-Attention, jede 4. Schicht Full-Attention,
+# 40 Layer). Würde dieses Profil "qwen35moe" als arch_fallback beanspruchen,
+# kollidierte es mit qwen3_5-3_6.yaml (Ladereihenfolge alphabetisch:
+# "agents-a1" < "qwen3_5-3_6" → Agents-A1 würde generische
+# Qwen3.5-MoE-Re-Quants kapern). Daher bewusst nur Filename-Match; die
+# GGUFs tragen immer "Agents-A1" im Namen (InternScience/Agents-A1-*,
+# LordNeel/…, SC117/…). Gleiche Begründung wie bei ornith.yaml.
+#
+# Der Grund für ein eigenes Profil trotz identischer Arch: abweichendes
+# offizielles Sampling (temp 0.85 statt Qwen3.5-Chat temp 1.0).
+
+# Agents-A1 (InternScience, 2026, Apache 2.0): 35B-A3B-MoE-Agentenmodell auf
+# Qwen3.5-Basis, trainiert via SFT + Domain-Teacher + Multi-Teacher-Distill
+# für Long-horizon Search, Engineering, Scientific Research, Instruction
+# Following und Tool-Calling. Reasoning über <think>-Blöcke (Qwen3-Parser).
+# Native 262144 (256k) Kontext — wird via GGUF-Metadata gecappt.
+max_context: 262144
+# q5_0: wie bei Qwen3.5-A3B-MoE der Sweet-Spot — mehr VRAM bleibt für
+# Expert-Layer übrig (siehe Begründung in qwen3_5-3_6.yaml).
+recommended_kv_quant: q5_0
+
+# RoPE-Scaling (YaRN): gleiche Qwen3.5-Basis, gleiche Erweiterbarkeit.
+rope_scale:
+  enabled: false        # Standard aus — User kann in GUI aktivieren
+  max_context: 1010000  # ~1M tokens mit YaRN (Qwen3.5-Basis)
+  scale_factor: 4.0     # YaRN scaling factor (4x, wie Qwen3.5/3.6)
+
+# MoE → möglichst viele Expert-Layer im VRAM halten, Rest via --n-cpu-moe.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# Offizielle Empfehlung (HF-Modell-Card):
+#   temperature=0.85, top_p=0.95, top_k=20, min_p=0.0,
+#   presence_penalty=1.1, repetition_penalty=1.0
+sampling:
+  chat:
+    temperature: 0.85
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    # Offiziell empfiehlt InternScience presence_penalty=1.1. Wie beim
+    # Qwen3.5-Profil dokumentiert ist presence_penalty beim Tool-Calling
+    # eine bekannte Loop-Quelle (identische JSON-Keys/Tool-Namen in jedem
+    # Call werden bestraft → kaputtes JSON → Schleife) — und Agents-A1 ist
+    # explizit ein Tool-Calling-Agent. Default daher konservativ 0.0; für
+    # reine Chat-Nutzung ohne Tools beim Start überschreiben:
+    #   -- --presence-penalty 1.1
+    presence_penalty: 0.0
+  coding:
+    # Keine separate offizielle Coding-Empfehlung; wie beim Qwen3.5-Profil
+    # (QwenClawBench-Setup der Basis) temp=0.6 für agentische Coding-Tasks.
+    temperature: 0.6
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+# MTP / speculative decoding. Werte wie Qwen3.5/3.6: draft_max=2 ist der
+# Vulkan/ROCm-Sweet-Spot, p_min=0.75 mainline-Default. Hinweis: es gibt
+# Community-Quants MIT MTP-Head (z.B. SC117/Agents-A1-MTP-APEX-GGUF) —
+# wer so einen nutzt und ngram parallel zu draft-mtp fahren will, muss
+# ngram_method im Expert-Panel auf ngram-map-k4v stellen (ngram-mod
+# kollidiert mit draft-mtp, llama.cpp #23154).
+draft_max: 2
+draft_p_min: 0.75
+
+notes: >
+  Agents-A1 (InternScience, 2026, Apache 2.0) — 35B-A3B-MoE-Agentenmodell,
+  post-trained auf Qwen3.5-35B-A3B (GGUF-Arch "qwen35moe", Hybrid
+  GatedDeltaNet + Full-Attention; der Scanner zählt den KV-Cache korrekt
+  über recurrent_layers). Dieses Profil greift nur per Filename-Pattern
+  ("agents-a1"); Re-Quants ohne den Namen landen korrekt beim
+  qwen3_5-3_6-arch_fallback. Nativer 256k-Kontext (YaRN bis ~1M).
+  Sampling = offizielle Card-Werte temp=0.85 / top_p=0.95 / top_k=20 /
+  rep=1.0; presence_penalty steht auf 0.0 statt der offiziellen 1.1, weil
+  presence_penalty beim Tool-Calling reproduzierbar Schleifen erzeugt
+  (siehe qwen3_5-3_6.yaml) — für reinen Chat: -- --presence-penalty 1.1.
+  Reasoning-Modell (<think>-Blöcke, Qwen3-Parser) mit nativem
+  Function-Calling. Tipp: `--jinja` beim Start trennt <think> sauber ins
+  reasoning_content-Feld und parst <tool_call>-Blöcke als OpenAI-style
+  tool_calls:
+    -- --jinja
+  ACHTUNG beim Download: InternScience/Agents-A1 selbst ist Safetensors —
+  für den Tuner die GGUF-Repos nehmen (z.B. InternScience/Agents-A1-Q4_K_M-GGUF
+  oder LordNeel/Agents-A1-GGUF); aktuelle llama.cpp-Mainline mit
+  qwen35moe-Support nötig (b9963 ok).

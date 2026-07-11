@@ -1,0 +1,79 @@
+display_name: "Hy-MT2 (Tencent, Übersetzung, hy_v3)"
+patterns:
+  # Länger als das "hy-mt"-Pattern in hunyuan.yaml — der Matcher nimmt das
+  # längste Pattern, daher gewinnt dieses Profil für alle Hy-MT2-Dateien
+  # (Hy-MT2-1.8B / -7B / -30B-A3B), während altes Hunyuan-MT-7B
+  # ("hunyuan-mt...") weiter bei hunyuan.yaml landet.
+  - hy-mt2
+  - hy_mt2
+  - hymt2
+
+# Architektur-Fallback: die neue Hy-MT2-Generation (Mai 2026) lädt unter
+# general.architecture "hy_v3" — NICHT "hunyuan-dense" (alte MT-Reihe,
+# hunyuan.yaml) und NICHT "hunyuan_moe" (A13B-Chat, hunyuan-moe.yaml).
+arch_fallback:
+  - hy_v3
+  - hy-v3
+
+# Hy-MT2 (Tencent Hunyuan, Mai 2026): "fast-thinking" Übersetzungs-Familie
+# mit 33 Sprachen, drei Größen: 1.8B (dense), 7B (dense), 30B-A3B (MoE,
+# 30B total / 3B aktiv). Kontext des 30B-A3B: 131072 (GGUF-Karten empfehlen
+# -c 131072). Kleinere Varianten werden via GGUF-Metadata automatisch
+# gecappt — daher hier der größte Wert der Familie.
+max_context: 131072
+# q8_0: Übersetzungs-Sessions brauchen selten riesigen Kontext, und das
+# 30B-A3B passt als Q4_K_M (~18 GB) komplett in 32 GB VRAM — Qualität vor
+# KV-Ersparnis.
+recommended_kv_quant: q8_0
+
+# 30B-A3B ist MoE → is_moe über expert_count>1; Tuner verteilt Experten
+# GPU/CPU (--n-cpu-moe). throughput hält das KV-Budget klein — für
+# Übersetzung völlig ausreichend. Für die dichten 1.8B/7B ist die Wahl
+# weitgehend folgenlos.
+performance_target: throughput
+
+# Sampling-Profile pro Modus.
+# Offizielle Tencent-Empfehlung für Hy-MT2 (HF-Card, alle Größen):
+#   temperature=0.7, top_p=1.0, top_k=-1 (aus), repetition_penalty=1.0
+# — bewusst ANDERS als das alte Hunyuan-MT-Profil (top_p 0.6, rep 1.05)!
+sampling:
+  chat:
+    temperature: 0.7
+    top_k: 0          # 0 = deaktiviert in llama.cpp (entspricht vLLM top_k=-1)
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    # "Literal / deterministisch" für reproduzierbare Fachübersetzungen —
+    # das GGUF-Repo-Beispiel übersetzt selbst mit temperature 0 (greedy).
+    temperature: 0.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  # Jinja-Chat-Template (Instruktions-Prompt "Translate the following text
+  # into {target_lang}...") sauber über das eingebettete Template rendern.
+  - --jinja
+
+# Kein integrierter MTP-Head. Draftless ngram-mod (Default), draft_max als
+# Vulkan-Grenze wie bei allen MoE-A*B-Profilen.
+draft_max: 2
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Tencent Hy-MT2 (Mai 2026) — "fast-thinking" Übersetzungs-Familie
+  (33 Sprachen): 1.8B / 7B dense, 30B-A3B MoE (30B total / 3B aktiv).
+  Architektur ist NEU: general.architecture "hy_v3" — nicht kompatibel mit
+  dem alten Hunyuan-MT-Profil (hunyuan-dense) oder A13B (hunyuan_moe).
+  ACHTUNG: llama.cpp-Build muss hy_v3 unterstützen — ältere Builds brechen
+  mit "unknown model architecture: 'hy_v3'" ab; ggf. auf aktuelle Mainline
+  (>= b9963 prüfen) updaten. Sampling = offizielle Tencent-Werte
+  temp=0.7 / top_p=1.0 / top_k aus / rep=1.0 — bewusst abweichend vom alten
+  Hunyuan-MT (top_p 0.6). Coding-Modus = greedy (temp 0) für reproduzierbare,
+  literale Übersetzungen. Reines Übersetzungsmodell, kein Chat-/Coding-LLM.
+  Hinweis aus dem GGUF-Repo (litigerking): bei llama-cli ggf.
+  -r '<eos:6124c78e>' als Reverse-Prompt für sauberes EOS-Handling —
+  für den llama-server-Pfad des Tuners nicht nötig.
