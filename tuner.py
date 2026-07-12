@@ -823,6 +823,12 @@ class TunedConfig:
     rope_scaling: bool = False
     rope_scale_factor: float = 1.0  # z.B. 4.0 für yarn mit 4x scaling
 
+    # Expert-panel override for --spec-draft-n-max (max draft tokens per
+    # speculative step). 0 = no override → the YAML profile's draft_max
+    # decides (its own fallback is 2). Only takes effect when a
+    # speculative path is active (external -md drafter or integrated MTP).
+    draft_n_max: int = 0
+
     # Optional CLI extras the GUI's Expert mode injects. Examples:
     # "--jinja", "--verbose". Built-in defaults stay empty so the
     # auto-mode behaviour is unchanged.
@@ -3186,7 +3192,13 @@ def build_command(
     #     no second model-load conflict on any build. Vision and embedded MTP
     #     can coexist; Qwen3.6-MTP models in fact require the mmproj.
     #   - n-gram (Path C) loads no model at all → always compatible.
-    draft_val = getattr(profile, "draft_max", 0) or 2
+    # Precedence for --spec-draft-n-max: Expert-panel override (config,
+    # 0 = unset) → YAML profile draft_max → 2.
+    draft_val = (
+        int(getattr(config, "draft_n_max", 0) or 0)
+        or getattr(profile, "draft_max", 0)
+        or 2
+    )
     draft_p_min = getattr(profile, "draft_p_min", 0.75) or 0.75
     vision_loaded = model.mmproj is not None
     # Path A gating with vision: allow -md alongside --mmproj only when the

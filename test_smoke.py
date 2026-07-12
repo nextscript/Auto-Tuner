@@ -846,6 +846,35 @@ def test_ngram_map_k4v_coexists_with_mtp(tmp_path) -> None:
     assert "--spec-ngram-mod-n-match" not in cmd
 
 
+def test_draft_n_max_override_wins(tmp_path) -> None:
+    """Expert-panel draft_n_max (config) overrides the profile's draft_max.
+
+    0 = unset → profile value; >0 → the override is emitted verbatim as
+    --spec-draft-n-max on the active speculative path (here: embedded MTP).
+    """
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Qwen3.6-MoE-A3B", size_gb=8.0)
+    model.metadata = {
+        "general.architecture": "qwen3moe",
+        "qwen3moe.nextn_predict_layers": 1,
+        "qwen3moe.block_count": 48,
+        "__mtp_scan__": "found",
+    }
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+
+    # Default: 0 = kein Override → Profilwert (draft_max) landet im Flag.
+    cmd = build_command(model, cfg, profile)
+    idx = cmd.index("--spec-draft-n-max")
+    assert cmd[idx + 1] == str(profile.draft_max or 2)
+
+    # Override gesetzt → gewinnt über das Profil.
+    cfg.draft_n_max = 5
+    cmd = build_command(model, cfg, profile)
+    idx = cmd.index("--spec-draft-n-max")
+    assert cmd[idx + 1] == "5"
+
+
 def test_ngram_map_k_emits_type_only(tmp_path) -> None:
     """ngram-map-k / ngram-simple / ngram-cache: emit only the --spec-type
     token and rely on llama.cpp defaults (no guessed sub-param flags)."""
@@ -3763,6 +3792,7 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
         "reasoning": "off",
         "think_budget": 100,
         "extras": "--jinja",
+        "draft_n_max": 5,  # must be APPLIED
     }
     out = apply_expert_values(base, vals)
     # Cascading untouched
@@ -3781,6 +3811,7 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
     assert out.sampling["top_k"] == 7
     assert "--jinja" in out.extra_cli_flags
     assert "--reasoning" in out.extra_cli_flags  # from reasoning=off
+    assert out.draft_n_max == 5
 
 
 def test_expert_cfg_from_values_is_frozen_manual(tmp_path) -> None:

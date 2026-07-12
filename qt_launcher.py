@@ -1620,6 +1620,12 @@ def apply_expert_values(cfg: TunedConfig, vals: dict) -> TunedConfig:
         cfg.numa = None if numa_choice == "off" else numa_choice
         cfg.sampling = _expert_sampling_from_values(vals)
         cfg.extra_cli_flags = _expert_extras_from_values(vals)
+        try:
+            cfg.draft_n_max = max(
+                0, int(vals.get("draft_n_max", getattr(cfg, "draft_n_max", 0)) or 0)
+            )
+        except (TypeError, ValueError):
+            cfg.draft_n_max = 0
         cfg.metrics_enabled = bool(
             vals.get("metrics_enabled", getattr(cfg, "metrics_enabled", True))
         )
@@ -2096,6 +2102,22 @@ class ExpertPanel(QWidget):
         self._sp_presence.setDecimals(2)
         _add("presence_penalty", self._sp_presence, "--presence-penalty")
 
+        # Speculative decoding — non-cascading override; only takes effect
+        # when a draft path is active (external -md or embedded MTP).
+        _section("Speculative decoding")
+        self._sp_draft_n_max = QSpinBox()
+        self._sp_draft_n_max.setRange(0, 64)
+        self._sp_draft_n_max.setSpecialValueText("Profil (auto)")
+        _add(
+            "draft n-max",
+            self._sp_draft_n_max,
+            "--spec-draft-n-max N — maximale Draft-Tokens pro Speculative-\n"
+            "Schritt. 0 = Profil (auto): der draft_max-Wert aus dem YAML-\n"
+            "Profil gilt (Fallback 2). Wirkt nur, wenn ein Draft-Pfad aktiv\n"
+            "ist (externer -md-Drafter oder eingebettetes MTP). Auf Vulkan/\n"
+            "AMD sind Werte >2–3 oft langsamer statt schneller.",
+        )
+
         # Reasoning controls (llama-server b9118 era).
         # The five settings here cover three different mechanisms the
         # server understands, all wired to the same dropdown to keep the
@@ -2159,7 +2181,7 @@ class ExpertPanel(QWidget):
             self._sp_batch_threads, self._sp_batch, self._sp_ubatch,
             self._sp_rope_factor, self._sp_temp, self._sp_top_k, self._sp_top_p,
             self._sp_min_p, self._sp_rep, self._sp_presence, self._sp_think_budget,
-            self._sp_parallel,
+            self._sp_parallel, self._sp_draft_n_max,
         ):
             sp.valueChanged.connect(self._schedule_save)
         for cb in (
@@ -2299,6 +2321,9 @@ class ExpertPanel(QWidget):
             self._sp_min_p.setValue(float(s.get("min_p", 0.05)))
             self._sp_rep.setValue(float(s.get("repeat_penalty", 1.05)))
             self._sp_presence.setValue(float(s.get("presence_penalty", 0.0)))
+
+            # Speculative decoding (0 = Profil-Default, kein Override)
+            self._sp_draft_n_max.setValue(int(getattr(cfg, "draft_n_max", 0) or 0))
 
             # Reasoning + think-budget: parse them out of extra_cli_flags
             # so the dedicated dropdowns show the right state and the
@@ -2441,17 +2466,27 @@ class ExpertPanel(QWidget):
 
         self._recompute(force_overrides=dict(self._user_pins))
 
-    def _recompute(self, force_overrides: dict) -> None:
-        """Ask the parent to rebuild the config with these overrides."""
+    def _recompute(
+        self, force_overrides: dict, *, overlay_widgets: bool = True
+    ) -> None:
+        """Ask the parent to rebuild the config with these overrides.
+
+        ``overlay_widgets`` re-stamps the live non-cascading widget values
+        (threads / batch / flags / sampling / reasoning / extras / draft
+        n-max) onto the cascaded result so user edits survive a rebuild.
+        Reset passes ``False`` — there the whole point is to DROP those
+        edits and repaint every widget from the pure Auto config.
+        """
         if self._recompute_cb is None:
             return
         cfg = self._recompute_cb(force_overrides)
         if cfg is None:
             return
-        # Apply the live (non-cascading) widget values on top of the
-        # cascaded result so the user's batch/thread/flag/sampling edits
-        # survive the rebuild.
-        cfg = self._apply_noncascading(cfg)
+        if overlay_widgets:
+            # Apply the live (non-cascading) widget values on top of the
+            # cascaded result so the user's batch/thread/flag/sampling edits
+            # survive the rebuild.
+            cfg = self._apply_noncascading(cfg)
         self._populate_from_cfg(cfg)
         self.configChanged.emit(cfg)
 
@@ -2544,6 +2579,7 @@ class ExpertPanel(QWidget):
             "think_budget": self._sp_think_budget.value(),
             "parallel_enabled": self._chk_parallel.isChecked(),
             "parallel_count": self._sp_parallel.value(),
+            "draft_n_max": self._sp_draft_n_max.value(),
             "extras": self._le_extra.text().strip(),
         }
 
@@ -2660,7 +2696,12 @@ class ExpertPanel(QWidget):
             self._populating = False
         # _recompute runs with empty pins → pure Auto; its internal
         # _populate_from_cfg is guarded, so no save fires.
-        self._recompute(force_overrides={})
+        # overlay_widgets=False: without it the stale non-cascading widget
+        # values (threads / batch / flags / sampling / reasoning / extras /
+        # draft n-max) were stamped straight back onto the fresh Auto config,
+        # so Reset only ever reset the cascading fields — the "Reset doesn't
+        # reset everything" bug.
+        self._recompute(force_overrides={}, overlay_widgets=False)
 
 
 # ---------------------------------------------------------------------------

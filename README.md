@@ -722,7 +722,7 @@ The following `llama-server` features are supported (verified against `llama-ser
 | `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (default). Suppressed on MTP models because `draft-mtp,ngram-mod` crashes mid-generation (#23154, still open as of b9442) |
 | `--spec-type ngram-map-k4v` (draftless) | ✅ The MTP-**compatible** ngram method from ggerganov's MTP cleanup (PR #23269). Via `ngram_method: ngram-map-k4v` it runs together with `draft-mtp` → this is how you combine "MTP + ngram" |
 | `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Selectable via `ngram_method`; only the type token is emitted, sub-parameters are left to the llama.cpp defaults |
-| `--spec-draft-n-max` | ✅ Via `draft_max` in the YAML profile |
+| `--spec-draft-n-max` | ✅ Via `draft_max` in the YAML profile; overridable per model in the Expert panel ("Speculative decoding" → draft n-max, 0 = profile default) since v4.9.6 |
 | `--spec-draft-p-min` | ✅ Via `draft_p_min` in the YAML profile — the mainline default has been **0.0** since PR #23269; AutoTuner still emits an explicit **0.75** in **both** spec paths (external + integrated) so MTP only fires on confident steps |
 | `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ Via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` in the YAML (defaults 16/24/1 from PR #23269) |
 | `--spec-draft-ngl` | ✅ Always 99 (keep the MTP head on GPU) |
