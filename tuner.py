@@ -87,6 +87,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--cache-ram",
     "--cache-type-k",
     "--cache-type-v",
+    "--chat-template-kwargs",
     "--ctx-size",
     "--diffusion-algorithm",
     "--diffusion-block-length",
@@ -109,6 +110,8 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--predict",
     "--presence-penalty",
     "--prompt",
+    "--reasoning-budget",
+    "--reasoning-budget-message",
     "--repeat-penalty",
     "--rope-scale",
     "--rope-scaling",
@@ -285,6 +288,51 @@ def _probe_supported_flags(binary: str) -> Optional[Set[str]]:
     except OSError:
         return None
     return set(probed) if probed is not None else None
+
+
+_MIN_VISION_PROMPT_CACHE_BUILD = 10045
+
+
+def _parse_llama_build_number(version_output: str) -> Optional[int]:
+    """Parse ``version: 10056 (...)`` output without matching compiler IDs."""
+    match = re.search(r"(?im)^\s*version:\s*b?(\d+)\b", version_output or "")
+    return int(match.group(1)) if match else None
+
+
+@lru_cache(maxsize=32)
+def _probe_build_number_cached(
+    binary_path: str, mtime_ns: int, size: int
+) -> Optional[int]:
+    """Return the numeric llama.cpp build reported by ``--version``."""
+    del mtime_ns, size  # cache key only; values are intentionally unused
+    kwargs: Dict[str, Any] = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        cp = subprocess.run(
+            [binary_path, "--version"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=6,
+            errors="replace",
+            **kwargs,
+        )
+    except (FileNotFoundError, PermissionError, OSError, subprocess.TimeoutExpired):
+        return None
+    return _parse_llama_build_number(cp.stdout or "")
+
+
+def _probe_binary_build_number(binary: str) -> Optional[int]:
+    """Best-effort llama.cpp build number, or ``None`` when unprobeable."""
+    resolved = _resolve_probe_binary(binary)
+    if not resolved:
+        return None
+    try:
+        st = Path(resolved).stat()
+        return _probe_build_number_cached(resolved, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
 
 
 def _memlock_limit_gb() -> Optional[float]:
@@ -2797,8 +2845,8 @@ def build_diffusion_command(
         str(config.ubatch),
     ]
 
-    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
-    # is set. Emit it explicitly so the terminal shows prompt/eval timings
+    # Performance timings are enabled by default in current llama.cpp.
+    # Assert --perf explicitly so fork defaults cannot hide prompt/eval timing
     # and tokens/s for single-shot diffusion runs.
     cmd.append("--perf")
 
@@ -2944,9 +2992,9 @@ def build_diffusion_server_command(
         str(config.ubatch),
     ]
 
-    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
-    # is set. Emit it explicitly so the terminal keeps printing throughput
-    # details (tokens/s) for DiffusionGemma's persistent server too.
+    # Performance timings are enabled by default in current llama.cpp.
+    # Assert --perf explicitly so fork defaults cannot hide throughput details
+    # (tokens/s) for DiffusionGemma's persistent server.
     cmd.append("--perf")
 
     # ---- multi-GPU placement (mirror build_command) ------------------
@@ -3105,13 +3153,12 @@ def build_command(
     cmd += ["--fit", "off"]
 
     # ---- Performance timings + optional diagnostics endpoints ----------
-    # llama.cpp b9888 keeps libllama performance timings OFF unless --perf
-    # is set. Emit it explicitly so terminal logs include prompt/eval timing
-    # and tokens/s again. Users can still append --no-perf if they want a
-    # quieter server. --metrics exposes GET /metrics on the SAME host:port
-    # as the inference API (no separate port) for live tokens/s and KV fill.
-    # --slots enables GET /slots on builds that gate the endpoint behind an
-    # explicit flag; the GUI can poll it for per-slot busy/idle state.
+    # Performance timings are enabled by default in current llama.cpp.
+    # Assert --perf explicitly so fork defaults cannot hide prompt/eval timing
+    # and tokens/s. Users can still append --no-perf for a quieter server.
+    # --metrics exposes GET /metrics on the SAME host:port as inference.
+    # Current mainline defaults /slots ON, so emit the positive or negative
+    # flag explicitly to make the Expert toggle authoritative.
     cmd.append("--perf")
     metrics_on = (
         bool(getattr(config, "metrics_enabled", True))
@@ -3125,40 +3172,29 @@ def build_command(
     )
     if metrics_on:
         cmd.append("--metrics")
-    if slots_on:
-        cmd.append("--slots")
+    cmd.append("--slots" if slots_on else "--no-slots")
 
     # ---- Host-memory prompt caching (-cram / --cache-ram) -------------
-    # ggerganov's PR #16391 (merged; rel #16117) added automatic prompt
-    # caching to host RAM: computed prompt prefixes are stored in regular
-    # system RAM and hot-swapped back into the llama_context when a new
-    # request shares a long prefix (system prompt, RAG scaffold, the whole
-    # previous turn of a chat). This collapses time-to-first-token on
-    # repeated/similar prompts — exactly the Claude-Code / Roo-Code pattern
-    # where every request re-sends a 20-40k-token system+tools preamble.
+    # ggerganov's PR #16391 added a host-RAM cache for computed prompt
+    # prefixes. Repeated system prompts / RAG scaffolds can then skip most
+    # prefill work. -1 means unlimited, 0 disables, positive values are MiB.
     #
-    # CLI surface (confirmed b9334+, unchanged in b9409):
-    #     --cache-ram N    (-cram N)   N MiB of host RAM for the prompt cache
-    #     -cram -1                      no limit (use whatever RAM is free)
-    #     -cram 0                       DISABLE prompt caching in RAM
-    # The token-count ceiling defaults to the context size; only the byte
-    # cap is exposed here.
-    #
-    # HARD INCOMPATIBILITY: the feature is incompatible with mtmd (the
-    # multimodal/vision path). PR #16391 states server_tokens is not
-    # copyable under mtmd, so the cache logic is disabled there. If we sent
-    # a positive -cram alongside --mmproj the server either ignores it or
-    # (worse, on some builds) refuses to reuse and logs noise every request.
-    # So whenever vision is active we force -cram 0 regardless of the user
-    # toggle, and otherwise honour enable_prompt_cache.
+    # Older builds cannot safely combine this cache with mtmd. Mainline b10045
+    # (PR #25076) lifted the blanket mtmd state restriction, and b10058 was
+    # runtime-verified with Gemma 4 + an actual image: the repeated request
+    # reported cached_tokens=279 and completed ~10x faster. Keep old forks safe
+    # by requiring a numeric --version build at or above b10045; an unknown
+    # version conservatively retains the historic --cache-ram 0 behaviour.
     vision_active = model.mmproj is not None
+    vision_cache_ok = not vision_active
     if vision_active:
-        # Vision graph loaded → caching unsupported; pin it off explicitly
-        # so the default ("on") cannot silently allocate an unused buffer.
-        cmd += ["--cache-ram", "0"]
-    elif enable_prompt_cache:
-        # -1 == "no byte limit"; any positive value is a MiB cap. We pass the
-        # profile/GUI value through verbatim (default -1 = unlimited).
+        build_number = _probe_binary_build_number(server_binary)
+        vision_cache_ok = bool(
+            build_number is not None
+            and build_number >= _MIN_VISION_PROMPT_CACHE_BUILD
+        )
+
+    if enable_prompt_cache and vision_cache_ok:
         cmd += ["--cache-ram", str(int(prompt_cache_ram_mib))]
     else:
         cmd += ["--cache-ram", "0"]

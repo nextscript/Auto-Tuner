@@ -60,7 +60,7 @@ sampling:
 #   Auf CUDA/high-end Hardware kann 3 minimal besser sein — dann via
 #   Expert-Panel überschreiben.
 # draft_p_min = minimum confidence threshold for speculation.
-#   0.75 = mainline default (b9190+). NICHT 0.0 setzen: das erzwingt
+#   AutoTuner setzt bewusst 0.75 (Mainline-Default ist 0.0). 0.0 erzwingt
 #   Spekulation bei jedem Schritt unabhängig von Confidence → konstanter
 #   D2H-Transfer-Overhead auf Vulkan → schlechter als ohne Spekulation.
 draft_max: 2

@@ -427,10 +427,55 @@ def test_build_command_metrics_and_slots_toggles(tmp_path) -> None:
     cfg = compute_config(model, _fake_system(), profile)
 
     cfg.metrics_enabled = False
+    cfg.slots_api_enabled = False
+    cmd_off = build_command(model, cfg, profile)
+    assert "--metrics" not in cmd_off
+    assert "--no-slots" in cmd_off
+    assert "--slots" not in cmd_off
+
     cfg.slots_api_enabled = True
-    cmd = build_command(model, cfg, profile)
-    assert "--metrics" not in cmd
-    assert "--slots" in cmd
+    cmd_on = build_command(model, cfg, profile)
+    assert "--slots" in cmd_on
+    assert "--no-slots" not in cmd_on
+
+
+def test_parse_llama_build_number_ignores_compiler_versions() -> None:
+    from tuner import _parse_llama_build_number
+
+    assert _parse_llama_build_number("version: 10058 (788e07dc9)\nbuilt with MSVC 19.51") == 10058
+    assert _parse_llama_build_number("  version: b10056 (b85833e)\n") == 10056
+    assert _parse_llama_build_number("built with MSVC 19.51") is None
+
+
+def test_vision_prompt_cache_is_build_gated(tmp_path, monkeypatch) -> None:
+    import tuner
+
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "gemma-4-12b-it-qat-q4_0", size_gb=6.5)
+    mmproj = tmp_path / "mmproj-gemma-4-12b-it-qat-q4_0.gguf"
+    _write_minimal_gguf(mmproj)
+    model.mmproj = mmproj
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile)
+
+    monkeypatch.setattr(tuner, "_probe_binary_build_number", lambda _binary: None)
+    unknown_cmd = build_command(model, cfg, profile, enable_prompt_cache=True)
+    unknown_idx = unknown_cmd.index("--cache-ram")
+    assert unknown_cmd[unknown_idx + 1] == "0"
+
+    monkeypatch.setattr(tuner, "_probe_binary_build_number", lambda _binary: 10044)
+    old_cmd = build_command(model, cfg, profile, enable_prompt_cache=True)
+    old_idx = old_cmd.index("--cache-ram")
+    assert old_cmd[old_idx + 1] == "0"
+
+    monkeypatch.setattr(tuner, "_probe_binary_build_number", lambda _binary: 10045)
+    current_cmd = build_command(model, cfg, profile, enable_prompt_cache=True)
+    current_idx = current_cmd.index("--cache-ram")
+    assert current_cmd[current_idx + 1] == "-1"
+
+    disabled_cmd = build_command(model, cfg, profile, enable_prompt_cache=False)
+    disabled_idx = disabled_cmd.index("--cache-ram")
+    assert disabled_cmd[disabled_idx + 1] == "0"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shell-script fake binary")
@@ -3744,6 +3789,7 @@ def test_expert_extras_assembles_all_flag_sources() -> None:
         "verbose": True,
         "reasoning": "medium",
         "think_budget": 512,
+        "reasoning_preserve": True,
         "extras": "--some-flag value",
     }
     out = _expert_extras_from_values(vals)
@@ -3752,7 +3798,11 @@ def test_expert_extras_assembles_all_flag_sources() -> None:
     assert "--chat-template-kwargs" in out
     assert '{"reasoning_effort":"medium"}' in out
     assert "--reasoning-budget" in out and "512" in out
+    assert "--reasoning-preserve" in out
     assert "--some-flag" in out and "value" in out
+
+    vals["reasoning_preserve"] = False
+    assert "--reasoning-preserve" not in _expert_extras_from_values(vals)
 
 
 def _base_cfg(tmp_path) -> TunedConfig:
@@ -3791,6 +3841,7 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
         "top_k": 7,
         "reasoning": "off",
         "think_budget": 100,
+        "reasoning_preserve": True,
         "extras": "--jinja",
         "draft_n_max": 5,  # must be APPLIED
     }
@@ -3811,6 +3862,7 @@ def test_apply_expert_values_only_overlays_noncascading(tmp_path) -> None:
     assert out.sampling["top_k"] == 7
     assert "--jinja" in out.extra_cli_flags
     assert "--reasoning" in out.extra_cli_flags  # from reasoning=off
+    assert "--reasoning-preserve" in out.extra_cli_flags
     assert out.draft_n_max == 5
 
 

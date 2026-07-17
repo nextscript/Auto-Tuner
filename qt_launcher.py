@@ -113,6 +113,83 @@ def _bundled_resource(*parts: str) -> Path:
     return Path(__file__).resolve().parent.joinpath(*parts)
 
 
+_NATIVE_ICON_HANDLES: List[Tuple[int, int, int]] = []
+
+
+def _set_windows_native_window_icon(window: QMainWindow, ico_path: Path) -> None:
+    """Set HWND icons explicitly; Qt 6 can leave WM_GETICON empty when frozen."""
+    if os.name != "nt" or not ico_path.is_file():
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+
+        hwnd = ctypes.c_void_p(int(window.winId()))
+        image_icon = 1
+        lr_load_from_file = 0x0010
+        wm_seticon = 0x0080
+        for icon_kind, size in ((1, 32), (0, 16)):
+            handle = user32.LoadImageW(
+                None,
+                str(ico_path),
+                image_icon,
+                size,
+                size,
+                lr_load_from_file,
+            )
+            if handle:
+                user32.SendMessageW(hwnd, wm_seticon, icon_kind, handle)
+                _NATIVE_ICON_HANDLES.append(
+                    (int(hwnd.value or 0), icon_kind, int(handle))
+                )
+    except Exception:
+        pass
+
+
+def _release_windows_native_icons() -> None:
+    if os.name != "nt" or not _NATIVE_ICON_HANDLES:
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        user32.SendMessageW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+        ]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        user32.DestroyIcon.argtypes = [ctypes.c_void_p]
+        user32.DestroyIcon.restype = ctypes.c_int
+        for hwnd, icon_kind, handle in _NATIVE_ICON_HANDLES:
+            user32.SendMessageW(
+                ctypes.c_void_p(hwnd), 0x0080, icon_kind, ctypes.c_void_p()
+            )
+            user32.DestroyIcon(ctypes.c_void_p(handle))
+    except Exception:
+        pass
+    finally:
+        _NATIVE_ICON_HANDLES.clear()
+
+
 def _default_settings_path() -> Path:
     # When frozen (PyInstaller), ``__file__`` resolves into the throw-away
     # ``_MEIPASS`` extraction folder where bundled read-only resources live.
@@ -1536,8 +1613,8 @@ def _clean_model_name(name: str) -> str:
 # batch_threads, batch, ubatch, flash_attn, mlock, no_mmap, jinja,
 # verbose, numa, rope_scaling, rope_factor, temperature, top_k,
 # top_p, min_p, repeat_penalty, presence_penalty, reasoning,
-# think_budget, parallel_enabled, parallel_count, metrics_enabled,
-# slots_api_enabled, extras.
+# think_budget, reasoning_preserve, parallel_enabled, parallel_count,
+# metrics_enabled, slots_api_enabled, extras.
 
 
 def _expert_sampling_from_values(vals: dict) -> dict:
@@ -1588,6 +1665,8 @@ def _expert_extras_from_values(vals: dict) -> List[str]:
     extras.extend(
         _reasoning_flags_from_values(vals.get("reasoning", "auto"), vals.get("think_budget", -1))
     )
+    if vals.get("reasoning_preserve"):
+        extras.append("--reasoning-preserve")
     free = (vals.get("extras") or "").strip()
     if free:
         extras.extend(free.split())
@@ -2155,6 +2234,17 @@ class ExpertPanel(QWidget):
             "thinking phase.",
         )
 
+        self._chk_reasoning_preserve = QCheckBox(
+            "Preserve reasoning history (--reasoning-preserve)"
+        )
+        _add(
+            "",
+            self._chk_reasoning_preserve,
+            "Keep earlier assistant reasoning traces in the conversation "
+            "history when the model's chat template supports it. Off leaves "
+            "the decision to the template.",
+        )
+
         # Extra free-form CLI flags
         _section("Extra CLI flags")
         self._le_extra = QLineEdit()
@@ -2191,7 +2281,7 @@ class ExpertPanel(QWidget):
         for chk in (
             self._chk_fa, self._chk_mlock, self._chk_no_mmap, self._chk_jinja,
             self._chk_verbose, self._chk_metrics, self._chk_slots_api,
-            self._chk_rope, self._chk_parallel,
+            self._chk_reasoning_preserve, self._chk_rope, self._chk_parallel,
         ):
             chk.toggled.connect(self._schedule_save)
         self._le_extra.textChanged.connect(self._schedule_save)
@@ -2306,6 +2396,9 @@ class ExpertPanel(QWidget):
             self._chk_slots_api.setChecked(
                 bool(getattr(cfg, "slots_api_enabled", False)) or "--slots" in extras_in
             )
+            self._chk_reasoning_preserve.setChecked(
+                "--reasoning-preserve" in extras_in
+            )
             self._set_combo(self._cb_numa, cfg.numa or "off")
 
             self._chk_rope.setChecked(cfg.rope_scaling)
@@ -2336,7 +2429,13 @@ class ExpertPanel(QWidget):
 
             # Extra CLI: filter out the flags we already model as
             # checkboxes / dedicated widgets so they don't appear twice.
-            modeled = {"--jinja", "--verbose", "--metrics", "--slots"}
+            modeled = {
+                "--jinja",
+                "--verbose",
+                "--metrics",
+                "--slots",
+                "--reasoning-preserve",
+            }
             free_flags = [f for f in leftover_extras if f not in modeled]
             self._le_extra.setText(" ".join(free_flags))
         finally:
@@ -2577,6 +2676,7 @@ class ExpertPanel(QWidget):
             "presence_penalty": self._sp_presence.value(),
             "reasoning": self._cb_reasoning.currentText(),
             "think_budget": self._sp_think_budget.value(),
+            "reasoning_preserve": self._chk_reasoning_preserve.isChecked(),
             "parallel_enabled": self._chk_parallel.isChecked(),
             "parallel_count": self._sp_parallel.value(),
             "draft_n_max": self._sp_draft_n_max.value(),
@@ -3105,18 +3205,17 @@ class MainWindow(QMainWindow):
             "works on any model. Best for code/text iteration, reasoning models\n"
             "that echo their scratchpad, and summarisation."
         )
-        # Host-memory prompt caching (--cache-ram / -cram). Auto-ON for every
-        # model that supports it (i.e. every NON-vision model — the feature
-        # is incompatible with mtmd). Stays user-toggleable. When a vision
-        # model is selected the box is disabled + unchecked, because
-        # llama-server cannot cache prompts while the multimodal path is live.
+        # Host-memory prompt caching (--cache-ram / -cram). Auto-ON and
+        # user-toggleable. Current mainline (b10045+) can reuse multimodal
+        # prompts too; older or unprobeable builds are kept safe by forcing
+        # --cache-ram 0 when Vision is active.
         self._chk_prompt_cache = QCheckBox("Prompt caching (host RAM, -cram)")
         self._chk_prompt_cache.setToolTip(
             "Cache computed prompt prefixes in system RAM so repeated/similar\n"
             "prompts (long system prompts, RAG scaffolds, Roo-Code preambles)\n"
             "skip re-processing and hit first-token faster.\n"
-            "Auto-enabled where supported; unavailable while Vision is active\n"
-            "(llama-server cannot cache prompts under the multimodal path)."
+            "Vision caching is active with llama.cpp b10045+; older or\n"
+            "unprobeable builds fall back to --cache-ram 0 safely."
         )
         self._chk_thinking = QCheckBox("Thinking / Reasoning")
 
@@ -4772,10 +4871,9 @@ class MainWindow(QMainWindow):
         self._populate_mmproj_combo(entry, ov)
 
         # ── Prompt caching (host RAM, -cram) ────────────────────────
-        # Traditionally, prompt caching was considered incompatible with the
-        # multimodal/mtmd path. We now allow the user to toggle it anyway;
-        # if the specific llama-server build refuses it, the server will
-        # report an error in its terminal window.
+        # Prompt caching is available for every model. build_command enables it
+        # with Vision only on b10045+ and safely emits --cache-ram 0 for older
+        # or unprobeable binaries.
         pc_state = ov["prompt_cache"] if "prompt_cache" in ov else True
         self._chk_prompt_cache.blockSignals(True)
         self._chk_prompt_cache.setEnabled(True)
@@ -4995,9 +5093,8 @@ class MainWindow(QMainWindow):
 
     def _on_vision_toggled(self, checked: bool) -> None:
         self._record_override("vision", checked)
-        # Vision interacts with prompt caching (mtmd is incompatible with
-        # -cram) — re-run the checkbox logic so the prompt-cache box flips
-        # enabled/disabled to match before rebuilding the preview.
+        # Vision changes whether build_command may enable prompt caching on the
+        # selected llama.cpp build, so refresh option state and the preview.
         if self._current_entry is not None:
             self._update_checkboxes(self._current_entry)
         self._refresh_config_preview()
@@ -5035,9 +5132,8 @@ class MainWindow(QMainWindow):
         self._refresh_config_preview()
 
     def _on_prompt_cache_toggled(self, checked: bool) -> None:
-        # Persist the per-model prompt-cache choice. No interlock with other
-        # options (the only constraint — vision incompatibility — is enforced
-        # by disabling the box in _update_checkboxes), so just record + preview.
+        # Persist the per-model prompt-cache choice. build_command applies the
+        # conservative version gate when Vision is active.
         self._record_override("prompt_cache", checked)
         self._refresh_config_preview()
 
@@ -5301,7 +5397,7 @@ class MainWindow(QMainWindow):
 
         lines.append(
             f"Prompt$ : host-RAM cache (-cram)  [{'✓' if use_prompt_cache else '✗'}]"
-            + (" (may conflict with Vision)" if use_vision else "")
+            + (" (Vision requires b10045+)" if use_vision else "")
         )
         if profile.server_binary:
             lines.append(f"Requires: {profile.server_binary}")
@@ -6249,6 +6345,15 @@ class MainWindow(QMainWindow):
                 f"argument(s); removed: {removed}"
             )
 
+        if use_prompt_cache and use_vision and "--cache-ram" in cmd:
+            cache_idx = cmd.index("--cache-ram")
+            if cache_idx + 1 < len(cmd) and cmd[cache_idx + 1] == "0":
+                self._log(
+                    "[Prompt cache] Vision cache disabled: selected llama.cpp "
+                    "build is older than b10045 or its version could not be "
+                    "probed safely."
+                )
+
         # Draft angefordert, aber kein -md im finalen Kommando → laut sagen
         # statt still ohne Drafter zu starten (das war der „Gemma-Drafter
         # geht nicht"-Fall: Vision + alter Build unterdrückte Path A stumm).
@@ -6876,6 +6981,7 @@ class MainWindow(QMainWindow):
             self._stop_all_servers()
 
         self._destroy_tray_icon()
+        _release_windows_native_icons()
         if a0 is not None:
             a0.accept()
 
@@ -6965,8 +7071,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     if not app.windowIcon().isNull():
         window.setWindowIcon(app.windowIcon())
     window.show()
-    # The HWND is stable only after show(); installing the custom Windows
-    # system-menu command earlier can hand GetSystemMenu an unrealized handle.
+    # The HWND is stable only after show(); native icon/system-menu calls made
+    # earlier can target an unrealized handle. WM_SETICON is explicit because
+    # Qt 6 + PyInstaller can otherwise show the icon visually while returning
+    # an empty WM_GETICON handle to Windows shell integrations.
+    _set_windows_native_window_icon(
+        window, _bundled_resource("assets", "AutoTuner.ico")
+    )
     window._install_windows_system_menu()
 
     # ── Ctrl+C / SIGTERM: stop the servers BEFORE the GUI dies ──────────
@@ -7009,4 +7120,3 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-    

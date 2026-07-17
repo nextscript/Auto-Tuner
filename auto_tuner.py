@@ -974,8 +974,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         dest="no_prompt_cache",
         help="Disable host-memory prompt caching (--cache-ram 0). By default "
-        "prompt caching is auto-enabled for every non-vision model; it is "
-        "always off for vision models (incompatible with mtmd).",
+        "prompt caching is auto-enabled; Vision caching requires llama.cpp "
+        "b10045+ and safely falls back to off on older/unprobeable builds.",
     )
     p.add_argument(
         "--no-metrics",
@@ -987,7 +987,8 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
         "--slots-api",
         action="store_true",
         dest="slots_api",
-        help="Pass --slots so llama-server exposes GET /slots when supported.",
+        help="Enable GET /slots. AutoTuner requests --slots when enabled and "
+        "--no-slots when disabled; unsupported flags are compatibility-filtered.",
     )
     p.add_argument(
         "--force-mlock",

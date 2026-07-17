@@ -68,17 +68,13 @@ notes: >
   (33 Sprachen): 1.8B / 7B dense, 30B-A3B MoE (30B total / 3B aktiv).
   Architektur ist NEU: general.architecture "hy_v3" — nicht kompatibel mit
   dem alten Hunyuan-MT-Profil (hunyuan-dense) oder A13B (hunyuan_moe).
-  ACHTUNG: hy_v3 ist Stand b9969 (2026-07-12) NICHT in mainline llama.cpp —
-  der Server bricht mit "unknown model architecture: 'hy_v3'" ab (Issue
-  #24702). Support ist als PR #25395 offen ("Hy3 support with MTP
-  speculative decoding", ersetzt die entfernte PR #25364); bis zum Merge
-  hilft nur die PR-Branch / der Community-Fork (KabboomA/llama.cpp-hy3).
-  Nur das 30B-A3B ist betroffen — die 1.8B/7B-GGUFs sind als
-  "hunyuan-dense" konvertiert und laden auf jeder aktuellen Mainline.
-  Sampling = offizielle Tencent-Werte
+  Seit llama.cpp b9993 (PR #25395) ist hy_v3 inklusive MTP-Unterstützung
+  in Mainline enthalten. Die 1.8B/7B-GGUFs mit Architektur
+  "hunyuan-dense" liefen ohnehin schon vorher. Sampling = offizielle
+  Tencent-Werte
   temp=0.7 / top_p=1.0 / top_k aus / rep=1.0 — bewusst abweichend vom alten
   Hunyuan-MT (top_p 0.6). Coding-Modus = greedy (temp 0) für reproduzierbare,
   literale Übersetzungen. Reines Übersetzungsmodell, kein Chat-/Coding-LLM.
-  Hinweis aus dem GGUF-Repo (litigerking): bei llama-cli ggf.
-  -r '<eos:6124c78e>' als Reverse-Prompt für sauberes EOS-Handling —
-  für den llama-server-Pfad des Tuners nicht nötig.
+  Hinweis aus dem GGUF-Repo (litigerking):
+  bei llama-cli ggf. -r '<eos:6124c78e>' als Reverse-Prompt für sauberes
+  EOS-Handling — für den llama-server-Pfad des Tuners nicht nötig.

@@ -97,14 +97,13 @@ the RAM/VRAM you actually have free — without manual edits.
   at 31/32 GB). The *first* model still uses the normal automatic
   multi-GPU split.
 - **Host-memory prompt caching (`--cache-ram` / `-cram`)** — auto-enabled
-  for **every model that supports it** (i.e. every non-vision model),
   with a Launch-options toggle to turn it off. Cached prompt prefixes live
   in system RAM and are hot-swapped back when a new request shares a long
   prefix (system prompt, RAG scaffold, Roo-Code preamble), collapsing
-  time-to-first-token on repeated prompts. It is **force-disabled for
-  vision models** because the feature is incompatible with the multimodal
-  (`mtmd`) path in llama-server — the toggle greys out and the preview
-  says so. Default cap is `-1` (no byte limit; uses available RAM).
+  time-to-first-token on repeated prompts. Current llama.cpp builds
+  (**b10045+**) support this for Vision/`mtmd` too; older or unprobeable
+  builds conservatively receive `--cache-ram 0` when Vision is active.
+  Default cap is `-1` (no byte limit; uses available RAM).
 - **Sticky GUI choices** — the Qt launcher remembers per-model
   vision / draft / thinking / **n-gram** / **prompt-cache** toggles **and
   the chosen mmproj projector** in `autotuner_settings.json`. Switch to
@@ -133,7 +132,8 @@ the RAM/VRAM you actually have free — without manual edits.
   dedicated **Quit** button always exit normally.
 - **Reasoning effort** — selectable per model: `auto` / `off` /
   `minimal` / `low` / `medium` / `high` / `extra_high`. Think-budget
-  (spin-box, -1 = off, 0 = stop immediately, N = token budget) in the
+  (spin-box, -1 = off, 0 = stop immediately, N = token budget) and optional
+  **preserved reasoning history** (`--reasoning-preserve`) live in the
   Expert panel.
 
 ### Vision control
@@ -153,10 +153,11 @@ You can disable vision (mmproj) support in two ways:
    `autotuner_settings.json` under `mmproj_selection`. The auto pick
    defaults to the highest precision available.
 
-> **Note on prompt caching + vision:** host-memory prompt caching
-> (`--cache-ram`) is **incompatible with the multimodal path** in
-> llama-server. Whenever vision is active the AutoTuner emits
-> `--cache-ram 0` and the GUI's *Prompt caching* checkbox greys out.
+> **Note on prompt caching + vision:** llama.cpp **b10045+** can cache
+> multimodal prompts. AutoTuner enables it on those builds; older or
+> unprobeable binaries safely fall back to `--cache-ram 0` while Vision is
+> active. This was runtime-verified on b10058 with a repeated Gemma 4 image
+> request (`cached_tokens`: 0 → 279).
 
 ## Installation
 
@@ -382,8 +383,10 @@ that only make sense with persistent state:
       `medium` / `high` / `extra_high`
   - SpinBox "Think budget": `-1` = off, `0` = stop immediately, `N` =
       token budget
-  The values are translated into `--reasoning`, `--reasoning-budget` and
-  `--chat-template-kwargs` in `cfg.extra_cli_flags`.
+  - Checkbox "Preserve reasoning history" → `--reasoning-preserve`
+  The values are translated into `--reasoning`, `--reasoning-budget`,
+  `--chat-template-kwargs` and `--reasoning-preserve` in
+  `cfg.extra_cli_flags`.
 
 ### Useful flags
 
@@ -398,7 +401,7 @@ that only make sense with persistent state:
 | `--model SUBSTR` | Skip the menu, pick a model by name substring |
 | `--gpu NAME` | Hard-pin the server to a single GPU by name substring (e.g. `--gpu 9070`, `--gpu R9700`). Overrides the persisted `forced_gpu`; omit for free-VRAM-aware auto selection. The GUI exposes the same pin via the toolbar **GPU** dropdown |
 | `--ngram` | Enable n-gram (ngram-mod) self-speculative decoding |
-| `--no-prompt-cache` | Disable host-memory prompt caching (`--cache-ram 0`). Caching is auto-on for non-vision models by default; always off for vision models |
+| `--no-prompt-cache` | Disable host-memory prompt caching (`--cache-ram 0`). Caching is auto-on; Vision requires llama.cpp b10045+ and falls back to off on older/unprobeable builds |
 | `--dry-run` | Print the command, don't start the server |
 | `--yes / -y` | Skip the launch confirmation prompt |
 | `--force-mlock` | Force `--mlock` / `--no-mmap` (prevents VRAM/RAM paging) |
@@ -700,7 +703,7 @@ same CMake flags from the recipes. The only AutoTuner requirement is that the
 resulting binary is discoverable, e.g. `LLAMA_CPP_DIR=/opt/ai-local/b9888_llama.cpp`
 with `build/bin/llama-server` inside.
 
-## Server features (as of b9888)
+## Server features (as of b10056)
 
 The following `llama-server` features are supported (verified against `llama-server --help` / `tools/server/README.md`):
 
@@ -709,11 +712,13 @@ The following `llama-server` features are supported (verified against `llama-ser
 | `-fa [on\|off\|auto]` | ✅ Emits the `-fa on` form |
 | `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ All in the dropdown |
 | `--fit off` | ✅ Always emitted so llama.cpp's own auto-fit pass (default `on`) doesn't silently re-adjust the computed values (AutoTuner is the authority) |
-| `--perf` | ✅ Explicitly emitted so llama.cpp b9888 prints prompt/eval timings and tokens/s in the terminal again. Users can still append `--no-perf` to quiet it. |
+| `--perf` | ✅ Explicitly asserts performance timings so fork defaults cannot hide prompt/eval tokens/s. Current mainline already defaults timings on; users can append `--no-perf`. |
 | `--metrics` | ✅ Prometheus endpoint `GET /metrics` on the same host:port (see "Monitoring") |
-| `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391). Auto-on (`-1`, unlimited) for every **non-vision** model, switchable off via GUI checkbox. **Forced `0` for vision models** (incompatible with the mtmd path) |
+| `--slots` / `--no-slots` | ✅ Emitted explicitly so the Expert toggle remains authoritative even though current mainline defaults `/slots` on |
+| `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391), auto-on (`-1`, unlimited), switchable off. Vision caching is enabled for b10045+ and forced to `0` for older/unprobeable builds. |
 | `--reasoning on/off/auto` | ✅ Via dropdown |
 | `--reasoning-budget N` | ✅ Via spin-box. **Renamed from `--think-budget` at b9625** (the old spelling is gone, not an alias); AutoTuner emits the new name and still reads the legacy one back from older persisted settings |
+| `--reasoning-preserve` | ✅ Optional Expert checkbox; omitted means template default |
 | `--chat-template-kwargs ...` | ✅ The dropdown produces this automatically |
 | `--jinja` | ✅ Ticked visibly |
 | `--mlock` / `--no-mmap` | ✅ Windows guard; manually overridable |
@@ -732,11 +737,38 @@ The following `llama-server` features are supported (verified against `llama-ser
 | `--numa` | ✅ Already present |
 | `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
 
+### Review b9963 → b10056
+
+Reviewed all **93 upstream commits** through tag **b10056** (`b85833e`).
+No AutoTuner-emitted server flag was removed, renamed, or changed incompatibly.
+Changes integrated in this review:
+
+- **Vision prompt caching:** current mtmd state handling can reuse repeated
+  image prompts. AutoTuner enables `--cache-ram` for b10045+ and keeps older
+  or unprobeable builds on the safe `--cache-ram 0` path. A real b10058
+  Gemma 4 + mmproj test returned `cached_tokens` 0 → 279 and reduced the
+  repeated request from 3.13 s to 0.30 s.
+- **`/slots` toggle fixed:** b10056 defaults `/slots` on, so AutoTuner now
+  emits `--slots` or `--no-slots` explicitly instead of treating omission as
+  off.
+- **Reasoning history:** `--reasoning-preserve` is available in the Expert
+  panel and persists with the other per-model Expert settings.
+- **Hy3/Hy-MT2:** `hy_v3` + MTP support merged in b9993 (PR #25395), so the
+  profile no longer tells users to select a PR fork.
+- **New optional upstream surface:** `--cors-origins`, `--cors-methods`,
+  `--cors-headers`, and `--cors-credentials` landed in b10010. They remain
+  available through Extra CLI flags; a dedicated four-field UI is unnecessary
+  while AutoTuner binds `127.0.0.1` by default.
+
+Transparent rebuild benefits include Minimax2 EAGLE-3 support, Vulkan native
+MXFP4/NVFP4 conversions, prompt-cache/checkpoint fixes, DeepSeek V4 graph
+optimisations, mtmd fixes, and CUDA/HIP/SYCL backend improvements.
+
 ### Review b9840 → b9888
 
 Reviewed mainline up to **b9888** (`cb295bf`, CUDA FlashAttention K/V cache-type validation). No AutoTuner flag was removed or renamed upstream. Changes made for v4.7.9:
 
-- **Terminal throughput visibility restored:** llama.cpp now defaults libllama performance timings to off unless `--perf` is set. AutoTuner emits `--perf` for normal `llama-server`, `llama-diffusion-cli`, and `llama-diffusion-gemma-server`, so prompt/eval timings and tokens/s show in the terminal again. `--metrics` remains enabled for machine-readable monitoring.
+- **Terminal throughput visibility asserted:** AutoTuner emits `--perf` for normal `llama-server`, `llama-diffusion-cli`, and `llama-diffusion-gemma-server`, so fork defaults cannot hide prompt/eval timings and tokens/s. Current mainline defaults these timings on; `--metrics` remains enabled for machine-readable monitoring.
 - **NVIDIA CUDA safety:** b9888 validates V-cache types for CUDA FlashAttention too. Since default CUDA builds have `GGML_CUDA_FA_ALL_QUANTS=OFF`, AutoTuner keeps automatic KV choices symmetric on NVIDIA (high- and low-VRAM) while preserving AMD/Vulkan asymmetric K/V choices for extra context. Expert-mode manual K/V pins still pass through unchanged.
 - **Tracked settings removed:** `autotuner_settings.json` is now only local user state (already gitignored) and is removed from Git tracking for GitHub releases.
 
@@ -907,8 +939,8 @@ YaRN, KV-cache types) were unchanged and still valid. Added this round (not
 forced by a b9409 flag rename, but as a feature):
 
 - **`--cache-ram` prompt caching** is now actively emitted (previously not
-  at all). Auto-on for non-vision models, `0` for vision (mtmd-incompatible,
-  PR #16391).
+  at all). At the time this review was written it was conservatively limited
+  to non-vision models; the b10056 review above adds build-gated Vision support.
 - **Multi-server port assignment** (1234, 1235, … with a reset on exit) and
   **live-VRAM load-balancing** onto the emptier GPU before starting a
   second/third model — purely GUI/launcher-side, no new server flags.
@@ -1023,15 +1055,13 @@ system RAM and swaps them back into the `llama_context` when a new request
 shares a long prefix (system prompt, RAG scaffold, Roo-Code preamble). This
 massively lowers time-to-first-token on repeated prompts.
 
-- **Auto-on** for every model that supports it (= every **non-vision**
-  model). The default cap is `-1` (no byte limit, uses available RAM).
+- **Auto-on** with a default cap of `-1` (no byte limit, uses available RAM).
 - **Switchable off** via the *Prompt caching* checkbox in the Launch
   options or with CLI `--no-prompt-cache` (emits `--cache-ram 0`).
-- **Forced off for vision.** The feature is incompatible with the
-  multimodal (`mtmd`) path — `server_tokens` is not copyable there (see
-  PR #16391). As soon as vision is active the AutoTuner emits
-  `--cache-ram 0`, the checkbox greys out and the preview says so. The
-  per-model choice is remembered like vision/draft/thinking.
+- **Vision support on b10045+.** Current builds deep-copy multimodal prompt
+  state and reuse repeated image prompts. Older or unprobeable builds retain
+  the conservative `--cache-ram 0` fallback. The per-model choice is
+  remembered like vision/draft/thinking.
 
 ### Choosing among several mmproj precisions
 
@@ -1068,10 +1098,10 @@ intentional.
 ### Monitoring (`/health` + `/metrics` + optional `/slots`)
 
 The Expert settings include diagnostics toggles for `--metrics` and `--slots`.
-Metrics stay enabled by default; `/slots` is opt-in because not every
-llama.cpp build exposes that endpoint unless `--slots` is passed. All endpoints
-use the same `host:port` as the inference API (there is **no** separate metrics
-port):
+Metrics stay enabled by default. AutoTuner emits `--slots` when monitoring is
+requested and `--no-slots` otherwise, because current mainline defaults the
+endpoint on while older builds differ. All endpoints use the same `host:port`
+as the inference API (there is **no** separate metrics port):
 
 - **`GET /health`** — `503` while loading, `200` when the model is ready.
   The Qt GUI polls this endpoint and switches the status from *Loading
