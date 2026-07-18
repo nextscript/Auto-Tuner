@@ -7,7 +7,7 @@ the RAM/VRAM you actually have free — without manual edits.
 
 # GUI-Design
 
-![v4.9.5](image.png)
+![v4.9.8](image.png)
 
 ## Features
 
