@@ -3456,16 +3456,18 @@ def build_command(
     use_external = (
         enable_speculative and draft_model is not None and not vision_blocks_external
     )
-    # An external drafter that is a standalone MTP head (Gemma 4
-    # gemma4-assistant: gemma-4-…-MTP-BF16, mtp-gemma-4-…) is NOT auto-detected
-    # by mainline from -md alone — it loads with the dedicated draft-mtp path
-    # and aborts otherwise ("Model type gemma4_assistant not supported" /
-    # "Gemma4Assistant requires ctx_other to be set"; llama.cpp issue #23161,
-    # PR #23398). For these we MUST add "draft-mtp" to --spec-type. A plain
-    # sibling drafter (a small full model sharing the tokenizer) keeps the
-    # auto-detected path with no type token.
+    # An external MTP head is NOT a plain sibling draft model and therefore
+    # is not auto-detected from -md alone. Gemma 4 exposes this through its
+    # ``gemma4-assistant`` architecture, while Tess-4's Qwen3.5-based sidecar
+    # keeps ``general.architecture=qwen35`` and declares
+    # ``qwen35.nextn_predict_layers=1``. Both need the dedicated draft-mtp
+    # path; loading Tess's 18-tensor head as a normal draft model crashes
+    # llama-server with 0xC0000005 before startup. ``has_embedded_mtp`` is
+    # safe here because draft_model is already an external draft candidate.
+    # A plain sibling drafter still keeps the auto-detected -md path.
     external_is_mtp_head = use_external and bool(
         getattr(draft_model, "is_standalone_drafter", False)
+        or getattr(draft_model, "has_embedded_mtp", False)
     )
     # The spec-type token an EXTERNAL drafter needs, if any. Plain sibling
     # drafters (auto-detected from -md) need no token. Standalone MTP heads

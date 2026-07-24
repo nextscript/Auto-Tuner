@@ -7,11 +7,10 @@ patterns:
 # Poolside Laguna S 2.1: sparse MoE, 117.6B total / ~8.5B active,
 # 256 routed experts (Top-10) + 1 shared expert, 48 layers. The attention
 # layout mixes 12 global layers with 36 sliding-window layers (window 512).
-#
-# The weights were trained up to 1M tokens, but the official GGUFs and
-# quantized checkpoints ship at 256K. Poolside explicitly recommends 256K
-# for the best output quality; the tuner also clamps against GGUF metadata.
-max_context: 262144
+# The official model card and GGUF metadata both declare the full 1M native
+# context. Actual automatic context remains bounded by the selected memory /
+# performance target; this value only removes the former incorrect 256K cap.
+max_context: 1048576
 
 # Poolside's native deployments use an FP8 KV cache. q8_0 is llama.cpp's
 # closest quality-oriented cache option. AutoTuner may still step down to
@@ -26,21 +25,18 @@ performance_target: throughput
 
 sampling:
   chat:
-    # Official Poolside recommendation for the best quality/reliability
-    # balance. top_k=20 is the model's eval-certified truncation setting.
-    temperature: 0.7
+    # Author defaults embedded in the official GGUF metadata.
+    temperature: 1.0
     top_k: 20
-    top_p: 0.95
+    top_p: 1.0
     min_p: 0.0
     repeat_penalty: 1.0
     presence_penalty: 0.0
   coding:
-    # Keep the official sampler for agentic coding instead of forcing a very
-    # low temperature: Laguna's interleaved reasoning benefits from some
-    # exploration, and 0.7/0.95 is Poolside's recommended deployment setup.
-    temperature: 0.7
+    # Preserve the same author-provided sampler for agentic coding.
+    temperature: 1.0
     top_k: 20
-    top_p: 0.95
+    top_p: 1.0
     min_p: 0.0
     repeat_penalty: 1.0
     presence_penalty: 0.0
@@ -66,11 +62,9 @@ notes: >
   long-horizon agentic coding, terminal work, tool use, and preserved
   interleaved reasoning. Use llama.cpp b10087 or newer for the Unsloth GGUF;
   for sharded Unsloth quants select only shard 00001 and llama.cpp loads the
-  remaining shards automatically. The recommended runtime context is 256K.
-  Although the checkpoint was trained to 1M, Poolside warns that quality may
-  degrade there; enabling 1M also requires the complete manual llama.cpp
-  override: --ctx-size 1048576 --rope-scaling yarn --rope-scale 128
-  --yarn-orig-ctx 8192. Thinking is enabled by the embedded template by
+  remaining shards automatically. The native context is 1M; GGUF metadata
+  already carries YaRN factor 128 with original context 8192, so no manual
+  RoPE override is required. Thinking is enabled by the embedded template by
   default. For quick replies it can be disabled per request with
   chat_template_kwargs {"enable_thinking":false}. Keep reasoning history for
   coding agents. Optional official Laguna-S-2.1-DFlash-BF16.gguf (~2.2 GB)

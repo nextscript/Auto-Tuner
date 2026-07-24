@@ -993,6 +993,56 @@ def _spec_tokens(cmd):
     return ""
 
 
+def test_external_qwen_mtp_head_emits_draft_mtp_with_and_without_mmproj(
+    tmp_path, monkeypatch
+) -> None:
+    """Tess's external qwen35 nextn head must use the dedicated MTP path.
+
+    Without ``--spec-type draft-mtp`` llama.cpp treats the sparse 18-tensor
+    sidecar as a complete sibling model and crashes while loading it.
+    """
+    import tuner
+
+    profiles = load_profiles(SETTINGS_DIR)
+    model = _fake_model(tmp_path, "Tess-4-27B-Q6_K", size_gb=20.0)
+    model.metadata = {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 64,
+    }
+    draft = _fake_model(tmp_path, "mtp-Tess-4-27B-Q4_K_M", size_gb=1.9)
+    draft.metadata = {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 65,
+        "qwen35.nextn_predict_layers": 1,
+        "__mtp_scan__": "found",
+    }
+    profile = match_profile(model.name, profiles)
+    cfg = compute_config(model, _fake_system(), profile, draft_model=draft)
+
+    cmd = build_command(model, cfg, profile, draft_model=draft)
+    assert "-md" in cmd
+    assert "draft-mtp" in _spec_tokens(cmd).split(",")
+
+    plain_draft = _fake_model(tmp_path, "Tess-4-27B-Draft-Q4_K_M", size_gb=1.0)
+    plain_cmd = build_command(model, cfg, profile, draft_model=plain_draft)
+    assert "-md" in plain_cmd
+    assert "draft-mtp" not in _spec_tokens(plain_cmd).split(",")
+
+    mmproj = tmp_path / "mmproj-Tess-4-27B-F16.gguf"
+    _write_minimal_gguf(mmproj)
+    model.mmproj = mmproj
+    monkeypatch.setattr(
+        tuner,
+        "_probe_supported_flags",
+        lambda _binary: {"-m", "--model", "-md", "--model-draft", "--spec-type"},
+    )
+    cmd = build_command(
+        model, cfg, profile, draft_model=draft, server_binary="modern-llama-server"
+    )
+    assert "--mmproj" in cmd and "-md" in cmd
+    assert "draft-mtp" in _spec_tokens(cmd).split(",")
+
+
 def test_ngram_disabled_by_default(tmp_path) -> None:
     profiles = load_profiles(SETTINGS_DIR)
     model = _fake_model(tmp_path, "Llama-3-8B", size_gb=8.0)
@@ -2181,6 +2231,39 @@ def test_attention_layer_count_pure_transformer() -> None:
         "qwen3moe.block_count": 64,
     }
     assert metadata_attention_layer_count(md) == 64
+
+
+def test_laguna_sliding_window_counts_only_global_kv_layers() -> None:
+    """Laguna defaults to FULL/SWA/SWA/SWA when the pattern key is absent."""
+    from scanner import metadata_attention_layer_count
+    from tuner import kv_per_token_mb_from_metadata
+
+    md = {
+        "general.architecture": "laguna",
+        "laguna.block_count": 48,
+        "laguna.embedding_length": 3072,
+        "laguna.attention.head_count": 72,
+        "laguna.attention.head_count_kv": 8,
+        "laguna.attention.key_length": 128,
+        "laguna.attention.value_length": 128,
+        "laguna.attention.sliding_window": 512,
+    }
+    assert metadata_attention_layer_count(md) == 12
+    # 12 global layers × 8 KV heads × (128 K + 128 V) × f16.
+    assert kv_per_token_mb_from_metadata(md) == pytest.approx(0.046875)
+
+
+def test_sliding_window_pattern_array_overrides_default_period() -> None:
+    """An explicit per-layer SWA pattern remains authoritative."""
+    from scanner import metadata_attention_layer_count
+
+    md = {
+        "general.architecture": "laguna",
+        "laguna.block_count": 8,
+        "laguna.attention.sliding_window": 512,
+        "laguna.attention.sliding_window_pattern": [False, True] * 4,
+    }
+    assert metadata_attention_layer_count(md) == 4
 
 
 def test_attention_layer_count_hybrid_with_explicit_metadata() -> None:

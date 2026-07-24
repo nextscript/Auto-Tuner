@@ -601,11 +601,14 @@ def metadata_is_diffusion_architecture(md: Dict[str, Any]) -> bool:
 
 
 def metadata_attention_layer_count(md: Dict[str, Any]) -> int:
-    """Return the number of layers that actually carry KV cache.
+    """Return the layers whose KV cache grows with the full context.
 
-    For pure Transformer models this equals ``block_count``. For hybrid
-    Mamba/Transformer models we look for an explicit attention-layer
-    count first, then fall back to a conservative ratio of total blocks.
+    For ordinary Transformers this equals ``block_count``. Interleaved
+    sliding-window architectures count only their global-attention layers;
+    the bounded SWA cache is a small constant handled like Gemma's SWA cache
+    in :func:`tuner._kv_per_token_for_interleaved_attention`. Hybrid
+    Mamba/Transformer models use explicit recurrent-layer metadata when
+    available, then a conservative architecture ratio.
 
     Returns 0 when the answer can't be determined (caller should treat
     as "use total block count" — i.e. assume non-hybrid).
@@ -617,8 +620,35 @@ def metadata_attention_layer_count(md: Dict[str, Any]) -> int:
     if total <= 0:
         return 0
 
+    # Interleaved sliding-window attention: only global-attention layers
+    # grow with the requested context. A per-layer pattern stores True for
+    # SWA and False for global attention. Laguna GGUFs currently omit the
+    # optional pattern key; llama.cpp's Laguna loader then defaults to a
+    # period of 4 with the first layer global (FULL/SWA/SWA/SWA).
+    # The 512-token SWA caches remain a small bounded constant, matching the
+    # existing Gemma interleaved-attention estimator's treatment.
+    sliding_window = md.get(f"{arch}.attention.sliding_window")
+    try:
+        has_sliding_window = int(sliding_window or 0) > 0
+    except (TypeError, ValueError):
+        has_sliding_window = False
+    if has_sliding_window:
+        pattern = md.get(f"{arch}.attention.sliding_window_pattern")
+        if isinstance(pattern, (list, tuple)) and len(pattern) >= total:
+            n_global = sum(1 for is_swa in pattern[:total] if not bool(is_swa))
+            if n_global > 0:
+                return n_global
+        try:
+            period = int(pattern) if pattern is not None else 0
+        except (TypeError, ValueError):
+            period = 0
+        if period <= 0 and arch.lower() == "laguna":
+            period = 4
+        if period > 1:
+            return max(1, (total + period - 1) // period)
+
     if not metadata_is_hybrid_architecture(md):
-        return total  # pure Transformer — every layer has KV
+        return total  # pure full-attention Transformer
 
     # Highest priority: the authoritative recurrent-layer count.
     #

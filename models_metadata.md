@@ -6834,6 +6834,78 @@
 
 ---
 
+## mtp-Tess-4-27B-Q4_K_M.gguf
+**Pfad:** `migtissera\mtp-Tess-4-27B-Q4_K_M.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[18]` |
+| `GGUF.kv_count` | `[43]` |
+| `general.architecture` | `[113 119 101 110  51  53]` |
+| `general.type` | `[109 111 100 101 108]` |
+| `general.name` | `[ 84 101 115 115  32  52  32  50  55  66]` |
+| `general.finetune` | `[50 55 98]` |
+| `general.basename` | `[ 84 101 115 115  45  52]` |
+| `general.size_label` | `[51 46 48 66]` |
+| `general.license` | `[ 97 112  97  99 104 101  45  50  46  48]` |
+| `general.base_model.count` | `[1]` |
+| `general.base_model.0.name` | `[ 81 119 101 110  51  46  54  32  50  55  66]` |
+| `general.base_model.0.organization` | `[ 81 119 101 110]` |
+| `general.base_model.0.repo_url` | *Siehe Code-Block unten* |
+| `general.tags` | `[105 109  97 103 101  45 116 101 120 116  45 116 111  45 116 101 120 116]` |
+| `qwen35.block_count` | `[65]` |
+| `qwen35.context_length` | `[262144]` |
+| `qwen35.embedding_length` | `[5120]` |
+| `qwen35.feed_forward_length` | `[17408]` |
+| `qwen35.attention.head_count` | `[24]` |
+| `qwen35.attention.head_count_kv` | `[4]` |
+| `qwen35.rope.dimension_sections` | `[0]` |
+| `qwen35.rope.freq_base` | `[1.e+07]` |
+| `qwen35.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `qwen35.attention.key_length` | `[256]` |
+| `qwen35.attention.value_length` | `[256]` |
+| `qwen35.ssm.conv_kernel` | `[4]` |
+| `qwen35.ssm.state_size` | `[128]` |
+| `qwen35.ssm.group_count` | `[16]` |
+| `qwen35.ssm.time_step_rank` | `[48]` |
+| `qwen35.ssm.inner_size` | `[6144]` |
+| `qwen35.full_attention_interval` | `[4]` |
+| `qwen35.rope.dimension_count` | `[64]` |
+| `qwen35.nextn_predict_layers` | `[1]` |
+| `tokenizer.ggml.model` | `[103 112 116  50]` |
+| `tokenizer.ggml.pre` | `[113 119 101 110  51  53]` |
+| `tokenizer.ggml.tokens` | `[91 80 65 68 50 52 56 51 49 57 93]` |
+| `tokenizer.ggml.token_type` | `[5]` |
+| `tokenizer.ggml.merges` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.eos_token_id` | `[248046]` |
+| `tokenizer.ggml.padding_token_id` | `[248044]` |
+| `tokenizer.ggml.bos_token_id` | `[248044]` |
+| `tokenizer.ggml.add_bos_token` | `[False]` |
+| `tokenizer.chat_template` | *Siehe Code-Block unten* |
+| `general.quantization_version` | `[2]` |
+| `general.file_type` | `[15]` |
+
+**general.base_model.0.repo_url:**
+```jinja
+[104 116 116 112 115  58  47  47 104 117 103 103 105 110 103 102  97  99
+ 101  46  99 111  47  81 119 101 110  47  81 119 101 110  51  46  54  45
+  50  55  66]
+```
+
+**tokenizer.ggml.merges:**
+```jinja
+[195 163 196 163 196 164 195 163 196 164 196 172 195 163 196 163 194 190
+ 195 163 196 163 196 187  32 195 163 196 163 196 173]
+```
+
+**tokenizer.chat_template:**
+```jinja
+[123  37  45 ...  32  37 125]
+```
+
+---
+
 ## mtp-Tess-4-27B-Q8_0.gguf
 **Pfad:** `migtissera\mtp-Tess-4-27B-Q8_0.gguf`
 
@@ -8164,6 +8236,148 @@
 ```jinja
 [123  35  32 ...  32  35 125]
 ```
+
+---
+
+## Laguna-S-2.1-UD-Q3_K_XL-00001-of-00003.gguf
+**Pfad:** `poolside\Laguna-S-2.1-UD-Q3_K_XL-00001-of-00003.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[0]` |
+| `GGUF.kv_count` | `[72]` |
+| `general.architecture` | `[108  97 103 117 110  97]` |
+| `general.type` | `[109 111 100 101 108]` |
+| `general.sampling.top_k` | `[20]` |
+| `general.sampling.top_p` | `[1.]` |
+| `general.sampling.min_p` | `[0.]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 76  97 103 117 110  97  45  83  45  50  46  49]` |
+| `general.version` | `[50 46 49]` |
+| `general.basename` | `[ 76  97 103 117 110  97  45  83  45  50  46  49]` |
+| `general.quantized_by` | `[ 85 110 115 108 111 116 104]` |
+| `general.size_label` | `[ 50  53  54 120  52  46  53  66]` |
+| `general.license` | `[111 112 101 110 109 100 119  45  49  46  49]` |
+| `general.repo_url` | *Siehe Code-Block unten* |
+| `general.base_model.count` | `[1]` |
+| `general.base_model.0.name` | `[ 76  97 103 117 110  97  32  83  32  50  46  49]` |
+| `general.base_model.0.version` | `[50 46 49]` |
+| `general.base_model.0.organization` | `[ 80 111 111 108 115 105 100 101]` |
+| `general.base_model.0.repo_url` | *Siehe Code-Block unten* |
+| `general.tags` | `[116 101 120 116  45 103 101 110 101 114  97 116 105 111 110]` |
+| `laguna.block_count` | `[48]` |
+| `laguna.context_length` | `[1048576]` |
+| `laguna.embedding_length` | `[3072]` |
+| `laguna.feed_forward_length` | `[12288]` |
+| `laguna.attention.head_count` | `[72]` |
+| `laguna.attention.head_count_kv` | `[8]` |
+| `laguna.rope.scaling.type` | `[121  97 114 110]` |
+| `laguna.rope.scaling.factor` | `[128.]` |
+| `laguna.rope.scaling.original_context_length` | `[8192]` |
+| `laguna.rope.scaling.yarn_attn_factor` | `[1.485203]` |
+| `laguna.rope.scaling.yarn_beta_fast` | `[32.]` |
+| `laguna.rope.scaling.yarn_beta_slow` | `[1.]` |
+| `laguna.rope.freq_base` | `[500000.]` |
+| `laguna.rope.freq_base_swa` | `[10000.]` |
+| `laguna.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `laguna.expert_count` | `[256]` |
+| `laguna.expert_used_count` | `[10]` |
+| `laguna.attention.key_length` | `[128]` |
+| `laguna.attention.value_length` | `[128]` |
+| `laguna.vocab_size` | `[100352]` |
+| `laguna.attention.sliding_window` | `[512]` |
+| `laguna.expert_feed_forward_length` | `[1024]` |
+| `laguna.expert_shared_feed_forward_length` | `[1024]` |
+| `laguna.expert_weights_norm` | `[ True]` |
+| `laguna.expert_weights_scale` | `[2.5]` |
+| `laguna.expert_gating_func` | `[2]` |
+| `laguna.leading_dense_block_count` | `[1]` |
+| `laguna.rope.dimension_count` | `[64]` |
+| `laguna.rope.dimension_count_swa` | `[128]` |
+| `tokenizer.ggml.model` | `[103 112 116  50]` |
+| `tokenizer.ggml.pre` | `[108  97 103 117 110  97]` |
+| `tokenizer.ggml.tokens` | `[ 73 115  78 111 116  78 117 108 108]` |
+| `tokenizer.ggml.token_type` | `[1]` |
+| `tokenizer.ggml.merges` | `[ 73 115  32  78 111 116  78 117 108 108]` |
+| `tokenizer.ggml.bos_token_id` | `[2]` |
+| `tokenizer.ggml.eos_token_id` | `[2]` |
+| `tokenizer.ggml.unknown_token_id` | `[0]` |
+| `tokenizer.ggml.seperator_token_id` | `[8]` |
+| `tokenizer.ggml.padding_token_id` | `[9]` |
+| `tokenizer.ggml.mask_token_id` | `[12]` |
+| `tokenizer.ggml.add_bos_token` | `[ True]` |
+| `tokenizer.ggml.add_sep_token` | `[ True]` |
+| `tokenizer.chat_template` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.eot_token_id` | `[24]` |
+| `general.quantization_version` | `[2]` |
+| `general.file_type` | `[12]` |
+| `quantize.imatrix.file` | *Siehe Code-Block unten* |
+| `quantize.imatrix.dataset` | *Siehe Code-Block unten* |
+| `quantize.imatrix.entries_count` | `[572]` |
+| `quantize.imatrix.chunks_count` | `[46]` |
+| `split.no` | `[0]` |
+| `split.tensors.count` | `[814]` |
+| `split.count` | `[3]` |
+
+**general.repo_url:**
+```jinja
+[104 116 116 112 115  58  47  47 104 117 103 103 105 110 103 102  97  99
+ 101  46  99 111  47 117 110 115 108 111 116 104]
+```
+
+**general.base_model.0.repo_url:**
+```jinja
+[104 116 116 112 115  58  47  47 104 117 103 103 105 110 103 102  97  99
+ 101  46  99 111  47 112 111 111 108 115 105 100 101  47  76  97 103 117
+ 110  97  45  83  45  50  46  49]
+```
+
+**tokenizer.chat_template:**
+```jinja
+[123  35  45 ...  45  37 125]
+```
+
+**quantize.imatrix.file:**
+```jinja
+[ 76  97 103 117 110  97  45  83  45  50  46  49  45  71  71  85  70  47
+ 105 109  97 116 114 105 120  95 117 110 115 108 111 116 104  46 103 103
+ 117 102]
+```
+
+**quantize.imatrix.dataset:**
+```jinja
+[117 110 115 108 111 116 104  95  99  97 108 105  98 114  97 116 105 111
+ 110  95  76  97 103 117 110  97  45  83  45  50  46  49  46 116 120 116]
+```
+
+---
+
+## Laguna-S-2.1-UD-Q3_K_XL-00002-of-00003.gguf
+**Pfad:** `poolside\Laguna-S-2.1-UD-Q3_K_XL-00002-of-00003.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[761]` |
+| `GGUF.kv_count` | `[3]` |
+| `split.no` | `[1]` |
+| `split.tensors.count` | `[814]` |
+| `split.count` | `[3]` |
+
+---
+
+## Laguna-S-2.1-UD-Q3_K_XL-00003-of-00003.gguf
+**Pfad:** `poolside\Laguna-S-2.1-UD-Q3_K_XL-00003-of-00003.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[53]` |
+| `GGUF.kv_count` | `[3]` |
+| `split.no` | `[2]` |
+| `split.tensors.count` | `[814]` |
+| `split.count` | `[3]` |
 
 ---
 
