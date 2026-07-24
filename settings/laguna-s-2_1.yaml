@@ -1,0 +1,78 @@
+display_name: "Laguna S 2.1 (Poolside, agentic coding MoE)"
+patterns:
+  - laguna-s-2.1
+  - laguna-s2.1
+  - laguna_s_2.1
+
+# Poolside Laguna S 2.1: sparse MoE, 117.6B total / ~8.5B active,
+# 256 routed experts (Top-10) + 1 shared expert, 48 layers. The attention
+# layout mixes 12 global layers with 36 sliding-window layers (window 512).
+#
+# The weights were trained up to 1M tokens, but the official GGUFs and
+# quantized checkpoints ship at 256K. Poolside explicitly recommends 256K
+# for the best output quality; the tuner also clamps against GGUF metadata.
+max_context: 262144
+
+# Poolside's native deployments use an FP8 KV cache. q8_0 is llama.cpp's
+# closest quality-oriented cache option. AutoTuner may still step down to
+# q5_0/q4_0 when the selected quant, context, or GPU budget requires it.
+recommended_kv_quant: q8_0
+
+# At ~40 GB even Unsloth's UD-Q4_K_XL nearly fills this workstation's 48 GB
+# combined VRAM. Throughput keeps the automatic placement budget focused on
+# a practical 32K working context so more MoE expert layers stay on the GPUs.
+# A manually selected larger context remains available and is re-fitted.
+performance_target: throughput
+
+sampling:
+  chat:
+    # Official Poolside recommendation for the best quality/reliability
+    # balance. top_k=20 is the model's eval-certified truncation setting.
+    temperature: 0.7
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    # Keep the official sampler for agentic coding instead of forcing a very
+    # low temperature: Laguna's interleaved reasoning benefits from some
+    # exploration, and 0.7/0.95 is Poolside's recommended deployment setup.
+    temperature: 0.7
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+extra_args:
+  # Required for the embedded Laguna chat template, interleaved reasoning,
+  # and XML-style native tool calls.
+  - --jinja
+  # Poolside strongly recommends retaining reasoning_content between tool
+  # calls; dropping prior thinking can make later agent steps stop reasoning.
+  - --reasoning-preserve
+
+# Optional official DFlash sibling (general.architecture=dflash) is detected
+# by AutoTuner and paired as -md + --spec-type draft-dflash. Poolside trains
+# it for blocks of up to 15 tokens. Without that file, normal draftless
+# ngram-mod remains available.
+draft_max: 15
+draft_p_min: 0.75
+ngram_method: ngram-mod
+
+notes: >
+  Laguna S 2.1 (Poolside) is a text-only 117.6B-A8.5B MoE built for
+  long-horizon agentic coding, terminal work, tool use, and preserved
+  interleaved reasoning. Use llama.cpp b10087 or newer for the Unsloth GGUF;
+  for sharded Unsloth quants select only shard 00001 and llama.cpp loads the
+  remaining shards automatically. The recommended runtime context is 256K.
+  Although the checkpoint was trained to 1M, Poolside warns that quality may
+  degrade there; enabling 1M also requires the complete manual llama.cpp
+  override: --ctx-size 1048576 --rope-scaling yarn --rope-scale 128
+  --yarn-orig-ctx 8192. Thinking is enabled by the embedded template by
+  default. For quick replies it can be disabled per request with
+  chat_template_kwargs {"enable_thinking":false}. Keep reasoning history for
+  coding agents. Optional official Laguna-S-2.1-DFlash-BF16.gguf (~2.2 GB)
+  enables DFlash speculation; leave it unassigned if VRAM pressure or Vulkan
+  benchmarks show no speedup.
