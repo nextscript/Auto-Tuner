@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, cast, Tuple
 
@@ -121,6 +122,18 @@ def _get_fork_tools():
 def _bundled_resource(*parts: str) -> Path:
     """Return a source-tree or PyInstaller-bundled resource path."""
     return Path(__file__).resolve().parent.joinpath(*parts)
+
+
+def _setting_tooltip(summary: str, technical: str) -> str:
+    """Build consistent two-level hover help for beginner and expert users."""
+    summary_html = escape(summary).replace("\n", "<br>")
+    technical_html = escape(technical).replace("\n", "<br>")
+    return (
+        "<html><body style='max-width:520px'>"
+        f"<p><b>In short:</b> {summary_html}</p>"
+        f"<p><b>Technical details:</b> {technical_html}</p>"
+        "</body></html>"
+    )
 
 
 def _open_local_folder(path: Path) -> bool:
@@ -405,10 +418,27 @@ class _PathListDialog(QDialog):
 
         layout = QVBoxLayout(self)
         self._master = QCheckBox("Alle aktivieren")
+        self._master.setToolTip(
+            _setting_tooltip(
+                "Includes or excludes every saved folder from scanning in one step.",
+                "This toggles each list item's enabled state without deleting its path. "
+                "Only enabled roots are searched; pressing Cancel discards the dialog "
+                "changes, while OK persists the resulting path/state pairs.",
+            )
+        )
         self._master.toggled.connect(self._toggle_all)
         layout.addWidget(self._master)
 
         self._list = QListWidget()
+        self._list.setToolTip(
+            _setting_tooltip(
+                "Lists saved folders. Check a folder to scan it, or uncheck it to keep "
+                "the path saved but temporarily ignore it.",
+                "Paths are normalized and duplicate roots are removed. Model folders "
+                "are scanned recursively for GGUF files; llama-build roots are scanned "
+                "for runnable platform-compatible server binaries.",
+            )
+        )
         self._list.itemChanged.connect(self._sync_master)
         layout.addWidget(self._list, 1)
 
@@ -416,6 +446,27 @@ class _PathListDialog(QDialog):
         self._btn_add = QPushButton("Hinzufügen…")
         self._btn_edit = QPushButton("Bearbeiten…")
         self._btn_remove = QPushButton("Entfernen")
+        self._btn_add.setToolTip(
+            _setting_tooltip(
+                "Adds another folder to this list and enables it immediately.",
+                "The selected directory is resolved to an absolute path, deduplicated "
+                "against existing entries, and persisted only after OK is pressed.",
+            )
+        )
+        self._btn_edit.setToolTip(
+            _setting_tooltip(
+                "Replaces the selected entry with a different folder.",
+                "The replacement keeps the item's enabled state, stores a resolved "
+                "absolute path, and removes any duplicate created by the change.",
+            )
+        )
+        self._btn_remove.setToolTip(
+            _setting_tooltip(
+                "Removes the selected folder from the saved list.",
+                "This removes only AutoTuner's path entry; it never deletes the folder, "
+                "models, llama.cpp build, or any files on disk.",
+            )
+        )
         self._btn_add.clicked.connect(self._add_path)
         self._btn_edit.clicked.connect(self._edit_path)
         self._btn_remove.clicked.connect(self._remove_path)
@@ -553,8 +604,14 @@ class _ApplicationSettingsDialog(QDialog):
         self.autostart_was_enabled = startup_manager.is_autostart_enabled()
         self.autostart_checkbox.setChecked(self.autostart_was_enabled)
         self.autostart_checkbox.setToolTip(
-            "Registers AutoTuner only for the current user. No administrator "
-            "permissions are required."
+            _setting_tooltip(
+                "Opens AutoTuner automatically after you sign in, so it is ready "
+                "without a manual launch.",
+                "This creates a per-user startup entry only; it does not install a "
+                "service and needs no administrator rights. Windows uses HKCU Run, "
+                "Linux an XDG autostart file, and macOS a user LaunchAgent. Turning "
+                "the option off removes that entry.",
+            )
         )
         layout.addWidget(self.autostart_checkbox)
 
@@ -568,15 +625,28 @@ class _ApplicationSettingsDialog(QDialog):
         self.minimize_checkbox.setEnabled(tray_available)
         if tray_available:
             self.minimize_checkbox.setToolTip(
-                "Keeps AutoTuner and running servers active in the system tray. "
-                "Use the tray menu or Quit button to exit the application."
+                _setting_tooltip(
+                    "The window disappears when you click X, but AutoTuner and its "
+                    "servers keep running in the notification area.",
+                    "The close event is redirected to QSystemTrayIcon.hide() instead "
+                    "of ending the process. Restore the window from the tray icon; "
+                    "use its Quit action or AutoTuner's Quit button for a full, "
+                    "graceful shutdown of managed servers.",
+                )
             )
         else:
             self.minimize_checkbox.setText(
                 self.minimize_checkbox.text() + " (not available on this desktop)"
             )
             self.minimize_checkbox.setToolTip(
-                "The current desktop environment does not provide a system tray."
+                _setting_tooltip(
+                    "This option cannot be used because no notification area was "
+                    "detected on this desktop.",
+                    "Qt reports that QSystemTrayIcon is unavailable, so hiding the "
+                    "window would leave no reliable way to restore it. AutoTuner "
+                    "therefore disables the setting and keeps normal X-to-close "
+                    "behaviour.",
+                )
             )
         layout.addWidget(self.minimize_checkbox)
 
@@ -1895,7 +1965,14 @@ class ExpertPanel(QWidget):
         self._btn_auto.setCheckable(True)
         self._btn_auto.setChecked(True)
         self._btn_auto.setToolTip(
-            "Auto-cascade: edit any setting and the others re-fit around it."
+            _setting_tooltip(
+                "Change one value while AutoTuner safely adjusts related values to "
+                "keep the configuration practical for your hardware.",
+                "Each edited field becomes a pinned override and compute_config() "
+                "re-runs around it. Context, KV-cache precision, memory placement, "
+                "and other dependent values may change so the resulting VRAM/RAM "
+                "plan still fits.",
+            )
         )
         self._btn_auto.clicked.connect(lambda: self._set_mode("auto"))
         mode_row.addWidget(self._btn_auto)
@@ -1903,7 +1980,14 @@ class ExpertPanel(QWidget):
         self._btn_manual = QPushButton("✎ Manual")
         self._btn_manual.setCheckable(True)
         self._btn_manual.setToolTip(
-            "Full manual: settings stay exactly as you set them. No cascade."
+            _setting_tooltip(
+                "Keeps every value exactly as you enter it, without automatic safety "
+                "adjustments.",
+                "The panel assembles a TunedConfig directly from the widget values; "
+                "compute_config() is not re-run. Invalid or overcommitted memory, "
+                "thread, batch, or fork-specific combinations can therefore make "
+                "llama-server slow down or fail to start.",
+            )
         )
         self._btn_manual.clicked.connect(lambda: self._set_mode("manual"))
         mode_row.addWidget(self._btn_manual)
@@ -1913,8 +1997,13 @@ class ExpertPanel(QWidget):
         # Auto/Manual so the "back to Auto" path is one click.
         self._btn_reset = QPushButton("⟲ Reset")
         self._btn_reset.setToolTip(
-            "Forget the saved Expert settings for this model and reload\n"
- "the AutoTuner's automatically-best configuration."
+            _setting_tooltip(
+                "Removes this model's saved Expert changes and returns to the fully "
+                "automatic recommendation.",
+                "The per-model Expert snapshot and pinned overrides are deleted, "
+                "then compute_config() is run again from the current model metadata, "
+                "hardware state, performance target, and launch options.",
+            )
         )
         self._btn_reset.clicked.connect(self.resetRequested.emit)
         mode_row.addWidget(self._btn_reset)
@@ -1932,7 +2021,15 @@ class ExpertPanel(QWidget):
 
         self._btn_close = QPushButton("✕")
         self._btn_close.setFixedWidth(28)
-        self._btn_close.setToolTip("Close Expert panel — return to read-only preview.")
+        self._btn_close.setToolTip(
+            _setting_tooltip(
+                "Closes the Expert editor and returns to the normal configuration "
+                "preview.",
+                "This only changes the visible panel. Saved Expert overrides remain "
+                "associated with the selected model until you use Reset; no server "
+                "is started or stopped.",
+            )
+        )
         self._btn_close.clicked.connect(self.closeRequested.emit)
         mode_row.addWidget(self._btn_close)
 
@@ -1997,8 +2094,15 @@ class ExpertPanel(QWidget):
         _add(
             "Context tokens",
             self._sp_ctx,
-            "Maximum context length. Auto mode: changing this re-picks "
-            "KV quants and placement to fit.",
+            _setting_tooltip(
+                "Sets how much recent text, code, and conversation the model can "
+                "consider at once. More context helps with large tasks but needs "
+                "more memory.",
+                "Passed as llama-server --ctx-size. KV-cache memory grows roughly "
+                "linearly with context length and with the number of parallel slots. "
+                "In Auto mode, changing it triggers a new KV precision and CPU/GPU "
+                "placement plan so the requested window fits when possible.",
+            ),
         )
 
         self._cb_cache_k = QComboBox()
@@ -2009,7 +2113,15 @@ class ExpertPanel(QWidget):
         _add(
             "K-quant",
             self._cb_cache_k,
-            "K-cache quantisation. Higher = better attention recall.",
+            _setting_tooltip(
+                "Chooses the quality and memory use of the model's attention-key "
+                "memory. Higher precision is safer for recall; lower precision saves "
+                "VRAM or RAM.",
+                "This maps to --cache-type-k. f16 uses the most memory, q8_0 is a "
+                "high-quality compromise, and q4/q5 or TurboQuant formats compress "
+                "more aggressively. Flash Attention is required for quantized KV "
+                "types on supported llama.cpp builds.",
+            ),
         )
 
         self._cb_cache_v = QComboBox()
@@ -2020,7 +2132,14 @@ class ExpertPanel(QWidget):
         _add(
             "V-quant",
             self._cb_cache_v,
-            "V-cache quantisation. May be lower than K-quant (asymmetric FA).",
+            _setting_tooltip(
+                "Chooses the quality and memory use of the attention-value cache. "
+                "Lower precision can free substantial memory for a longer context.",
+                "This maps to --cache-type-v. With Flash Attention, compatible "
+                "AMD/Vulkan builds can use an asymmetric K/V plan, often keeping K "
+                "at higher precision than V. Some backends or older builds require "
+                "matching types and may reject unsupported combinations.",
+            ),
         )
 
         # Layer placement
@@ -2031,8 +2150,13 @@ class ExpertPanel(QWidget):
         _add(
             "GPU layers (ngl)",
             self._sp_ngl,
-            "Dense models: how many layers go on GPU. 999 = all. "
-            "Ignored for MoE — use n_cpu_moe.",
+            _setting_tooltip(
+                "Controls how much of a regular dense model runs on the GPU. More "
+                "GPU layers are usually faster but consume more VRAM.",
+                "Passed as --n-gpu-layers. 0 keeps layers on CPU; 999 requests full "
+                "offload and lets llama.cpp clamp to the model's actual layer count. "
+                "Mixture-of-Experts placement is governed separately by n_cpu_moe.",
+            ),
         )
 
         self._sp_ncpumoe = QSpinBox()
@@ -2043,28 +2167,78 @@ class ExpertPanel(QWidget):
         _add(
             "n_cpu_moe",
             self._sp_ncpumoe,
-            "MoE only: how many expert layers run on CPU.",
+            _setting_tooltip(
+                "For Mixture-of-Experts models, moves expert layers to system RAM "
+                "when VRAM is limited. More CPU expert layers save VRAM but are "
+                "usually slower.",
+                "Passed as --n-cpu-moe. It affects MoE expert tensors rather than the "
+                "dense shared layers controlled by --n-gpu-layers. 0 keeps eligible "
+                "experts GPU-resident; larger values progressively offload them.",
+            ),
         )
 
         # Threads & batching
         _section("Threads & batching")
         self._sp_threads = QSpinBox()
         self._sp_threads.setRange(1, 256)
-        _add("threads", self._sp_threads, "-t  (compute threads)")
+        _add(
+            "threads",
+            self._sp_threads,
+            _setting_tooltip(
+                "Sets how many CPU threads generate tokens. AutoTuner normally picks "
+                "a sensible value for your processor.",
+                "Passed as --threads / -t for the token-generation phase. Too few "
+                "threads can bottleneck CPU work; too many can increase scheduling, "
+                "cache, and hybrid-core overhead without improving speed.",
+            ),
+        )
 
         self._sp_batch_threads = QSpinBox()
         self._sp_batch_threads.setRange(1, 256)
-        _add("batch threads", self._sp_batch_threads, "-tb (batch threads)")
+        _add(
+            "batch threads",
+            self._sp_batch_threads,
+            _setting_tooltip(
+                "Sets CPU parallelism while the initial prompt is processed. A good "
+                "value can reduce time to the first generated token.",
+                "Passed as --threads-batch / -tb. Prompt ingestion can use different "
+                "parallelism from token generation; excessive threads may hurt on "
+                "hybrid CPUs or when several servers share the machine.",
+            ),
+        )
 
         self._sp_batch = QSpinBox()
         self._sp_batch.setRange(1, 16384)
         self._sp_batch.setSingleStep(64)
-        _add("batch", self._sp_batch, "-b  (logical batch size)")
+        _add(
+            "batch",
+            self._sp_batch,
+            _setting_tooltip(
+                "Controls how many prompt tokens llama.cpp may prepare together. "
+                "Larger batches can process prompts faster but need more temporary "
+                "memory.",
+                "Passed as --batch-size / -b. This is the logical maximum batch and "
+                "must be at least as large as the physical micro-batch. Very high "
+                "values can increase compute-buffer VRAM/RAM or fail on constrained "
+                "backends.",
+            ),
+        )
 
         self._sp_ubatch = QSpinBox()
         self._sp_ubatch.setRange(1, 16384)
         self._sp_ubatch.setSingleStep(64)
-        _add("ubatch", self._sp_ubatch, "-ub (physical batch size)")
+        _add(
+            "ubatch",
+            self._sp_ubatch,
+            _setting_tooltip(
+                "Sets the smaller chunks actually sent through the model during "
+                "prompt processing. Smaller chunks use less peak memory; larger "
+                "chunks may be faster.",
+                "Passed as --ubatch-size / -ub. llama.cpp divides the logical batch "
+                "into these physical micro-batches. It should not exceed batch size, "
+                "and backend-specific memory limits often determine the best value.",
+            ),
+        )
 
         # Parallelism (llama-server --parallel N, short: -np N)
         # Each slot gets its own KV-cache window, so Auto mode re-fits
@@ -2090,76 +2264,174 @@ class ExpertPanel(QWidget):
         _add(
             "",
             self._chk_parallel,
-            "Run multiple concurrent inference slots (continuous batching). "
-            "Useful for local subagent testing / parallel requests. Each "
-            "slot gets its own KV window, so context shrinks to fit. "
-            "Off = use the performance-target default.",
+            _setting_tooltip(
+                "Allows several requests or agents to generate at the same time. "
+                "Leave it off unless you need concurrency, because every slot uses "
+                "additional memory.",
+                "Enables a manual --parallel / -np override. llama-server uses "
+                "continuous batching and allocates a KV window per slot, so total KV "
+                "memory scales with slot count. Off delegates the count to the chosen "
+                "performance target and AutoTuner's hardware-aware default.",
+            ),
         )
         _add(
             "parallel slots",
             self._sp_parallel,
-            "Number of concurrent inference slots (llama-server --parallel N). "
-            "Default scales with your GPU: 3 when the largest GPU has "
-            "≥24 GB free VRAM, otherwise 2.",
+            _setting_tooltip(
+                "Chooses the exact number of simultaneous request slots after the "
+                "parallel override is enabled.",
+                "Passed as --parallel N. Each slot receives its own context/KV-cache "
+                "capacity, so raising N can reduce the context that fits or cause "
+                "memory pressure. AutoTuner suggests 3 with at least 24 GiB free on "
+                "the largest GPU and otherwise 2.",
+            ),
         )
 
         # Flags
         _section("Flags")
         self._chk_fa = QCheckBox("flash attention (-fa)")
-        _add("", self._chk_fa, "Flash Attention — required for KV-quantisation.")
+        _add(
+            "",
+            self._chk_fa,
+            _setting_tooltip(
+                "Uses a faster, more memory-efficient attention implementation when "
+                "the selected backend supports it.",
+                "Passed as --flash-attn / -fa. It is required by llama.cpp for "
+                "quantized KV-cache types and can reduce attention memory traffic. "
+                "Unsupported GPU/backend combinations may ignore or reject it.",
+            ),
+        )
 
         self._chk_mlock = QCheckBox("--mlock")
         _add(
             "",
             self._chk_mlock,
-            "Lock model in memory. Windows: needs SeLockMemoryPrivilege.",
+            _setting_tooltip(
+                "Tries to keep model data in physical RAM instead of letting the "
+                "operating system page it to disk. This can prevent severe stalls, "
+                "but reserves memory more aggressively.",
+                "Passed as --mlock. Linux/macOS use memory-locking limits; Windows "
+                "requires the SeLockMemoryPrivilege. AutoTuner vetoes unsafe locking "
+                "when the estimated resident model would leave too little usable RAM.",
+            ),
         )
 
         self._chk_no_mmap = QCheckBox("--no-mmap")
-        _add("", self._chk_no_mmap, "Load model fully into memory at startup.")
+        _add(
+            "",
+            self._chk_no_mmap,
+            _setting_tooltip(
+                "Loads the model through normal memory reads instead of mapping its "
+                "file on demand. Startup may take longer and use more committed RAM.",
+                "Passed as --no-mmap. Without it, llama.cpp memory-maps GGUF data so "
+                "the OS can fault pages in and share file-backed pages. Disable mmap "
+                "mainly for problematic filesystems, storage drivers, or deliberate "
+                "fully-resident loading tests.",
+            ),
+        )
 
         self._chk_jinja = QCheckBox("--jinja")
         _add(
             "",
             self._chk_jinja,
-            "Use the embedded chat template (separates <think> tags into reasoning_content).",
+            _setting_tooltip(
+                "Lets llama-server format messages using the chat template stored "
+                "with the model, including supported reasoning output handling.",
+                "Passed as --jinja. llama.cpp renders the GGUF/Jinja template for the "
+                "OpenAI-compatible chat API and can separate supported <think> traces "
+                "into reasoning_content. A missing or broken template may require a "
+                "different template override.",
+            ),
         )
 
         self._chk_verbose = QCheckBox("--verbose")
-        _add("", self._chk_verbose, "Verbose llama-server logging.")
+        _add(
+            "",
+            self._chk_verbose,
+            _setting_tooltip(
+                "Prints much more server detail for troubleshooting. Leave it off "
+                "for a quieter terminal during normal use.",
+                "Passed as --verbose. The llama-server terminal includes additional "
+                "request, scheduler, model, and backend diagnostics; this can produce "
+                "large logs and may expose prompt/request metadata during debugging.",
+            ),
+        )
 
         self._chk_metrics = QCheckBox("--metrics (/metrics)")
         _add(
             "",
             self._chk_metrics,
-            "Expose Prometheus metrics at GET /metrics on the same host:port.",
+            _setting_tooltip(
+                "Adds a monitoring page that tools such as Prometheus can read. It "
+                "does not change model quality.",
+                "Passed as --metrics and exposes GET /metrics on the same server host "
+                "and port. The endpoint reports operational counters and timings; if "
+                "you bind beyond localhost, protect it with the same network controls "
+                "as the inference API.",
+            ),
         )
 
         self._chk_slots_api = QCheckBox("--slots (/slots API)")
         _add(
             "",
             self._chk_slots_api,
-            "Enable llama-server's GET /slots endpoint. The launcher will poll it "
-            "to show busy/total slot state when the selected build supports it.",
+            _setting_tooltip(
+                "Lets AutoTuner show how many request slots are busy or available. "
+                "It is mainly useful when serving concurrent clients.",
+                "Passed as --slots and enables llama-server's GET /slots endpoint. "
+                "AutoTuner polls compatible builds for busy/total state. The endpoint "
+                "can reveal runtime details, so avoid exposing it on an untrusted "
+                "network.",
+            ),
         )
 
         self._cb_numa = QComboBox()
         self._cb_numa.addItems(self._NUMA_OPTIONS)
-        _add("NUMA", self._cb_numa, "--numa policy (off = no flag).")
+        _add(
+            "NUMA",
+            self._cb_numa,
+            _setting_tooltip(
+                "Controls how memory and CPU work are spread on systems with more "
+                "than one memory node or CPU socket. Most desktop PCs should leave "
+                "this off.",
+                "Maps to llama.cpp --numa distribute, isolate, or numactl. These modes "
+                "change thread and memory locality on NUMA hardware; a wrong policy "
+                "can increase cross-node traffic and reduce performance.",
+            ),
+        )
 
         self._chk_rope = QCheckBox("RoPE scaling (YaRN)")
         self._chk_rope.toggled.connect(lambda _: self._on_edit("force_rope_scale"))
         _add(
             "",
             self._chk_rope,
-            "Force YaRN context extension on/off (overrides profile default).",
+            _setting_tooltip(
+                "Extends supported models beyond their original context length. It "
+                "can handle longer input, but may reduce quality if the model or "
+                "profile was not designed for it.",
+                "Forces YaRN/RoPE scaling instead of following the matched YAML "
+                "profile. AutoTuner derives the required factor from requested versus "
+                "native context and emits the corresponding rope-scaling arguments. "
+                "Turning it off keeps the native positional scale.",
+            ),
         )
 
         self._sp_rope_factor = QDoubleSpinBox()
         self._sp_rope_factor.setRange(1.0, 32.0)
         self._sp_rope_factor.setSingleStep(0.5)
         self._sp_rope_factor.setDecimals(1)
-        _add("RoPE factor", self._sp_rope_factor, "YaRN scale factor (1.0 = native).")
+        _add(
+            "RoPE factor",
+            self._sp_rope_factor,
+            _setting_tooltip(
+                "Sets how far the model's positional range is stretched. 1.0 means "
+                "no extension; higher values target proportionally longer context.",
+                "Used as the YaRN/RoPE scale factor when scaling is active. A factor "
+                "that is too low cannot cover the requested context; an unnecessarily "
+                "high factor can harm short-context accuracy. Manual mode accepts the "
+                "value exactly as entered.",
+            ),
+        )
 
         # Sampling
         _section("Sampling")
@@ -2167,35 +2439,96 @@ class ExpertPanel(QWidget):
         self._sp_temp.setRange(0.0, 5.0)
         self._sp_temp.setSingleStep(0.05)
         self._sp_temp.setDecimals(2)
-        _add("temperature", self._sp_temp, "--temp")
+        _add(
+            "temperature",
+            self._sp_temp,
+            _setting_tooltip(
+                "Controls randomness. Lower values are more predictable; higher "
+                "values are more varied but can become less reliable.",
+                "Passed as --temp and rescales token logits before sampling. 0 is "
+                "effectively deterministic in common llama.cpp sampling paths; the "
+                "best nonzero value depends on the model and the other samplers.",
+            ),
+        )
 
         self._sp_top_k = QSpinBox()
         self._sp_top_k.setRange(0, 1000)
-        _add("top_k", self._sp_top_k, "--top-k  (0 = disabled)")
+        _add(
+            "top_k",
+            self._sp_top_k,
+            _setting_tooltip(
+                "Limits each next-token choice to the K most likely candidates. "
+                "Smaller values are more focused; 0 disables this filter.",
+                "Passed as --top-k. The sampler removes every token outside the top K "
+                "before later probability filters run. Very small K can make output "
+                "repetitive; large K approaches an unrestricted candidate set.",
+            ),
+        )
 
         self._sp_top_p = QDoubleSpinBox()
         self._sp_top_p.setRange(0.0, 1.0)
         self._sp_top_p.setSingleStep(0.01)
         self._sp_top_p.setDecimals(3)
-        _add("top_p", self._sp_top_p, "--top-p")
+        _add(
+            "top_p",
+            self._sp_top_p,
+            _setting_tooltip(
+                "Keeps the smallest group of likely tokens whose combined chance "
+                "reaches this value. Lower values are safer and narrower.",
+                "Passed as --top-p for nucleus sampling. At 1.0 it removes almost "
+                "nothing; lower thresholds dynamically trim the probability tail. It "
+                "interacts with temperature, top-k, and min-p in sampler order.",
+            ),
+        )
 
         self._sp_min_p = QDoubleSpinBox()
         self._sp_min_p.setRange(0.0, 1.0)
         self._sp_min_p.setSingleStep(0.01)
         self._sp_min_p.setDecimals(3)
-        _add("min_p", self._sp_min_p, "--min-p")
+        _add(
+            "min_p",
+            self._sp_min_p,
+            _setting_tooltip(
+                "Drops tokens that are far less likely than the current best choice. "
+                "Higher values make output more focused.",
+                "Passed as --min-p. A candidate must meet a probability floor relative "
+                "to the highest-probability token, making the filter adapt to model "
+                "confidence. 0 disables it; excessive values can reduce diversity.",
+            ),
+        )
 
         self._sp_rep = QDoubleSpinBox()
         self._sp_rep.setRange(0.5, 2.5)
         self._sp_rep.setSingleStep(0.01)
         self._sp_rep.setDecimals(3)
-        _add("repeat_penalty", self._sp_rep, "--repeat-penalty")
+        _add(
+            "repeat_penalty",
+            self._sp_rep,
+            _setting_tooltip(
+                "Discourages the model from repeating recent words or patterns. 1.0 "
+                "means no penalty; slightly higher values reduce loops.",
+                "Passed as --repeat-penalty and modifies logits for tokens found in "
+                "the repeat window. Values that are too high can damage code, names, "
+                "formatting, and intentional repetition.",
+            ),
+        )
 
         self._sp_presence = QDoubleSpinBox()
         self._sp_presence.setRange(-2.0, 2.0)
         self._sp_presence.setSingleStep(0.1)
         self._sp_presence.setDecimals(2)
-        _add("presence_penalty", self._sp_presence, "--presence-penalty")
+        _add(
+            "presence_penalty",
+            self._sp_presence,
+            _setting_tooltip(
+                "Encourages introducing new tokens instead of reusing ones already "
+                "present. Positive values increase novelty; 0 leaves it neutral.",
+                "Passed as --presence-penalty. Unlike a count-based frequency penalty, "
+                "it applies based on whether a token appeared at all. Negative values "
+                "encourage reuse; strong positive values can hurt coherent code or "
+                "terminology.",
+            ),
+        )
 
         # Speculative decoding — non-cascading override; only takes effect
         # when a draft path is active (external -md or embedded MTP).
@@ -2206,11 +2539,15 @@ class ExpertPanel(QWidget):
         _add(
             "draft n-max",
             self._sp_draft_n_max,
-            "--spec-draft-n-max N — maximale Draft-Tokens pro Speculative-\n"
-            "Schritt. 0 = Profil (auto): der draft_max-Wert aus dem YAML-\n"
-            "Profil gilt (Fallback 2). Wirkt nur, wenn ein Draft-Pfad aktiv\n"
-            "ist (externer -md-Drafter oder eingebettetes MTP). Auf Vulkan/\n"
-            "AMD sind Werte >2–3 oft langsamer statt schneller.",
+            _setting_tooltip(
+                "Limits how many tokens the faster draft path may propose per step. "
+                "0 uses the tested model profile; larger values are not automatically "
+                "faster.",
+                "Passed as --spec-draft-n-max N when an external -md drafter or "
+                "embedded MTP head is active. 0 uses draft_max from the matched YAML "
+                "profile (fallback 2). The main model must verify every proposal, and "
+                "on AMD/Vulkan values above roughly 2–3 often add overhead.",
+            ),
         )
 
         # Reasoning controls (llama-server b9118 era).
@@ -2232,9 +2569,14 @@ class ExpertPanel(QWidget):
         _add(
             "Effort",
             self._cb_reasoning,
-            "Reasoning effort passed to the chat template via "
-            "--chat-template-kwargs (or --reasoning off for 'off'). "
-            "'auto' emits no flag so the model template decides.",
+            _setting_tooltip(
+                "Chooses how much internal reasoning a compatible model should use. "
+                "Auto leaves the decision to the model; Off requests no reasoning.",
+                "Minimal through extra_high are sent as reasoning_effort via "
+                "--chat-template-kwargs. Off emits --reasoning off; Auto emits no "
+                "override. Support and accepted names depend on the model's Jinja "
+                "template and llama.cpp build.",
+            ),
         )
 
         self._sp_think_budget = QSpinBox()
@@ -2245,9 +2587,13 @@ class ExpertPanel(QWidget):
         _add(
             "Think budget",
             self._sp_think_budget,
-            "--reasoning-budget N. -1 = unlimited (no flag), 0 = stop "
-            "thinking immediately, N>0 = token budget for the "
-            "thinking phase.",
+            _setting_tooltip(
+                "Caps how many tokens a reasoning model may spend thinking before it "
+                "must answer. -1 leaves it unlimited; 0 asks it to skip thinking.",
+                "Positive values emit --reasoning-budget N on compatible llama.cpp "
+                "builds. -1 emits no budget flag. This budget consumes context/output "
+                "tokens and is separate from the qualitative reasoning-effort hint.",
+            ),
         )
 
         self._chk_reasoning_preserve = QCheckBox(
@@ -2256,9 +2602,14 @@ class ExpertPanel(QWidget):
         _add(
             "",
             self._chk_reasoning_preserve,
-            "Keep earlier assistant reasoning traces in the conversation "
-            "history when the model's chat template supports it. Off leaves "
-            "the decision to the template.",
+            _setting_tooltip(
+                "Keeps earlier assistant thinking traces available in later turns "
+                "when the model supports that behaviour.",
+                "Passed as --reasoning-preserve. Compatible chat templates retain "
+                "reasoning content in conversation history instead of stripping it. "
+                "This can improve continuity but increases prompt/context usage and "
+                "may expose prior reasoning to clients.",
+            ),
         )
 
         # Extra free-form CLI flags
@@ -2270,7 +2621,14 @@ class ExpertPanel(QWidget):
         _add(
             "extras",
             self._le_extra,
-            "Appended verbatim to the llama-server command line.",
+            _setting_tooltip(
+                "Adds advanced llama-server options that AutoTuner does not expose "
+                "elsewhere. Use this only when you know the exact flag syntax.",
+                "The text is parsed into arguments and appended to the generated "
+                "command after modeled settings. Unsupported, duplicated, or unsafe "
+                "flags can override assumptions or make startup fail; normal shell "
+                "expansion is not used.",
+            ),
         )
 
         grid.setRowStretch(row, 1)
@@ -2832,7 +3190,19 @@ class MainWindow(QMainWindow):
     _sysinfo_ready = pyqtSignal(object)  # SystemInfo
     _bg_log = pyqtSignal(str)  # log message from background thread
 
-    _FORK_COMBO_BASE_TOOLTIP = "Default llama.cpp fork (auto-overridden by profile)"
+    _FORK_TOOLTIP_SUMMARY = (
+        "Selects which llama.cpp build starts the server. AutoTuner can choose a "
+        "more compatible build for a specific model when needed."
+    )
+    _FORK_TOOLTIP_TECHNICAL = (
+        "The selected directory supplies llama-server or the matching diffusion "
+        "binary. Model YAML profiles may override this default for required forks "
+        "or features. Build discovery scans the enabled llama.cpp roots configured "
+        "with the adjacent llama Builds button."
+    )
+    _FORK_COMBO_BASE_TOOLTIP = _setting_tooltip(
+        _FORK_TOOLTIP_SUMMARY, _FORK_TOOLTIP_TECHNICAL
+    )
     _FORK_COMBO_MIN_WIDTH = 220
     _FORK_COMBO_TEXT_PADDING = 72
     _WIN_SETTINGS_COMMAND_ID = 0x1FFE
@@ -2955,22 +3325,58 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        for label, slot in (
-            ("📂 Models folder", self._browse_models),
-            ("🔄 Refresh", self._start_scan),
-            ("⬆ Update", self._start_update),
-            ("⚙ Settings", self._open_application_settings),
-        ):
+        toolbar_actions = (
+            (
+                "📂 Models folder",
+                self._browse_models,
+                _setting_tooltip(
+                    "Choose one or more folders that contain your GGUF models.",
+                    "Opens the model-path manager. Enabled paths are persisted per "
+                    "operating system and scanned recursively; disabling a path keeps "
+                    "it saved but excludes it from discovery.",
+                ),
+            ),
+            (
+                "🔄 Refresh",
+                self._start_scan,
+                _setting_tooltip(
+                    "Scans the configured model folders again and refreshes the list.",
+                    "Runs GGUF discovery and metadata matching in a background worker, "
+                    "then rebuilds model, mmproj, draft/MTP, and profile associations "
+                    "without freezing the interface.",
+                ),
+            ),
+            (
+                "⬆ Update",
+                self._start_update,
+                _setting_tooltip(
+                    "Checks GitHub for a newer AutoTuner version and installs it while "
+                    "keeping your personal settings.",
+                    "Source checkouts update through git or a source ZIP. Frozen builds "
+                    "download the OS-specific GitHub Release ZIP and use a restart "
+                    "swap helper. autotuner_settings.json is backed up and restored "
+                    "around either update path.",
+                ),
+            ),
+            (
+                "⚙ Settings",
+                self._open_application_settings,
+                _setting_tooltip(
+                    "Opens application-wide startup and window behaviour options.",
+                    "These opt-in preferences are stored for this AutoTuner "
+                    "installation. They do not change model tuning, generated "
+                    "llama-server arguments, or per-model Expert overrides.",
+                ),
+            ),
+        )
+        for label, slot, tooltip in toolbar_actions:
             btn = QPushButton(label)
             btn.clicked.connect(slot)
+            btn.setToolTip(tooltip)
             if label.startswith("🔄"):
                 self._btn_refresh = btn
             elif "Update" in label:
                 self._btn_update = btn
-                btn.setToolTip(
-                    "Check GitHub for AutoTuner updates, install them via git\n"
-                    "or source ZIP, and restore autotuner_settings.json afterwards."
-                )
             tb.addWidget(btn)
 
         tb.addSeparator()
@@ -2985,7 +3391,15 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._fork_combo)
 
         self._btn_fork_folder = QPushButton("llama Builds")
-        self._btn_fork_folder.setToolTip("llama.cpp-Build-Pfade verwalten")
+        self._btn_fork_folder.setToolTip(
+            _setting_tooltip(
+                "Adds, removes, or temporarily disables folders containing llama.cpp "
+                "builds.",
+                "AutoTuner scans enabled roots for runnable llama-server binaries and "
+                "compatible sibling fork directories. Paths are stored per operating "
+                "system so one settings file can be shared across dual-boot installs.",
+            )
+        )
         self._btn_fork_folder.clicked.connect(self._browse_fork_folder)
         tb.addWidget(self._btn_fork_folder)
 
@@ -2993,12 +3407,20 @@ class MainWindow(QMainWindow):
         tb.addWidget(QLabel(" Performance:"))
         self._perf_combo = QComboBox()
         self._perf_combo.setMinimumWidth(120)
-        # Build tooltip from registry so a future 4th tier auto-appears.
-        tip_lines = ["VRAM utilisation preset:"]
+        # Build technical details from the registry so future tiers auto-appear.
+        tip_lines = []
         for tname in list_target_names():
-            t = PERFORMANCE_TARGETS[tname]
-            tip_lines.append(f"  • {tname}: {t.description}")
-        self._perf_combo.setToolTip("\n".join(tip_lines))
+            target = PERFORMANCE_TARGETS[tname]
+            tip_lines.append(f"• {tname}: {target.description}")
+        self._perf_combo.setToolTip(
+            _setting_tooltip(
+                "Chooses the balance between speed, context capacity, and memory "
+                "headroom. Balanced is the best starting point for most users.",
+                "The preset changes VRAM/RAM safety reserves, KV placement, context "
+                "fitting, and default parallel slots before model-specific tuning:\n"
+                + "\n".join(tip_lines),
+            )
+        )
         for tname in list_target_names():
             self._perf_combo.addItem(tname)
         # Restore persisted choice (may be None → default).
@@ -3017,12 +3439,14 @@ class MainWindow(QMainWindow):
         self._mode_combo = QComboBox()
         self._mode_combo.setMinimumWidth(90)
         self._mode_combo.setToolTip(
-            "Sampling profile:\n"
-            "  • chat   — conversational defaults (higher temperature,\n"
-            "             more diverse output)\n"
-            "  • coding — deterministic defaults from each model's\n"
-            "             official coding/agentic-bench setup\n"
-            "Profiles without a coding block fall back to chat values."
+            _setting_tooltip(
+                "Selects conversational or code-focused generation behaviour. Chat "
+                "is more varied; Coding is usually more deterministic.",
+                "The matched model profile supplies mode-specific temperature, top-k, "
+                "top-p, min-p, repetition, and presence settings. Profiles without a "
+                "coding block fall back to chat values; model placement and memory "
+                "planning are unchanged.",
+            )
         )
         for m in ("chat", "coding"):
             self._mode_combo.addItem(m)
@@ -3045,12 +3469,15 @@ class MainWindow(QMainWindow):
         self._gpu_combo = QComboBox()
         self._gpu_combo.setMinimumWidth(110)
         self._gpu_combo.setToolTip(
-            "Pin the next server to a single GPU:\n"
-            "  • Auto — free-VRAM-aware selection across all cards\n"
-            "  • <card> — boot exclusively on that card and hide the\n"
-            "             others (use for a 2nd server so it lands on the\n"
-            "             still-empty card instead of the full one)\n"
-            "Mirrors the CLI --gpu flag and the forced_gpu setting."
+            _setting_tooltip(
+                "Auto chooses a GPU from current free memory. Selecting a card forces "
+                "the next server onto only that GPU, which is useful for running a "
+                "second model on another card.",
+                "A card selection persists as forced_gpu and mirrors CLI --gpu. The "
+                "launch environment hides the other devices and sets the matching "
+                "backend/main-GPU index. Auto keeps all eligible cards visible and "
+                "uses live VRAM-aware placement.",
+            )
         )
         # Seed with Auto only; real cards are appended after detection.
         self._gpu_combo.addItem("Auto", None)
@@ -3064,6 +3491,14 @@ class MainWindow(QMainWindow):
             b.setFixedWidth(36)
             d = delta
             b.clicked.connect(lambda _, d=d: self._change_font(d))
+            b.setToolTip(
+                _setting_tooltip(
+                    "Makes all interface text smaller or larger.",
+                    "Changes the QApplication font size by one point within the 7–22 "
+                    "point range, reapplies it to the monospace preview/log widgets, "
+                    "and persists the result for the next launch.",
+                )
+            )
             tb.addWidget(b)
 
         # ── Sysinfo bar ────────────────────────────────────────────────
@@ -3088,6 +3523,15 @@ class MainWindow(QMainWindow):
         frl.addWidget(QLabel("Filter:"))
         self._search = QLineEdit()
         self._search.setPlaceholderText("type to filter…")
+        self._search.setToolTip(
+            _setting_tooltip(
+                "Filters the model list while you type so large collections are easier "
+                "to navigate.",
+                "The case-insensitive text filter changes only which already-scanned "
+                "model entries are visible. It does not rescan folders, modify files, "
+                "or change the currently selected model's saved settings.",
+            )
+        )
         self._search.textChanged.connect(self._apply_filter)
         frl.addWidget(self._search)
 
@@ -3139,14 +3583,25 @@ class MainWindow(QMainWindow):
         # access). The Diagnose button stays visible in both modes.
         self._btn_expert = QPushButton("🔧 Expert settings")
         self._btn_expert.setToolTip(
-            "Open the Expert panel to override AutoTuner decisions."
+            _setting_tooltip(
+                "Opens detailed controls for context, memory placement, sampling, "
+                "reasoning, parallel requests, and server flags.",
+                "Expert values are stored per model. Auto mode re-fits dependent "
+                "values around your overrides; Manual mode constructs the launch "
+                "configuration directly and can create unsupported or unsafe "
+                "combinations.",
+            )
         )
         self._btn_expert.clicked.connect(self._enter_expert_mode)
         self._btn_diagnose = QPushButton("🔍 Diagnose")
         self._btn_diagnose.setToolTip(
-            "Show the metadata diagnostic report for the selected model — "
-            "KV size estimate, hybrid/MoE detection inputs, capacity "
-            "estimates, and any warnings."
+            _setting_tooltip(
+                "Explains what AutoTuner detected about the selected model and why it "
+                "chose the shown configuration.",
+                "The report includes GGUF metadata inputs, architecture and MoE/hybrid "
+                "classification, KV-size math, context and memory capacity estimates, "
+                "matched profile data, and warnings useful for technical debugging.",
+            )
         )
         self._btn_diagnose.clicked.connect(self._show_diagnostic_report)
         self._btn_diagnose.setEnabled(False)  # disabled until a model is picked
@@ -3176,11 +3631,16 @@ class MainWindow(QMainWindow):
         _mmproj_l.setSpacing(4)
         _mmproj_l.addWidget(QLabel("mmproj:"))
         self._cb_mmproj = QComboBox()
-        self._cb_mmproj.setToolTip(
-            "Vision projector to load. Lists every projector in the model's\n"
-            "folder; '⚠' marks ones that don't match this model (you can still\n"
-            "select them to experiment). Remembered per model."
+        mmproj_tip = _setting_tooltip(
+            "Chooses the vision projector that lets a multimodal model understand "
+            "images. Choose none for text-only use.",
+            "Every projector found beside the model is listed. AutoTuner marks "
+            "metadata or filename mismatches with ⚠ but still allows experiments. "
+            "The per-model selection supplies --mmproj and can change VRAM/RAM use "
+            "depending on projector precision and CPU-offload choice.",
         )
+        self._cb_mmproj.setToolTip(mmproj_tip)
+        self._mmproj_row.setToolTip(mmproj_tip)
         self._cb_mmproj.currentIndexChanged.connect(self._on_mmproj_changed)
         _mmproj_l.addWidget(self._cb_mmproj, 1)
         self._mmproj_row.setVisible(True)
@@ -3198,41 +3658,86 @@ class MainWindow(QMainWindow):
         _draft_l.setSpacing(4)
         _draft_l.addWidget(QLabel("draft:"))
         self._cb_draft = QComboBox()
-        self._cb_draft.setToolTip(
-            "Draft model for speculative decoding. Lists every draft/assistant\n"
-            "GGUF in the model's folder, including EAGLE-3 and DFlash heads;\n"
-            "'⚠' marks ones that don't match this model (selectable anyway for\n"
-            "experimenting). Remembered per model."
+        draft_tip = _setting_tooltip(
+            "Chooses a smaller draft or assistant model that may speed up generation "
+            "by proposing tokens for the main model to verify.",
+            "Lists external draft, EAGLE-3, DFlash, and supported embedded MTP paths. "
+            "AutoTuner marks likely incompatibilities with ⚠ but keeps them selectable. "
+            "The choice is remembered per model and only takes effect when Draft model "
+            "is enabled.",
         )
+        self._cb_draft.setToolTip(draft_tip)
+        self._draft_row.setToolTip(draft_tip)
         self._cb_draft.currentIndexChanged.connect(self._on_draft_combo_changed)
         _draft_l.addWidget(self._cb_draft, 1)
         self._draft_row.setVisible(True)
         ol.addWidget(self._draft_row)
 
         self._chk_vision = QCheckBox("Vision (mmproj)")
+        self._chk_vision.setToolTip(
+            _setting_tooltip(
+                "Enables image understanding for models that have a compatible vision "
+                "projector. Turn it off for text-only use and lower memory use.",
+                "When enabled, the selected mmproj is passed to llama-server and its "
+                "estimated memory is included in fitting. Availability comes from GGUF "
+                "and folder pairing; incompatible manual selections are allowed with a "
+                "warning for advanced testing.",
+            )
+        )
         self._chk_mmproj_cpu = QCheckBox(
             "Keep mmproj in RAM (--no-mmproj-offload)"
         )
         self._chk_mmproj_cpu.setToolTip(
-            "Keep the multimodal projector on the CPU. This frees VRAM but\n"
-            "uses the projector file size in system RAM and slows vision encoding."
+            _setting_tooltip(
+                "Keeps the vision projector in system memory. This frees GPU memory "
+                "for the model or context, but image processing becomes slower.",
+                "Emits --no-mmproj-offload. The projector's estimated footprint moves "
+                "from VRAM to RAM in AutoTuner's budget; text-token generation is "
+                "mostly unaffected after image encoding, while each image prefill uses "
+                "CPU execution.",
+            )
         )
         self._chk_draft = QCheckBox("Draft model (speculative decoding)")
+        self._chk_draft.setToolTip(
+            _setting_tooltip(
+                "Enables the selected draft path to try to generate tokens faster. "
+                "Results should stay equivalent because the main model verifies them.",
+                "llama-server receives the selected external -md drafter or embedded "
+                "MTP configuration. Speed depends on proposal acceptance, draft "
+                "overhead, backend, and draft n-max; an incompatible or oversized "
+                "drafter can be slower or fail to load.",
+            )
+        )
         # NEW: Turbo KV-quant toggle. Sits between Draft and Thinking,
         # as requested. When on, the AutoTuner maps the chosen KV
         # quants to their TurboQuant equivalents (denser packing on
         # the TheTom/AtomicBot forks; harmless no-op on stock builds
         # because the mapping is identity for unknown labels).
         self._chk_turbo_kv = QCheckBox("Turbo KV-quant (TurboQuant forks)")
+        self._chk_turbo_kv.setToolTip(
+            _setting_tooltip(
+                "Uses TurboQuant KV-cache formats to fit more context when a compatible "
+                "llama.cpp fork is selected.",
+                "AutoTuner maps normal KV choices to turbo2/turbo3/turbo4 labels on "
+                "known TurboQuant forks. Stock or older builds may not recognize these "
+                "types, so the option is intended for TheTom, AtomicBot, spiritbuun, "
+                "or other explicitly compatible builds.",
+            )
+        )
         # n-gram (ngram-mod) self-speculative decoding. Unlike Draft, this
         # needs no draft model and works on ANY GGUF (builds a rolling-hash
         # lookup table from the live context, ~16 MB). It is therefore always
         # available — never greyed out — and independent of the Draft toggle.
         self._chk_ngram = QCheckBox("n-gram speculative (ngram-mod)")
         self._chk_ngram.setToolTip(
-            "Self-speculative decoding from the context. No draft model needed,\n"
-            "works on any model. Best for code/text iteration, reasoning models\n"
-            "that echo their scratchpad, and summarisation."
+            _setting_tooltip(
+                "Speeds up repetitive text or code by reusing patterns already found "
+                "in the current context. It needs no separate draft model.",
+                "Enables ngram-mod self-speculative decoding, which builds a rolling "
+                "hash lookup table of roughly 16 MiB and proposes matching token "
+                "sequences. Gains are workload-dependent and strongest for code edits, "
+                "summaries, or repeated reasoning patterns.",
+            )
         )
         # Host-memory prompt caching (--cache-ram / -cram). Auto-ON and
         # user-toggleable. Current mainline (b10045+) can reuse multimodal
@@ -3240,10 +3745,14 @@ class MainWindow(QMainWindow):
         # --cache-ram 0 when Vision is active.
         self._chk_prompt_cache = QCheckBox("Prompt caching (host RAM, -cram)")
         self._chk_prompt_cache.setToolTip(
-            "Cache computed prompt prefixes in system RAM so repeated/similar\n"
-            "prompts (long system prompts, RAG scaffolds, Roo-Code preambles)\n"
-            "skip re-processing and hit first-token faster. The MiB limit is\n"
-            "included in the RAM budget. Vision needs llama.cpp b10045+."
+            _setting_tooltip(
+                "Keeps reusable prompt beginnings in system RAM so repeated long "
+                "instructions can reach the first generated token faster.",
+                "Enables llama-server --cache-ram. Matching system prompts, RAG "
+                "scaffolds, or coding-agent preambles can skip part of prompt "
+                "evaluation. The configured MiB limit is included in RAM planning; "
+                "multimodal prompt reuse requires llama.cpp b10045 or newer.",
+            )
         )
         self._sp_prompt_cache_mib = QSpinBox()
         self._sp_prompt_cache_mib.setRange(-1, 65536)
@@ -3252,10 +3761,26 @@ class MainWindow(QMainWindow):
         self._sp_prompt_cache_mib.setSingleStep(256)
         self._sp_prompt_cache_mib.setValue(app_settings.get_prompt_cache_ram_mib())
         self._sp_prompt_cache_mib.setToolTip(
-            "Maximum host-RAM prompt cache size. -1 is unlimited, 0 disables;\n"
-            "2048 MiB is the bounded default."
+            _setting_tooltip(
+                "Limits how much system memory prompt caching may use. 2048 MiB is a "
+                "bounded default; 0 disables the cache and -1 allows it to grow.",
+                "Passed as --cache-ram / -cram. Positive values cap the host cache in "
+                "MiB and are added to AutoTuner's RAM estimate. Unlimited mode keeps "
+                "a safety reserve but can still grow until llama-server eviction or "
+                "system memory pressure intervenes.",
+            )
         )
         self._chk_thinking = QCheckBox("Thinking / Reasoning")
+        self._chk_thinking.setToolTip(
+            _setting_tooltip(
+                "Allows supported reasoning models to use their thinking mode. Turn it "
+                "off for shorter, direct answers when the template supports that.",
+                "This per-model launch option controls whether AutoTuner applies the "
+                "model/profile reasoning path. Exact flags and output separation depend "
+                "on the selected chat template and llama.cpp build; Expert settings can "
+                "further choose effort, token budget, and history preservation.",
+            )
+        )
 
         for chk in (
             self._chk_vision,
@@ -3347,16 +3872,30 @@ class MainWindow(QMainWindow):
         bl.addWidget(QLabel("Host:"))
         self._host_edit = QLineEdit("127.0.0.1")
         self._host_edit.setFixedWidth(120)
+        self._host_edit.setToolTip(
+            _setting_tooltip(
+                "Sets which network address the model server listens on. Keep "
+                "127.0.0.1 if only programs on this computer should connect.",
+                "Passed as llama-server --host. 127.0.0.1 is loopback-only; 0.0.0.0 "
+                "or a LAN address can expose the OpenAI-compatible API, metrics, and "
+                "slots endpoints to other devices. AutoTuner does not add authentication "
+                "or a firewall rule.",
+            )
+        )
         bl.addWidget(self._host_edit)
 
         bl.addWidget(QLabel(" Base port:"))
         self._port_edit = QLineEdit(str(self._base_port))
         self._port_edit.setFixedWidth(60)
         self._port_edit.setToolTip(
-            "Base port for the FIRST server. Each additional concurrent\n"
-            "server gets the next free port (1234, 1235, 1236…). Stopping\n"
-            "a server frees its port for reuse.\n"
-            "Remembered across restarts."
+            _setting_tooltip(
+                "Sets the starting network port for model servers. The first server "
+                "normally uses 1234 and additional servers receive the next free port.",
+                "The validated value is persisted as base_port and passed as --port "
+                "after adding the manual offset and checking active server collisions. "
+                "Stopped servers release their port for reuse; valid ports are in the "
+                "1–65535 range.",
+            )
         )
         # Persist on focus loss / Enter so the chosen port is remembered even
         # without launching (matches fork_path / font_size behaviour).
@@ -3367,7 +3906,13 @@ class MainWindow(QMainWindow):
         self._port_offset_combo = QComboBox()
         self._port_offset_combo.setFixedWidth(60)
         self._port_offset_combo.setToolTip(
-            "Manual offset added to the requested base port before collision checks."
+            _setting_tooltip(
+                "Adds 0–10 to the base port, making it easy to keep separate AutoTuner "
+                "instances or environments on predictable ports.",
+                "The persisted offset is added before AutoTuner searches for collisions "
+                "with its managed servers. For example, base 1234 plus offset 2 starts "
+                "at 1236, then later concurrent servers use subsequent free ports.",
+            )
         )
         for i in range(11):  # 0 to 10
             self._port_offset_combo.addItem(str(i))
@@ -3392,7 +3937,13 @@ class MainWindow(QMainWindow):
         self._server_combo = QComboBox()
         self._server_combo.setMinimumWidth(220)
         self._server_combo.setToolTip(
-            "Select a running server. ‘Stop’ terminates the selected one."
+            _setting_tooltip(
+                "Selects which running model server the status and Stop controls refer "
+                "to.",
+                "Entries track a managed process, model, port, readiness, slot state, "
+                "GPU placement, and estimated VRAM footprint. Changing the selection "
+                "does not stop or restart any server.",
+            )
         )
         bl.addWidget(self._server_combo)
 
@@ -3400,7 +3951,14 @@ class MainWindow(QMainWindow):
         self._btn_toggle_log.setFixedHeight(32)
         self._btn_toggle_log.setCheckable(True)
         self._btn_toggle_log.setChecked(True)
-        self._btn_toggle_log.setToolTip("Show / fully retract the bottom info panel.")
+        self._btn_toggle_log.setToolTip(
+            _setting_tooltip(
+                "Shows or completely hides AutoTuner's bottom status panel.",
+                "Moves the vertical splitter to restore its previous size or collapse "
+                "the panel to zero. It affects only the interface layout; the separate "
+                "llama-server terminal and log generation continue unchanged.",
+            )
+        )
         self._btn_toggle_log.clicked.connect(self._toggle_log_panel)
         bl.addWidget(self._btn_toggle_log)
 
@@ -3408,8 +3966,14 @@ class MainWindow(QMainWindow):
         self._btn_launch.setFixedHeight(32)
         self._btn_launch.setEnabled(False)
         self._btn_launch.setToolTip(
-            "Launch the selected model. If a server is already running, the\n"
-            "new model is placed on the emptier GPU and given the next port."
+            _setting_tooltip(
+                "Starts the selected model with the shown Auto or Expert configuration. "
+                "Existing servers can keep running.",
+                "AutoTuner resolves a compatible binary, validates memory and flags, "
+                "builds the llama-server command, selects the requested or emptier GPU, "
+                "assigns the next free port, and tracks the new process and health "
+                "endpoint.",
+            )
         )
         self._btn_launch.clicked.connect(self._launch_server)
         bl.addWidget(self._btn_launch)
@@ -3417,19 +3981,42 @@ class MainWindow(QMainWindow):
         self._btn_stop = QPushButton("■  Stop")
         self._btn_stop.setFixedHeight(32)
         self._btn_stop.setEnabled(False)
-        self._btn_stop.setToolTip("Stop the server selected in the dropdown.")
+        self._btn_stop.setToolTip(
+            _setting_tooltip(
+                "Stops only the server currently selected in the Server list.",
+                "Requests a graceful termination of the tracked terminal process, then "
+                "uses the platform-specific fallback if needed. Other managed servers "
+                "remain active and the released port becomes reusable.",
+            )
+        )
         self._btn_stop.clicked.connect(self._stop_server)
         bl.addWidget(self._btn_stop)
 
         self._btn_stop_all = QPushButton("■ Stop all")
         self._btn_stop_all.setFixedHeight(32)
         self._btn_stop_all.setEnabled(False)
-        self._btn_stop_all.setToolTip("Stop every running llama-server.")
+        self._btn_stop_all.setToolTip(
+            _setting_tooltip(
+                "Stops every model server that this AutoTuner window launched.",
+                "Iterates over the managed server registry and performs the same "
+                "graceful, platform-aware process shutdown for each entry. Unrelated "
+                "llama-server processes started elsewhere are not targeted.",
+            )
+        )
         self._btn_stop_all.clicked.connect(self._stop_all_clicked)
         bl.addWidget(self._btn_stop_all)
 
         self._btn_quit = QPushButton("Quit")
         self._btn_quit.setFixedHeight(32)
+        self._btn_quit.setToolTip(
+            _setting_tooltip(
+                "Closes AutoTuner completely instead of hiding it in the notification "
+                "area.",
+                "Sets the explicit-quit path, asks for confirmation when managed servers "
+                "are active, shuts them down, saves window state, removes the tray icon, "
+                "and exits the application process.",
+            )
+        )
         self._btn_quit.clicked.connect(self._request_quit)
         bl.addWidget(self._btn_quit)
 
@@ -4144,13 +4731,15 @@ class MainWindow(QMainWindow):
         self._fork_combo.setMinimumWidth(width)
         self._fork_combo.updateGeometry()
 
-        tooltip = self._FORK_COMBO_BASE_TOOLTIP
+        technical = self._FORK_TOOLTIP_TECHNICAL
         if text:
-            tooltip += f"\nActive: {text}"
+            technical += f"\nActive build: {text}"
         path = self._fork_combo.currentData()
         if path is not None:
-            tooltip += f"\nPath: {path}"
-        self._fork_combo.setToolTip(tooltip)
+            technical += f"\nResolved path: {path}"
+        self._fork_combo.setToolTip(
+            _setting_tooltip(self._FORK_TOOLTIP_SUMMARY, technical)
+        )
 
     def _on_fork_changed(self, index: int) -> None:
         self._fork_manual_override = True

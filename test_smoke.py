@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 
+# Widget-level GUI checks run without requiring a real display server.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 # Make the project root importable when tests are run from the repo root
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -33,6 +36,7 @@ from tuner import (  # noqa: E402
 
 
 SETTINGS_DIR = ROOT / "settings"
+_QT_TEST_APP = None
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +676,105 @@ def test_filter_command_removes_stray_value_of_unknown_flag() -> None:
     filtered, removed = _filter_command_for_supported_flags(cmd, supported)
     assert filtered == ["llama-server", "-m", "model.gguf", "--port", "1234"]
     assert removed == ["--some-fork-knob 42"]
+
+
+def test_setting_tooltip_has_beginner_and_technical_layers() -> None:
+    """Every settings hover uses the same readable two-level structure."""
+    from qt_launcher import _setting_tooltip
+
+    tooltip = _setting_tooltip(
+        "Easy summary with a <beginner> term.",
+        "--technical-flag\nSecond line",
+    )
+    assert "<b>In short:</b>" in tooltip
+    assert "<b>Technical details:</b>" in tooltip
+    assert "&lt;beginner&gt;" in tooltip
+    assert "--technical-flag<br>Second line" in tooltip
+
+
+def test_settings_widgets_have_two_level_hover_help(tmp_path, monkeypatch) -> None:
+    """Lock in complete beginner + technical help for settings dialogs."""
+    global _QT_TEST_APP
+
+    qt_launcher = pytest.importorskip("qt_launcher")
+    qt_widgets = pytest.importorskip("PyQt6.QtWidgets")
+    _QT_TEST_APP = qt_widgets.QApplication.instance() or qt_widgets.QApplication([])
+    parent = qt_widgets.QWidget()
+
+    monkeypatch.setattr(
+        qt_launcher.startup_manager, "is_autostart_enabled", lambda: False
+    )
+    monkeypatch.setattr(qt_launcher, "_system_tray_supported", lambda: True)
+    monkeypatch.setattr(
+        qt_launcher.app_settings, "get_minimize_on_close", lambda: False
+    )
+    monkeypatch.setattr(
+        qt_launcher.app_settings,
+        "_settings_file",
+        lambda: tmp_path / "autotuner_settings.json",
+    )
+
+    expert = qt_launcher.ExpertPanel(parent)
+    app_dialog = qt_launcher._ApplicationSettingsDialog(parent)
+    paths_dialog = qt_launcher._PathListDialog(
+        parent, "Paths", [(tmp_path, True)], "Pick a folder"
+    )
+
+    expert_names = (
+        "_btn_auto", "_btn_manual", "_btn_reset", "_btn_close", "_sp_ctx",
+        "_cb_cache_k", "_cb_cache_v", "_sp_ngl", "_sp_ncpumoe", "_sp_threads",
+        "_sp_batch_threads", "_sp_batch", "_sp_ubatch", "_chk_parallel",
+        "_sp_parallel", "_chk_fa", "_chk_mlock", "_chk_no_mmap", "_chk_jinja",
+        "_chk_verbose", "_chk_metrics", "_chk_slots_api", "_cb_numa", "_chk_rope",
+        "_sp_rope_factor", "_sp_temp", "_sp_top_k", "_sp_top_p", "_sp_min_p",
+        "_sp_rep", "_sp_presence", "_sp_draft_n_max", "_cb_reasoning",
+        "_sp_think_budget", "_chk_reasoning_preserve", "_le_extra",
+    )
+    widgets = [getattr(expert, name) for name in expert_names]
+    widgets.extend(
+        [app_dialog.autostart_checkbox, app_dialog.minimize_checkbox]
+    )
+    widgets.extend(
+        [
+            paths_dialog._master,
+            paths_dialog._list,
+            paths_dialog._btn_add,
+            paths_dialog._btn_edit,
+            paths_dialog._btn_remove,
+        ]
+    )
+
+    window = qt_launcher.MainWindow(tmp_path, SETTINGS_DIR)
+    main_names = (
+        "_fork_combo", "_btn_fork_folder", "_perf_combo", "_mode_combo",
+        "_gpu_combo", "_search", "_btn_expert", "_btn_diagnose", "_cb_mmproj",
+        "_cb_draft", "_chk_vision", "_chk_mmproj_cpu", "_chk_draft",
+        "_chk_turbo_kv", "_chk_ngram", "_chk_prompt_cache",
+        "_sp_prompt_cache_mib", "_chk_thinking", "_host_edit", "_port_edit",
+        "_port_offset_combo", "_server_combo", "_btn_toggle_log", "_btn_launch",
+        "_btn_stop", "_btn_stop_all", "_btn_quit",
+    )
+    widgets.extend(getattr(window, name) for name in main_names)
+    toolbar_texts = {"📂 Models folder", "🔄 Refresh", "⬆ Update", "⚙ Settings", "A−", "A+"}
+    widgets.extend(
+        button
+        for button in window.findChildren(qt_widgets.QPushButton)
+        if button.text() in toolbar_texts
+    )
+    assert toolbar_texts <= {
+        button.text()
+        for button in window.findChildren(qt_widgets.QPushButton)
+    }
+
+    for widget in widgets:
+        tooltip = widget.toolTip()
+        assert "<b>In short:</b>" in tooltip, widget.objectName()
+        assert "<b>Technical details:</b>" in tooltip, widget.objectName()
+
+    window.close()
+    paths_dialog.close()
+    app_dialog.close()
+    parent.close()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX pipe/pump streaming path")

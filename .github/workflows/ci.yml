@@ -23,7 +23,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install ruff
-        run: pip install ruff
+        # Keep the executable version deterministic; ruff.toml explicitly
+        # preserves the project's established E/F lint baseline.
+        run: pip install ruff==0.16.0
 
       - name: Run ruff check
         run: ruff check .
