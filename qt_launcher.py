@@ -31,8 +31,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, cast, Tuple
 
-from PyQt6.QtCore import Qt, QByteArray, QObject, QThread, QTimer, pyqtSignal, QSize
-from PyQt6.QtGui import QAction, QCloseEvent, QFont, QIcon
+from PyQt6.QtCore import (
+    Qt,
+    QByteArray,
+    QObject,
+    QPoint,
+    QThread,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+    QSize,
+)
+from PyQt6.QtGui import QAction, QCloseEvent, QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -111,6 +121,12 @@ def _get_fork_tools():
 def _bundled_resource(*parts: str) -> Path:
     """Return a source-tree or PyInstaller-bundled resource path."""
     return Path(__file__).resolve().parent.joinpath(*parts)
+
+
+def _open_local_folder(path: Path) -> bool:
+    """Open *path* in the platform's file manager via Qt."""
+    folder = path.expanduser().resolve(strict=False)
+    return QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
 
 _NATIVE_ICON_HANDLES: List[Tuple[int, int, int]] = []
@@ -3077,6 +3093,12 @@ class MainWindow(QMainWindow):
 
         self._model_list = QListWidget()
         self._model_list.currentItemChanged.connect(self._on_selection_changed)
+        self._model_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._model_list.customContextMenuRequested.connect(
+            self._show_model_context_menu
+        )
 
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -4693,6 +4715,35 @@ class MainWindow(QMainWindow):
             if not q
             else [e for e in self._all_entries if q in e.name.lower()]
         )
+
+    def _show_model_context_menu(self, position: QPoint) -> None:
+        """Offer model-specific actions for the item under the pointer."""
+        item = self._model_list.itemAt(position)
+        if item is None:
+            return
+        entry: Optional[ModelEntry] = item.data(Qt.ItemDataRole.UserRole)
+        if entry is None:
+            return
+
+        # Make the right-clicked model the active one as users expect, while
+        # keeping the menu action tied to this exact item.
+        self._model_list.setCurrentItem(item)
+        menu = QMenu(self._model_list)
+        open_folder = menu.addAction("📂 GGUF-Ordner öffnen")
+        viewport = self._model_list.viewport()
+        if viewport is None:  # defensive for incomplete Qt teardown states
+            return
+        chosen = menu.exec(viewport.mapToGlobal(position))
+        if chosen is not open_folder:
+            return
+
+        folder = entry.path.parent
+        if not folder.is_dir() or not _open_local_folder(folder):
+            QMessageBox.warning(
+                self,
+                "Ordner konnte nicht geöffnet werden",
+                f"Der GGUF-Ordner konnte nicht geöffnet werden:\n{folder}",
+            )
 
     def _browse_models(self) -> None:
         dlg = _PathListDialog(

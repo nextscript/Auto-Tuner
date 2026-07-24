@@ -1303,17 +1303,14 @@ _DRAFT_FILENAME_TOKENS = (
     "dflash",
 )
 
-# Maximum size for a GGUF to be treated as a standalone draft head based on
-# its filename alone. Real draft/assistant/MTP heads are tiny — a Gemma 4
-# MTP head is ~423M params, well under 1 GB even in BF16, and full sibling
-# assistants are likewise small. A GGUF whose name carries a draft token but
-# EXCEEDS this threshold is almost always a TARGET model that merely mentions
-# "mtp"/"draft" in its name because it ships an INTEGRATED draft head
-# (e.g. Qwen3.6-27B-MTP-UD-Q3_K_XL.gguf at several GB). Such a target must
-# stay in the normal model list and be detected via
-# :func:`metadata_has_embedded_mtp`, not be hidden away as a draft file.
-# Without this size guard every large MTP-suffixed target was misclassified
-# as a drafter and disappeared from the chooser.
+# Maximum size for an ambiguously named GGUF to be treated as a standalone
+# draft head based on its filename alone. Infix names such as
+# ``Qwen3.6-27B-MTP-UD-Q3_K_XL.gguf`` commonly denote a large TARGET with an
+# integrated head, so those retain the size guard. A leading ``mtp-`` /
+# ``mtp_`` / ``mtp.`` is different: distributors use that form for an external
+# head and newer Qwen-based heads (for example Tess-4) can be ~2.9 GiB. Those
+# explicit prefix names bypass the guard and must never appear as runnable
+# models. Metadata-based reclassification remains the authoritative fallback.
 _DRAFT_MAX_SIZE_BYTES = int(1.5 * 1024**3)  # 1.5 GiB
 
 
@@ -1367,17 +1364,12 @@ def _common_prefix_len(a: str, b: str) -> int:
 def _is_draft_filename(name: str, size_bytes: Optional[int] = None) -> bool:
     """Cheap pre-filter: does this filename look like a draft/assistant file?
 
-    A file counts as a draft only when BOTH hold:
-      1. Its stem carries a draft token (``assistant`` / ``draft`` / ``mtp``)
-         bounded by separators or at the start of the stem.
-      2. It is small enough to plausibly BE a draft head (≤
-         :data:`_DRAFT_MAX_SIZE_BYTES`, ~1.5 GiB). Real draft heads are well
-         under 1 GB; a multi-GB GGUF whose name contains ``mtp`` is almost
-         always a TARGET model with an integrated MTP head (detected via
-         :func:`metadata_has_embedded_mtp`), not a standalone drafter, and
-         must stay in the model list. Pass ``size_bytes`` whenever the file
-         size is known so the guard can fire; when it is ``None`` the guard
-         is skipped (keeps the old behaviour for callers without a stat).
+    A file counts as a draft when its stem carries a bounded draft token.
+    Ambiguous infix names are accepted only up to
+    :data:`_DRAFT_MAX_SIZE_BYTES`, because a large ``…-MTP-…`` GGUF normally
+    contains an integrated head. A leading ``mtp-`` / ``mtp_`` / ``mtp.`` is
+    an explicit external-head convention and bypasses that size guard; modern
+    Qwen-based draft heads can legitimately be several GiB.
     """
     n = name.lower()
     # Match token surrounded by separators OR at the end of stem
@@ -1390,14 +1382,22 @@ def _is_draft_filename(name: str, size_bytes: Optional[int] = None) -> bool:
             re.search(rf"[-_.]{tok}[-_.]", n)
             or n.startswith(tok + "-")
             or n.startswith(tok + "_")
+            or n.startswith(tok + ".")
         ):
             matched = True
             break
     if not matched:
         return False
-    # Size guard: a large file with a draft token in its name is a target
-    # model with an integrated draft head, not a standalone draft file.
-    if size_bytes is not None and size_bytes > _DRAFT_MAX_SIZE_BYTES:
+    # Size guard: a large file with an ambiguous infix draft token is usually
+    # a target with an integrated head. A leading MTP marker explicitly names
+    # a separate head (including newer ~2.9 GiB Qwen/Tess heads), so keep it
+    # in the draft pool regardless of size.
+    explicit_mtp_head = n.startswith(("mtp-", "mtp_", "mtp."))
+    if (
+        size_bytes is not None
+        and size_bytes > _DRAFT_MAX_SIZE_BYTES
+        and not explicit_mtp_head
+    ):
         return False
     return True
 

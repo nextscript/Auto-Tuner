@@ -177,6 +177,30 @@ def test_scanner_skips_mmproj_from_main_list(tmp_path) -> None:
     assert entries[0].has_vision
 
 
+def test_scanner_hides_large_mtp_prefixed_draft(tmp_path, monkeypatch) -> None:
+    """A leading mtp- identifies an external head even above the generic
+    size guard; large infix -MTP- targets must remain runnable models."""
+    import scanner
+
+    large_size = int(2.9 * 1024**3)
+    assert scanner._is_draft_filename("mtp-Tess-4-27B-BF16.gguf", large_size)
+    assert not scanner._is_draft_filename("Tess-4-27B-MTP-Q4_K_M.gguf", large_size)
+
+    # Exercise the complete scan without creating a multi-GiB fixture.
+    monkeypatch.setattr(scanner, "_DRAFT_MAX_SIZE_BYTES", 32)
+    target = tmp_path / "Tess-4-27B-Q4_K_M.gguf"
+    draft = tmp_path / "mtp-Tess-4-27B-BF16.gguf"
+    _write_minimal_gguf(target)
+    _write_minimal_gguf(draft)
+    with draft.open("ab") as f:
+        f.write(b"\0" * 64)
+
+    entries = scan_models(tmp_path)
+    assert [entry.name for entry in entries] == ["Tess-4-27B-Q4_K_M"]
+    assert entries[0].draft == draft
+    assert entries[0].folder_drafts == [draft]
+
+
 def test_scanner_handles_empty_folder(tmp_path) -> None:
     assert scan_models(tmp_path) == []
 
@@ -2502,6 +2526,29 @@ def test_dense_spread_stays_priority_weighted(tmp_path) -> None:
     # Priority×VRAM (2×32 vs 1×16) → R9700 ≥ ~0.75; 9070 XT ≤ ~0.25.
     assert r97_share > 0.70, f"dense split not priority-weighted: r97={r97_share:.3f}"
     assert xt_share < 0.30, f"dense split puts too much on the 9070 XT: {xt_share:.3f}"
+
+
+# ---------------------------------------------------------------------------
+# Qt launcher helpers
+
+
+def test_open_local_folder_uses_qt_desktop_services(tmp_path, monkeypatch) -> None:
+    """The model context-menu action must use Qt's cross-platform opener."""
+    pytest.importorskip("PyQt6")
+    import qt_launcher
+
+    opened = []
+
+    class FakeDesktopServices:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url)
+            return True
+
+    monkeypatch.setattr(qt_launcher, "QDesktopServices", FakeDesktopServices)
+    assert qt_launcher._open_local_folder(tmp_path)
+    assert len(opened) == 1
+    assert Path(opened[0].toLocalFile()) == tmp_path.resolve()
 
 
 # ---------------------------------------------------------------------------

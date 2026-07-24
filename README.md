@@ -7,7 +7,7 @@ the RAM/VRAM you actually have free — without manual edits.
 
 # GUI-Design
 
-![v4.9.8](image.png)
+![v4.9.9](image.png)
 
 ## Features
 
@@ -57,8 +57,10 @@ the RAM/VRAM you actually have free — without manual edits.
     between them. The auto pick prefers the **highest precision**
     (f32 > f16 > bf16) on an otherwise-equal name match; your manual
     choice is remembered per model.
-  - `*-assistant-*.gguf` / `*-draft-*.gguf` → speculative decoding
-      (smallest matching sibling wins)
+  - `*-assistant-*.gguf` / `*-draft-*.gguf` / `mtp-*.gguf` → speculative
+    decoding (smallest matching sibling wins). A leading `mtp-` explicitly
+    marks an external draft head even when newer Qwen-based heads are several
+    GiB; large infix `…-MTP-…` target models remain normal runnable models.
 - **Capability badges in the model list** — symbols make it obvious
   what each model can do at a glance:
   - 👁 vision (mmproj projector paired)
@@ -69,6 +71,9 @@ the RAM/VRAM you actually have free — without manual edits.
   Detection reads the GGUF chat template directly — no name-based
   guessing — so `Qwen3-Coder` (no thinking) and `Qwen3-Embedding`
   (neither thinking nor tools) are correctly excluded.
+- **Open a model's folder directly** — right-click any entry in the Models
+  list and choose **GGUF-Ordner öffnen** to open its containing directory in
+  Explorer, Finder, or the Linux file manager.
 - **Reads GGUF metadata** — pulls `n_layers` and `context_length`
   straight from the file so partial GPU offload (`-ngl`) is exact.
 - **Author-recommended samplers from GGUF metadata** — many models embed
