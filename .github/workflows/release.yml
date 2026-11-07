@@ -37,7 +37,10 @@ jobs:
             os-label: Windows
             arch: x64
             artifact: AutoTuner-Windows-x64.zip
-          - runner: ubuntu-latest
+          # Pinned: ubuntu-latest moved to 26.04 (glibc 2.43) in Nov 2026, and
+          # the bundled libglib then refuses to start on Debian stable and
+          # Linux Mint 22.3. Build on the oldest supported image instead.
+          - runner: ubuntu-24.04
             os-label: Linux
             arch: x64
             artifact: AutoTuner-Linux-x64.zip

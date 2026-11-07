@@ -55,6 +55,11 @@ validation has its own file under [docs/](docs/).
   from the target's is no longer paired (found when `NVFP4` became a quant
   tag: the Bolt DFlash head would have bound to Nemotron 3 Nano Omni). All
   86 local models keep their mmproj and draft.
+- **Release build:** the Linux package is built on Ubuntu 24.04 again. GitHub
+  moved `ubuntu-latest` to 26.04 (glibc 2.43), and the first v5.6.4 build
+  failed to start on Debian stable and Linux Mint 22.3 (`GLIBC_2.43 not
+  found` in the bundled libglib); the release check stopped it before
+  publishing.
 - **Build recipes:** no change needed. b12187 adds only `LLAMA_CONNECT`
   (OFF) and a SYCL option; the user-built trees match the recipes and the
   HIP tree now links OpenSSL.
