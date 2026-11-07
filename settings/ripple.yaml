@@ -1,0 +1,39 @@
+display_name: "Ripple 65B Preview (Ricursive)"
+patterns:
+  - ripple-65b
+  - ripple_65b
+arch_fallback:
+  - ricursive
+
+# Architektur ricursive seit b12158 (PR #31692): dichtes 65B-Modell mit
+# SWA/Global-Mix, Attention-Gate und SwiGLU-Clamp. AtomicChat-GGUFs laden
+# laut Karte unverändert auf b12167 (Template mit Tools und <think>).
+min_llama_build: 12158
+max_context: 1048576
+recommended_kv_quant: q8_0
+
+# Die Modellkarte nennt keine Sampling-Werte: llama.cpp-Standardwerte.
+sampling:
+  chat:
+    temperature: 0.8
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.8
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Ricursive Ripple-65B Preview: a dense 65B reasoning and agent model with
+  up to 1,048,576 tokens of context (ricursive architecture, interleaved
+  sliding-window and global attention). Needs llama.cpp b12158+ (PR #31692);
+  the AtomicChat GGUFs carry the chat template with tools and thinking. The
+  model card publishes no sampling settings, so the profile keeps
+  llama.cpp's defaults (temperature 0.8, top-k 40, top-p 0.95, min-p 0.05).

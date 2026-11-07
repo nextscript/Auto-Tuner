@@ -1,0 +1,40 @@
+display_name: "Limite 1B Violetto (paradigma)"
+patterns:
+  - limite-1b
+  - limite_1b
+  - violetto
+arch_fallback:
+  - limite
+
+# Architektur limite seit b11988 (PR #29433). Das Chat-Template verlangt den
+# festen mathematischen System-Prompt des Modells und lehnt eigene
+# System-Nachrichten ab.
+min_llama_build: 11988
+max_context: 32768
+recommended_kv_quant: q8_0
+
+# generation_config.json / Modellkarte: temperature 0.6, top_p 0.95.
+sampling:
+  chat:
+    temperature: 0.6
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.6
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  paradigma Limite 1B Violetto: a small mathematical reasoning model (limite
+  architecture, llama.cpp b11988+, PR #29433). Its chat template requires
+  the model's own fixed system prompt and rejects custom system messages,
+  so leave the system prompt empty in clients. Sampling from the model
+  card: temperature 0.6, top-p 0.95. The profile caps the context at 32,768
+  tokens; the GGUF's own limit applies when it is lower.

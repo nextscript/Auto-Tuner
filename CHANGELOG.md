@@ -3,6 +3,68 @@
 Release history of AutoTuner. Each llama.cpp audit and each release
 validation has its own file under [docs/](docs/).
 
+### v5.6.4 — llama.cpp b12187 audit (after v0.8.0 / v0.9.0), Xing 4.0 and DeepSeek-V4.1 on mainline, eleven new profiles
+
+- **518 upstream commits audited (b11669 → b12187, spanning stable v0.8.0 =
+  b11960 and v0.9.0 = b12110):** new options `--connect` / `--connect-code`
+  (peer-to-peer tunnel) and the router-only `--models-memory-margin`
+  (423 names / 336 long options); nothing removed. `--connect-code` is a value
+  flag and is redacted like `--api-key` in the launch log, the OCR log and
+  the diagnostics report. Unicode model paths still work after upstream
+  dropped its Windows argv reconstruction (checked on both backends).
+- **Xing 4.0 runs:** mainline loads `xing4_0` since b12156 (PR #31589). The
+  block became a build floor; the profile uses the embedded MTP head with
+  one draft token and no confidence gate (mirrored A/B through AutoTuner's
+  plan: Vulkan 82 → 90–92 tok/s, HIP 64.5 → 74–77 tok/s; the usual p-min
+  0.75 removed most of the gain).
+- **DeepSeek-V4.1-Flash runs:** mainline `deepseek41` since b11870
+  (PR #31086). The profile is runnable from b11870 and claims its
+  architecture over a "DeepSeek-V4-…" filename (`arch_authoritative`); GGUFs
+  of the old conversion-only layout stay refused. The plan is unmeasured (no
+  local GGUF fits).
+- **Kolibri 1** runs on mainline b11709+ (PR #30673). GGUFs made with the
+  earlier hob patch store pre-tokenizer `kolibri1` and gating type 5, which
+  mainline rejects; AutoTuner now adds the equivalent `--override-kv` (qwen2
+  pre-tokenizer, sigmoid gating) on mainline. The local Q4_K_M answers
+  correctly at 67.5 tok/s (Vulkan) / 63.0 (HIP). The runtime-marker check
+  stays because the hob-llama.cpp fork reports b11434.
+- **New profiles:** Kimi K3.1 (b12180+; matched the K3 profile with the
+  b10749 floor before), LiquidAI LFM3 1.7B / VL / Audio / Omni, Muse Spark
+  Open, Mistral Large 4, DiffuSpace Clover, Ricursive Ripple, Limite 1B
+  Violetto, Recursive Flint, MiniCPM-OCR 1.0 and Nemotron 3.5 Transcribe (both
+  with `--reasoning off`, as their PRs require) and Nemotron-3/3.5-Embed
+  (embeddings). All fell back to the generic 8K profile. The decision
+  profile now matches LiquidAI d1-2B, H2O-Lightning-4B and MiniCPM-OCR-Jev.
+- **New build floors:** every architecture added after b11669
+  (`_ARCH_MIN_BUILD`, 13 entries), the decision types `granite-switch`,
+  `h2o-lightning`, `openbmb-minicpm-ocr-jev`, `lfm3-d1(-omni)` and 13 new
+  image/audio projector types. The hybrid and MoE tables know the new
+  architectures.
+- **LiLiCorr drafters run as DFlash again:** NVIDIA's Bolt drafter keeps
+  lattice layers beyond `dflash.block_count`; the scan took them for an MTP
+  block and AutoTuner sent `draft-mtp`, which stopped llama-server ("failed
+  to create MTP context"). EAGLE-3/DFlash/DSpark files are drafts by
+  architecture now.
+- **Drafters measured slower stay off by default** (new profile key
+  `auto_draft: false`, GUI and CLI; a remembered choice wins): Nemotron 3.5
+  Bolt + LiLiCorr cut the planned context on 48 GB from 168K/262K to 16K/24K
+  for +7 % (Vulkan) / −25 % (HIP) decode; MiniCPM-V 4.7 + DSpark only sped
+  up code on Vulkan and slowed German prose and every HIP run (down to
+  7.6 tok/s from 83). MiniCPM now uses 7 draft tokens when chosen.
+- **Draft pairing fix:** a DFlash/DSpark/MTP head whose size label differs
+  from the target's is no longer paired (found when `NVFP4` became a quant
+  tag: the Bolt DFlash head would have bound to Nemotron 3 Nano Omni). All
+  86 local models keep their mmproj and draft.
+- **Build recipes:** no change needed. b12187 adds only `LLAMA_CONNECT`
+  (OFF) and a SYCL option; the user-built trees match the recipes and the
+  HIP tree now links OpenSSL.
+- **Live chain on HIP and Vulkan (b12187):** all twenty planner/runtime
+  scripts, negative loads (Agnes, Bonsai 2; Xing refused on b11669 and
+  allowed on b12187), FastContext, Muse Glimmer JSON schema and the six new
+  local models pass. Image + DFlash2 keeps 152/168 accepted drafts;
+  Ling-3.0-flash on HIP now also passes the list bench; Qwen3.8 Flash Next
+  `draft-mtp` still aborts upstream (gate kept, verified on b12187).
+
 ### v5.6.3 — llama.cpp b11669 / v0.7.0 audit, Bonsai 2 on mainline, new NVIDIA and OpenBMB models
 
 - **131 upstream commits audited (b11538 → b11669, = stable v0.7.0):** the only

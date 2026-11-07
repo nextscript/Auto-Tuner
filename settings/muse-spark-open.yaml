@@ -1,0 +1,43 @@
+display_name: "Muse Spark Open 816B-A42B"
+patterns:
+  - muse-spark
+  - muse_spark
+  - musespark
+arch_fallback:
+  - muse-spark
+
+# Architektur muse-spark seit b11671 (PR #30616): Latent-MoE (256 Experten
+# in 4096, Residual 8192), 3 SWA-Layer (Fenster 2048) je globalem NoPE-Layer,
+# Bild über den Muse-Glimmer-Turm, Audio-Projektor muse-spark-audio.
+min_llama_build: 11671
+max_context: 1048576
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+# ggml-org/Muse-Spark-Open-816B-A42B-GGUF: Sampling im GGUF hinterlegt,
+# temperature 1.0, top_p 1.0, top_k 64.
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 64
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 1.0
+    top_k: 64
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Muse Spark Open: an 816B-total/42B-active latent-space MoE (256 experts,
+  8 active) with text, image and audio input and up to 1,048,576 tokens of
+  context (three sliding-window layers per global layer). Needs llama.cpp
+  b11671+ (PR #30616); images use the Muse Glimmer vision tower, audio the
+  muse-spark-audio projector. Sampling as stored in the ggml-org GGUFs:
+  temperature 1.0, top-p 1.0, top-k 64. Datacenter-scale: local use needs
+  aggressive quantization, large system RAM and CPU expert offload.

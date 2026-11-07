@@ -888,19 +888,19 @@ The tuner intelligently selects the best binary based on your model and settings
 - **Integrated MTP (e.g. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (native since b9190+; PR #22673 in mainline since 16 May 2026; no fork needed).
 - **Ternary-Bonsai / Ternary-Bonsai 2** $\rightarrow$ uses the PrismML prism fork
   (`2b_bNNNN_{vulkan,hip}_llama.cpp`) for the `PTQ1_0` / `PQ2_0` packings: mainline
-  llama.cpp (still b11669) rejects them as unknown ggml types 143 / 142. Since
+  llama.cpp (still b12187) rejects them as unknown ggml types 143 / 142. Since
   b11556 (PR #29600) mainline loads the Hadamard fold (`prism.hadamard.*`) for
   mainline conversions (`Q2_0`, `F16`; e.g. Ternary-Bonsai-2 2B/4B/9B `Q2_0`).
   AutoTuner therefore checks two loader strings in the selected runtime: the
   `prism.hadamard` loader, and for the private types also the fork's own
-  `PTQ1_0` / `PQ2_0` file-type names. Without that second check b11669 would
-  have accepted the PrismML `PTQ1_0` / `PQ2_0` GGUFs and failed while loading.
+  `PTQ1_0` / `PQ2_0` file-type names. Without that second check b11669 and later
+  would accept the PrismML `PTQ1_0` / `PQ2_0` GGUFs and fail while loading.
 - **Agnes-3.0-Flash Preview, kingjones777 `MTP-ROCmFP4` / `ROCmFPX` GGUFs** $\rightarrow$
   need the ROCmFPX fork (`github.com/ROCmFPX/ROCmFPX`, legacy
   `charlie12345/ROCmFPX`). Their weights use the fork's reserved ggml types
   100–111 (`Q4_0_ROCMFP4` = 100, `Q8_0_ROCMFPX` = 103; file types 100–124, e.g.
-  106 = *ROCmFP4 Strix Lean*), which mainline llama.cpp (still b11669) rejects as
-  `invalid ggml type 100. should be in [0, 43)`; the CPU-only upstream PR #24185
+  106 = *ROCmFP4 Strix Lean*), which mainline llama.cpp (still b12187) rejects as
+  `invalid ggml type 100. should be in [0, 44)`; the CPU-only upstream PR #24185
   is still open. AutoTuner records the tensor types during the header scan
   and refuses such a GGUF before launch on a runtime whose llama library has
   no `ROCmFP` loader string. Agnes itself is a folded `qwen35` conversion: the
@@ -991,7 +991,7 @@ matches. See `settings/_default.yaml`.
 | `qwen3_8_flash_next.yaml` | Qwen3.8 Flash Next, PLE + QSA hybrid MoE (b10666+ safety gate) | `qwen4exp` |
 | `nemotron-3_5.yaml` | NVIDIA Nemotron 3.5 Lightning 30B-A3B + MTP/DSpark | `nemotron_h` |
 | `nemotron-3_5-super-vl.yaml` | NVIDIA Nemotron 3.5 Super VL 120B-A12B, image/video (`nemotron_omni` mmproj), separate MTP head, 1M context; b11668+ | `nemotron_h_moe` (filename) |
-| `nemotron-3_5-bolt.yaml` | NVIDIA Nemotron 3.5 Bolt 74B-A9B (per-layer expert counts), image input, LiLiCorr drafter; b11668+ | `nemotron_h_moe` (filename) |
+| `nemotron-3_5-bolt.yaml` | NVIDIA Nemotron 3.5 Bolt 74B-A9B (per-layer expert counts), image input, LiLiCorr drafter listed but not preselected (costs 90 % of the context on 48 GB); b11668+ | `nemotron_h_moe` (filename) |
 | `nanbeige-4_2.yaml` | Nanbeige 4.2 3B, 256k agent/reasoning model | `nanbeige` |
 | `mellum.yaml` | JetBrains Mellum2-12B-A2.5B (Base/Instruct/Thinking), MoE | `mellum` |
 | `exaone-4_5.yaml` | LG EXAONE 4.5 33B VLM (dense, non-commercial license) | `exaone4` |
@@ -999,14 +999,14 @@ matches. See `settings/_default.yaml`.
 | `granite-4_2.yaml` | IBM Granite 4.2 3B/8B/30B dense reasoning + tools | `granite` (filename-gated) |
 | `granite-embedding-r2.yaml` | IBM Granite Embedding Multilingual R2 97m/311m (**embedding**, not chat) | `modern-bert` |
 | `embeddinggemma-2.yaml` | Google EmbeddingGemma 2 (**embedding**, not chat; 8K, one physical batch), b11452+ | `gemma-embedding2` |
-| `decision-systemone.yaml` | TypeSafe decision models OpenJev / lev / Laya / Julia-1 / Kev / Nimble / Perplexity pplx-decider / LiquidAI d1-3B and d1-omni-600M / vLLM Decision 2 and D3 (**`/v1/systemone` only**, b11364+; per-type floors b11447 / b11483 / b11488 / b11571 / b11577 from `<arch>.decision.type`; no prompt cache) | `vllm-decision2`; otherwise filename; `<arch>.decision.type` drives batch/context and build floor |
+| `decision-systemone.yaml` | TypeSafe decision models OpenJev / lev / Laya / Julia-1 / Kev / Nimble / Perplexity pplx-decider / LiquidAI d1-3B, d1-2B, d1-omni-600M and d1-omni-2B / vLLM Decision 2 and D3 / H2O-Lightning-4B / MiniCPM-OCR-Jev (**`/v1/systemone` only**, b11364+; per-type floors b11447 … b11945 from `<arch>.decision.type`; no prompt cache) | `vllm-decision2`; otherwise filename; `<arch>.decision.type` drives batch/context and build floor |
 | `clef.yaml` | Cloudflare Clef / Clef-Flash joint decision model (**`/v1/systemone` only**, b11371+; images b11418+ with a 2026-10-05+ GGUF) | `clef` |
 | `llm-jp-4_1.yaml` | NII LLM-jp-4.1 thinking 8B / 33B / 32B-A3B, Harmony dialect parser b11320+ | filename only; generic `llama` |
 | `muse-glimmer.yaml` | Meta Muse Glimmer 30B + optional vision/DFlash; b11100+ recommended for tool calls, b11249+ for `json_schema` output | `muse-glimmer` |
 | `mimo-v2_6.yaml` | MiMo-V2.6 Flash/Pro RL, 1M ceiling, official 1.0/0.95 sampling, b11102+; separate `--mtp` heads b11195+ | `mimo2` (filename-gated; no local weights tested) |
 | `mimo-v2_6-distill.yaml` | Xiaomi MiMo-V2.6-Distill-Qwen-9B (Qwen3.5-9B SFT, not the MoE): official 0.6/20/0.95 sampling, 262k, thinking + Qwen3-Coder XML tools, vision via Qwen3.5 mmproj | `qwen35` (filename-gated; tested locally) |
 | `fastcontext-1_0-4b.yaml` | Microsoft FastContext 1.0 4B SFT/RL repository explorer, 262k, GGUF sampling defaults | `qwen3` (filename-gated) |
-| `xing-4_0.yaml` | Xing 4.0 29B-A4B: **recognition only, launch blocked; no b11669 loader** | `xing4_0` |
+| `xing-4_0.yaml` | Xing 4.0 29B-A4B (MLA + mHC MoE), embedded MTP head with one draft token and p-min 0 (measured +10–20 %); mainline b12156+ | `xing4_0` |
 | `voxcpm2.yaml` | VoxCPM2 BaseLM: **Voice Lab TTS component, ordinary chat launch blocked** | `minicpm4` (filename-gated, not an architecture-wide block) |
 | `minimax-m3.yaml` | MiniMax-M3 428B-A23B multimodal MSA MoE | `minimax-m3` |
 | `glm-5.yaml` | GLM-5/5.1 | `glm5` |
@@ -1017,19 +1017,30 @@ matches. See `settings/_default.yaml`.
 | `hy4-mainline.yaml` | Tencent HY4 Preview, official mainline GGUF, b10813+ | `hy_v4` |
 | `spark2_5.yaml` | Spark X2.5 1.7B / 4B, 1M native context, b10828+ | `spark2_5` |
 | `minicpm5.yaml` / `minicpm5-2b.yaml` | MiniCPM5 1B / 2B (GGUF: 2.6B), distinct official sampling, 128K context | filename only; generic `llama` |
-| `minicpm-v-4_7.yaml` | OpenBMB MiniCPM-V 4.7 1B / 35B-A3B, image and video; images need b11551+ (`minicpmv4_7` mmproj) | filename (`qwen35` / `qwen35moe`) |
+| `minicpm-v-4_7.yaml` | OpenBMB MiniCPM-V 4.7 1B / 35B-A3B, image and video; images need b11551+ (`minicpmv4_7` mmproj); DSpark drafter listed but not preselected | filename (`qwen35` / `qwen35moe`) |
 | `k2-horizon.yaml` | IFM K2 Horizon dense 1B–32B and MoVA-36B-A4B, 512K; mainline b11454+ (PR #29535) or the IFM fork, checked by runtime marker | `k2-horizon` |
-| `kolibri-1.yaml` | Aleph Alpha Kolibri 1 78B-A3.5B (German/English reasoning): **needs the hob-llama.cpp patch**, refused on mainline by runtime marker | `kolibri1` |
+| `kolibri-1.yaml` | Aleph Alpha Kolibri 1 78B-A3.5B (German/English reasoning): mainline b11709+ (hob-patch GGUFs get `--override-kv` for pre-tokenizer/gating) or the hob-llama.cpp runtime, checked by runtime marker | `kolibri1` |
 | `bonsai-2.yaml` | PrismML Ternary-Bonsai 2 2B / 4B / 9B Q2_0 + Hadamard fold: mainline b11556+ or the prism fork | filename (`qwen35`) |
 | `laguna-xs-2_1.yaml` | Poolside Laguna XS 2.1 / XS.2 33B-A3B agentic coding; b11598+ (YaRN beta) | filename (`laguna`) |
 | `granite-switch-4_1.yaml` | IBM Granite Switch 4.1 adapters | `graniteswitch` |
 | `deepseek-v4.yaml` | DeepSeek-V4 Pro / Flash, 1M context | `deepseek4` |
-| `deepseek-v4_1.yaml` | DeepSeek-V4.1-Flash: **recognition only, launch blocked; no b11669 runtime** | proposed `deepseek41`, not compatible with `deepseek4` |
+| `deepseek-v4_1.yaml` | DeepSeek-V4.1-Flash 552B CED MoE, image input, 1M; mainline b11870+ (old conversion-only GGUFs refused; plan unmeasured) | `deepseek41` (authoritative over a V4 filename) |
 | `shieldstral.yaml` | Shieldstral 1.0 3B safety classifier | Ministral 3-derived |
 | `ling-3.yaml` | Ling 3.0 Flash/Tiny (loader b10460; corrected SSM state contract b10749+; dedicated Bailing V3 chat parser b11063+) | `bailingmoe3` |
 | `ling-3_0-vl.yaml` | Ling-3.0-flash-VL image/video model (ling3vl projector + M-RoPE), b11156+; older builds refused by metadata gate | `bailingmoe3` with `rope.dimension_sections` (filename-gated; no local weights tested) |
 | `kimi-linear.yaml` | Kimi Linear 48B-A3B, 1M hybrid KDA/MLA (corrected SSM state contract b10749+) | `kimi-linear` |
 | `kimi-k3.yaml` | Kimi-K3 text path (loader b10448; corrected SSM state contract b10749+) | `kimi-k3` |
+| `kimi-k3_1.yaml` | Kimi K3.1 (Pro) 2.8T-A104B text path (KDA + gated DSA), 1M; b12180+ | `kimi-k31` (authoritative) |
+| `lfm3.yaml` | LiquidAI LFM3-1.7B / VL-2B / Audio-2B / Omni-2B, 256K; b11938+ (audio b11941+) | `lfm3` |
+| `muse-spark-open.yaml` | Muse Spark Open 816B-A42B text/image/audio latent MoE, 1M; b11671+ | `muse-spark` |
+| `mistral-large-4.yaml` | Mistral Large 4 1T-A52B, image input, 1M; b11998+ | `mistral-large4` |
+| `clover.yaml` | DiffuSpace Clover-35B-A3B-Preview block-diffusion model in AR mode, 128K; b12060+ | `clover_moe` |
+| `ripple.yaml` | Ricursive Ripple-65B Preview dense reasoning/agent model, 1M; b12158+ | `ricursive` |
+| `limite.yaml` | paradigma Limite 1B Violetto math reasoning (fixed system prompt); b11988+ | `limite` |
+| `flint.yaml` | Recursive Flint 40B-A2.5B coding-agent MoE, 256K; b11803+ | `flint` |
+| `minicpm-ocr-1_0.yaml` | OpenBMB MiniCPM-OCR 1.0 document OCR, `--reasoning off`, greedy; b11826+ | filename (`qwen35`) |
+| `nemotron-3_5-transcribe.yaml` | NVIDIA Nemotron 3.5 Transcribe 30B-A4B speech-to-text, `--reasoning off`, 64K; b12087+ | filename (`nemotron_h_moe`) |
+| `nemotron-embed.yaml` | NVIDIA Nemotron-3 / 3.5-Embed 1B / 8B (**embedding**, not chat); b11833+ | filename |
 
 Per-release notes on individual profiles (why a profile exists, what was
 measured, which build it needs) live in
@@ -1162,6 +1173,11 @@ existing tree (e.g. `-Tag b11669`) rebuilds it with HTTPS; the Vulkan/MSVC
 trees always had it. F16C/FMA are active on both backends (MSVC's `/arch:AVX2`
 implies them), so b11669's F16C fixes for AVX2 CPUs (PRs #30270/#30343) apply
 without a recipe change.
+b11669…b12187 adds only the CMake options `LLAMA_CONNECT` (default OFF; it
+downloads the prebuilt `llama-connect` tool that `--connect` needs) and a SYCL
+switch; the recipes do not set either. The user-built b12187 trees use the
+recipe flags unchanged, and the HIP tree links OpenSSL. The stable recipes
+resolve the latest release (now v0.9.0 = b12110) and need no change.
 MSBuild's MSB8027 "two files named llama.cpp" warning in the Vulkan tree is
 benign: `src/models/llama.cpp` is folded into a unity source and only one
 `llama.obj` is produced.
@@ -1196,10 +1212,26 @@ same CMake flags from the recipes. The only AutoTuner requirement is that the
 resulting binary is discoverable, e.g. `LLAMA_CPP_DIR=/opt/ai-local/b9888_llama.cpp`
 with `build/bin/llama-server` inside.
 
-## Server features (audited through llama.cpp b11669)
+## Server features (audited through llama.cpp b12187)
 
-The **b11669** (`620d2225c`, `0.7.0-dev`, = stable **v0.7.0**)
-[audit](docs/llama-b11669-audit.md) covers 131 commits after b11538. The only
+The **b12187** (`cf659f240`, `0.9.0-dev`; stable v0.8.0 = b11960, v0.9.0 =
+b12110) [audit](docs/llama-b12187-audit.md) covers 518 commits after b11669.
+New options are `--connect` / `--connect-code` (peer-to-peer tunnel; the code
+is redacted from AutoTuner's logs) and the router-only
+`--models-memory-margin` (423 names / 336 long options). **Xing 4.0** and
+**DeepSeek-V4.1-Flash** now run on mainline (b12156 / b11870) and are no
+longer blocked; Xing uses its MTP head with one draft token (+10–20 % decode).
+Kolibri 1 runs on mainline b11709+, including GGUFs made with the earlier hob patch (AutoTuner maps their pre-tokenizer and gating type). New profiles: **Kimi K3.1**, **LFM3**,
+**Muse Spark Open**, **Mistral Large 4**, **Clover**, **Ripple**, **Limite**,
+**Flint**, **MiniCPM-OCR 1.0**, **Nemotron 3.5 Transcribe** and
+**Nemotron-Embed**; every architecture, decision type and projector added
+after b11669 has a build floor. LiLiCorr drafters run as `draft-dflash` again
+(they were sent as MTP), a draft head is no longer paired with a model of
+another size, and drafters measured slower than no draft (Bolt + LiLiCorr,
+MiniCPM-V 4.7 + DSpark) stay selectable but are not chosen by default. See [validation](docs/v5.6.4-validation.md).
+
+The previous **b11669** (`620d2225c`, `0.7.0-dev`, = stable **v0.7.0**)
+[audit](docs/llama-b11669-audit.md) covered 131 commits after b11538. The only
 CLI addition is **`--spec-draft-n-ubatch`** (420 names / 333 long options);
 AutoTuner sends `--spec-draft-n-ubatch 64` for external DFlash/DFlash2/
 LiLiCorr drafts and MTP heads (measured: −1.26 GiB VRAM for Qwen3.8-27B +
@@ -1213,8 +1245,8 @@ otherwise have let through. New profiles: **Nemotron 3.5 Super VL / Bolt**,
 floors, and LiLiCorr drafters pair automatically. The HIP build recipes now
 link OpenSSL (HTTPS was missing) and the stable recipe rejects a `-dev`
 build. Qwen3.8 Flash Next `draft-mtp` still aborts upstream and stays off.
-Throughput is within ±2 % of b11538. See
-[validation](docs/v5.6.3-validation.md). Summaries of earlier audits are in
+Throughput was within ±2 % of b11538
+([validation](docs/v5.6.3-validation.md)). Summaries of earlier audits are in
 [CHANGELOG.md](CHANGELOG.md#earlier-llamacpp-audit-summaries); every audit
 has its own file under [docs/](docs/).
 

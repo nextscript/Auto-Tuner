@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import tuner
-from settings_loader import ModelProfile, load_profiles, match_profile
+from settings_loader import load_profiles, match_profile
 from test_kv_policy import _model
 from test_smoke import _fake_model_md, _fake_system
 
@@ -192,25 +192,6 @@ def test_mainline_b11063_still_lacks_the_prism_and_rocmfpx_types(tmp_path, monke
 
 
 # ------------------------------------------------------------- carry-over ----
-
-
-def test_v41_block_names_b11669(tmp_path):
-    # PR #28696 is still an open draft (last updated 2026-09-19): the block
-    # now names the b11669 re-check.
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason
-    assert "b11030" not in profile.runtime_block_reason
-    assert "b11030" not in profile.notes
-    with pytest.raises(ValueError, match="b11669"):
-        tuner.build_command(_model(tmp_path), _config(), profile)
-    renamed = _model(tmp_path)
-    renamed.metadata = {"general.architecture": "deepseek41"}
-    with pytest.raises(ValueError, match="b11669 / conversion-only PR #28696"):
-        tuner.build_command(renamed, _config(), ModelProfile("custom"))
-    for pack in sorted((ROOT / "assets/languages").glob("*.json")):
-        notes = json.loads(pack.read_text(encoding="utf-8"))["profile_notes"]
-        assert "b11669" in notes["deepseek-v4_1.yaml"], pack.name
-        assert "b11030" not in notes["deepseek-v4_1.yaml"], pack.name
 
 
 def test_vision_dflash2_gate_is_unchanged_and_names_b11063():

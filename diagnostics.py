@@ -406,6 +406,13 @@ def _redact_support_text(text: str, roots: Iterable[Path]) -> str:
     # but redact common accidental key/value and Bearer-token spellings before a
     # user shares the report.
     out = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", out)
+    # Command-line spellings: "--api-key VALUE", "--connect-code VALUE" (the
+    # b12187 peer-to-peer tunnel code), "--hf-token VALUE".
+    out = re.sub(
+        r"(?i)(--(?:api-key|connect-code|hf-token))(?:\s+|=)(?!<redacted>)[^\s\"']+",
+        r"\1 <redacted>",
+        out,
+    )
     out = re.sub(
         r"(?i)\b(api[_-]?key|access[_-]?token|authorization|password|secret)"
         r"\s*[:=]\s*[^\r\n,;]+",

@@ -12,6 +12,14 @@ patterns:
 # Text läuft auch auf älteren Builds; der Projektor minicpmv4_7 braucht
 # b11551+ (PR #29416) und ist per tuner._MMPROJ_PROJECTOR_MIN_BUILD gesichert.
 max_context: 262144
+
+# DSpark-Drafter (dspark-MiniCPM-V-4_7-35B-A3B-F16) gespiegelt auf b12187,
+# R9700 + RX 9070 XT, 400 Token, Decode tok/s ohne Draft / n=16 / n=7 / n=3:
+# Vulkan Code 118 / 135 / 160 / 158, Vulkan Prosa (deutsch) 119 / 42 / 58 / 73,
+# HIP Code 84 / 45 / 63 / 54, HIP Prosa 83 / 7.6 / 22 / 26. Nur Code unter
+# Vulkan profitiert -> Drafter bleibt wählbar, wird aber nicht vorausgewählt.
+auto_draft: false
+draft_max: 7
 recommended_kv_quant: q8_0
 
 # OpenBMB-Modellkarte, Instruct-Modus: temperature 0.7, top_p 0.95,
@@ -41,7 +49,10 @@ notes: >
   Image input needs llama.cpp b11551+ (PR #29416) for the minicpmv4_7
   projector; text works on older builds. The official GGUF projector is
   named generically (mmproj-model-f16.gguf), so attach it by hand if
-  AutoTuner does not pair it. DSpark drafters (dspark-MiniCPM-V-4_7-*) pair
-  automatically. Official instruct sampling: temperature 0.7, top-p 0.95,
+  AutoTuner does not pair it. DSpark drafters (dspark-MiniCPM-V-4_7-*) are
+  listed but not selected by default: on b12187 (R9700 + RX 9070 XT) the
+  35B-A3B drafter sped up code on Vulkan (118 to 160 tok/s with 7 draft
+  tokens) but slowed German prose and every HIP run (for example 119 to
+  42-73 tok/s), so select it per model when it pays off. Official instruct sampling: temperature 0.7, top-p 0.95,
   top-k 100, repetition penalty 1.03; thinking can be switched per request
   with enable_thinking.

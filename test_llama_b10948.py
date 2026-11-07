@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import tuner
-from settings_loader import ModelProfile, load_profiles, match_profile
+from settings_loader import load_profiles, match_profile
 from test_kv_policy import _model
 
 ROOT = Path(__file__).resolve().parent
@@ -129,15 +129,3 @@ def test_documented_alternatives_still_build_on_b10948(tmp_path, monkeypatch):
     assert "--mmproj" in text_only and "-md" not in text_only
     model.mmproj = None
     assert "-md" in tuner.build_command(model, config, profile, draft_model=draft)
-
-
-def test_v41_block_names_b11669(tmp_path):
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason
-    assert "b10930" not in profile.runtime_block_reason
-    with pytest.raises(ValueError, match="b11669"):
-        tuner.build_command(_model(tmp_path), _config(), profile)
-    renamed = _model(tmp_path)
-    renamed.metadata = {"general.architecture": "deepseek41"}
-    with pytest.raises(ValueError, match="b11669 / conversion-only PR #28696"):
-        tuner.build_command(renamed, _config(), ModelProfile("custom"))

@@ -124,15 +124,10 @@ def test_qwen_style_dflash_and_dspark_keep_old_floor(tmp_path, monkeypatch):
         assert tuner.check_draft_model_build(draft, "llama-server")[0]
 
 
-def test_v41_xing_and_vision_gates_name_b11669(tmp_path, monkeypatch):
-    # Re-checked on b11669 (v5.6.3): the wording moved on with the audit.
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason
-    xing = _fake_model_md(tmp_path, "xing", 19, {"general.architecture": "xing4_0"})
-    assert "b11669" in tuner._model_runtime_block_reason(xing)
+def test_ling_vl_note_and_vision_gate_stay(tmp_path, monkeypatch):
     for pack in sorted((ROOT / "assets/languages").glob("*.json")):
         text = pack.read_text(encoding="utf-8")
-        assert text.count("b11669") >= 2 and "b11160" not in text, pack.name
+        assert "b11160" not in text, pack.name
         notes = json.loads(text)["profile_notes"]
         assert "b11156" in notes["ling-3_0-vl.yaml"], pack.name
     model, draft, profile, config = _qwen_vision_dflash2(tmp_path)

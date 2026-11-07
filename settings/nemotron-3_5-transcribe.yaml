@@ -1,0 +1,43 @@
+display_name: "Nemotron 3.5 Transcribe 30B-A4B (NVIDIA)"
+patterns:
+  - nemotron-3.5-transcribe
+  - nemotron-3_5-transcribe
+  - nemotron3.5-transcribe
+  - nemotron-35-transcribe
+
+# Audio-Projektor nemotron_transcribe seit b12087 (PR #31471); Text-Teil
+# nemotron_h_moe. Das Chat-Template schaltet Thinking standardmäßig ein:
+# ohne --reasoning off liefert llama-server nur Reasoning und kein Transkript
+# (PR-Hinweis). Transkription laut Karte mit temperature 0.
+min_llama_build: 12087
+max_context: 65536
+recommended_kv_quant: q8_0
+
+sampling:
+  chat:
+    temperature: 0.0
+    top_k: 1
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.0
+    top_k: 1
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+  - --reasoning
+  - "off"
+
+notes: >
+  NVIDIA Nemotron 3.5 Transcribe: an offline speech model (34B total with
+  the audio encoder, 4.3B active) for transcription, translation and
+  speaker attribution in 40 languages, recordings up to one hour, 65,536
+  tokens of context. Needs llama.cpp b12087+ (PR #31471) and its mmproj.
+  The profile starts llama-server with --reasoning off and greedy decoding,
+  as NVIDIA recommends for transcription; for audio understanding NVIDIA
+  uses reasoning on with temperature 0.6 and top-p 0.95. Word timestamps
+  and streaming are not supported in llama.cpp yet.

@@ -974,11 +974,16 @@ _HYBRID_ARCHS = frozenset(
         "zamba2",  # Zamba2 hybrid
         "lfm2",  # LFM2 dense hybrid (short-conv + attention)
         "lfm2moe",  # LFM2.5-MoE hybrid (b9672 hybrid)
+        "lfm3",  # LFM3 (b11938): short-conv + SWA/global attention
+        "metis16",  # Metis-1.6 (b12089): Mamba-2 + GQA, depth recurrence
+        "clover_moe",  # Clover (b12060): Qwen3.6-MoE GDN hybrid
+        "deepseek41",  # DeepSeek-V4.1 (b11870): like deepseek4, full-layer KV
         "qwen3next",  # Qwen3-Next: gated-delta-net + full attention
         "kimi-linear",  # Kimi-Linear hybrid
         "kimi_linear",
         "kimi-k3",  # Kimi-K3: KDA + gated MLA (b10448, text path)
         "kimi_k3",
+        "kimi-k31",  # Kimi-K3.1 (b12180): 69 KDA + 24 gated-DSA layers
         "glm5next",  # GLM-5.3-Flash KDA/DSA (full-layer safety accounting below)
         "glm5-next",
         "hyv4",  # HY4 Gated DSA/IndexCache (fork-only allocation contract)
@@ -1211,8 +1216,10 @@ def metadata_attention_layer_count(md: Dict[str, Any]) -> int:
     elif ("kimi" in arch_l and "linear" in arch_l) or arch_l in {
         "kimi-k3",
         "kimi_k3",
+        "kimi-k31",
     }:
-        # Kimi-Linear/K3: three KDA layers per gated-MLA layer (~25%).
+        # Kimi-Linear/K3/K3.1: three KDA layers per attention layer (~25%;
+        # K3.1: 24 gated-DSA of 93 layers).
         ratio = 0.25
     elif "bailingmoe3" in arch_l:
         # Ling 3.0 Flash: 35 KDA + 7 gated-MLA layers (one in six).
@@ -1412,6 +1419,7 @@ _QUANT_PATTERN = re.compile(
     r"(?:Q\d+(?:_[A-Z0-9]+)*"
     r"|IQ\d+(?:_[A-Z0-9]+)*"
     r"|MXFP4(?:_MOE)?"  # MXFP4 / MXFP4_MOE (no Q-prefix)
+    r"|NVFP4|F8_E4M3|FP8"  # NVFP4, OCP FP8 E4M3 (ggml type 43, b12000)
     r"|BF16|F16|F32"
     r")"
     r"(?:[-._][0-9.]+bpw)?"
@@ -1608,6 +1616,17 @@ class ModelEntry:
         if self.metadata and (
             metadata_is_standalone_drafter(self.metadata)
             or metadata_is_mtp_only_head(self.metadata)
+        ):
+            return False
+        # EAGLE-3 / DFlash / DSpark draft models are drafts by architecture.
+        # NVIDIA's LiLiCorr drafters (arch dflash) store their lattice
+        # layers as blk.5..7 beyond dflash.block_count = 5, which the tensor
+        # scan reports as an MTP block; treating the draft as an MTP head
+        # sent "--spec-type draft-mtp" and llama-server stopped with
+        # "failed to create MTP context".
+        if self.metadata and (
+            str(self.metadata.get("general.architecture", "") or "").lower().strip()
+            in _DRAFTER_ARCHS
         ):
             return False
         # Primary: authoritative GGUF metadata
@@ -1959,6 +1978,7 @@ _QUANT_CORE_PATTERN = re.compile(
     r"(?:Q\d+(?:_[A-Z0-9]+)*"
     r"|IQ\d+(?:_[A-Z0-9]+)*"
     r"|MXFP4(?:_MOE)?"
+    r"|NVFP4|F8_E4M3|FP8"
     r"|BF16|F16|F32"
     r")"
     r"(?:[-._][0-9.]+bpw)?"
@@ -1983,6 +2003,35 @@ def _strip_quant_keep_variant(filename: str) -> str:
 def _draft_match_base(filename: str) -> str:
     """Canonical base of a drafter: quant stripped (UD kept), marker removed."""
     return _canonical_sep(_DRAFT_MARKER_RE.sub("", _strip_quant_keep_variant(filename)))
+
+
+# Parameter-size labels such as "27b", "74b-a9b", "0.8b" or "30b_a3b".
+_SIZE_LABEL_RE = re.compile(
+    r"(?<![a-z0-9.])(\d+(?:\.\d+)?)b(?:[-_.]?a(\d+(?:\.\d+)?)b)?(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _size_labels(text: str) -> Set[str]:
+    """Return the normalized parameter-size labels in a filename stem."""
+    return {
+        f"{total}b" + (f"-a{active}b" if active else "")
+        for total, active in _SIZE_LABEL_RE.findall(text.lower())
+    }
+
+
+def _size_labels_conflict(model_name: str, draft_name: str) -> bool:
+    """True when a draft head names a different model size than the target.
+
+    DFlash/DSpark/MTP/EAGLE heads are trained for one target. Two family
+    names can share a long prefix ("NVIDIA-Nemotron-3-Nano-Omni-30B-A3B" and
+    a "dflash-NVIDIA-Nemotron-3.5-Bolt-74B-A9B" head); different size labels
+    on both sides mean the head belongs to another model. Files without a
+    size label are not judged.
+    """
+    model_sizes = _size_labels(_strip_quant_keep_variant(model_name))
+    draft_sizes = _size_labels(_strip_quant_keep_variant(draft_name))
+    return bool(model_sizes and draft_sizes and not (model_sizes & draft_sizes))
 
 
 def _common_prefix_len(a: str, b: str) -> int:
@@ -2067,6 +2116,8 @@ def _find_draft(model: Path, candidates: List[Path]) -> Optional[Path]:
         c_base = _draft_match_base(c.name)
         if not c_base:
             continue
+        if _size_labels_conflict(model.name, c.name):
+            continue
         cp = _common_prefix_len(main_base, c_base)
         # Require a meaningful shared prefix: at least half of the shorter
         # base (so "gemma-4-12b" alone can't bind a coder drafter to an
@@ -2127,7 +2178,7 @@ def is_draft_compatible(
     """
     main_base = _canonical_sep(_strip_quant_keep_variant(model.name))
     d_base = _draft_match_base(draft.name)
-    if d_base and main_base:
+    if d_base and main_base and not _size_labels_conflict(model.name, draft.name):
         cp = _common_prefix_len(main_base, d_base)
         if cp >= max(8, min(len(main_base), len(d_base)) // 2):
             return True

@@ -533,8 +533,8 @@ def test_k2_horizon_profile_accepts_mainline_marker(monkeypatch):
 def test_qwen4exp_draft_mtp_gate_was_rechecked_on_b11538(tmp_path, monkeypatch):
     """b11538 HIP/Vulkan: the separate Flash Next head still aborts with
     GGML_ASSERT(buffer); the embedded head stays unused. Re-checked on
-    b11669 (v5.6.3) with the same result."""
-    assert tuner._QWEN4EXP_MTP_HEAD_VERIFIED_BUILD == 11669
+    b11669 (v5.6.3) and b12187 (v5.6.4) with the same result."""
+    assert tuner._QWEN4EXP_MTP_HEAD_VERIFIED_BUILD == 12187
     head = _mtp_head(
         tmp_path,
         "mtp-Qwen3.8-Flash-Next-Q4_K_M",
@@ -545,7 +545,7 @@ def test_qwen4exp_draft_mtp_gate_was_rechecked_on_b11538(tmp_path, monkeypatch):
     monkeypatch.setattr(tuner, "_probe_binary_build_number", lambda _: 11538)
     ok, reason, detected = tuner.check_draft_model_build(head, "llama-server")
     assert not ok and detected == 11538
-    assert "GGML_ASSERT(buffer)" in reason and "b11669 HIP and Vulkan" in reason
+    assert "GGML_ASSERT(buffer)" in reason and "b12187 HIP and Vulkan" in reason
 
 
 # ------------------------------------------------------- EmbeddingGemma 2

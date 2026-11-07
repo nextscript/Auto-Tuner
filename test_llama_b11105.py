@@ -141,16 +141,20 @@ def test_fastcontext_4b_follows_gguf_defaults(tmp_path, variant):
 
 
 @pytest.mark.parametrize("name", ["xing4_0-29b-IQ4_NL", "renamed-model"])
-def test_xing_architecture_is_recognized_but_not_advertised_as_supported(
-    tmp_path, name
-):
+def test_xing_architecture_needs_the_b12156_loader(tmp_path, name, monkeypatch):
+    # b11105 recognised xing4_0 without a loader; mainline added it in
+    # b12156 (PR #31589), so the block became a build floor.
     model = _fake_model_md(tmp_path, name, 19, {"general.architecture": "xing4_0"})
     profile = match_profile(name, _profiles(), "xing4_0")
     assert profile.source_file == "xing-4_0.yaml"
+    assert not profile.runtime_block_reason
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 12155)
     assert not tuner.check_profile_build(profile, "llama-server")[0]
-    assert not tuner.check_model_build(model, "llama-server")[0]
-    with pytest.raises(ValueError, match="xing4_0.*no loader"):
-        tuner.build_command(model, _config(), ModelProfile("custom"))
+    ok, message, _ = tuner.check_model_build(model, "llama-server")
+    assert not ok and "b12156" in message and "xing4_0" in message
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 12156)
+    assert tuner.check_profile_build(profile, "llama-server")[0]
+    assert tuner.check_model_build(model, "llama-server")[0]
 
 
 def test_voxcpm2_is_not_a_standalone_chat_model(tmp_path):

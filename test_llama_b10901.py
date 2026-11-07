@@ -48,24 +48,26 @@ def test_v41_never_inherits_v4_runtime(name, arch, monkeypatch):
     assert profile.source_file == "deepseek-v4_1.yaml"
     assert profile.max_context == 1048576
     assert profile.sampling["chat"]["top_p"] == 0.95
-    monkeypatch.setattr(
-        tuner, "probe_binary_build_number", lambda _: pytest.fail("must not probe")
-    )
-    allowed, message, detected = tuner.check_profile_build(profile, "future-wrapper")
-    assert not allowed and "PR #28696" in message
-    assert detected is None  # A future build number alone cannot prove support.
+    # b11870 (PR #31086) added the deepseek41 loader; the block became a floor.
+    assert not profile.runtime_block_reason
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 11869)
+    allowed, message, _ = tuner.check_profile_build(profile, "server")
+    assert not allowed and "b11870" in message
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 11870)
+    assert tuner.check_profile_build(profile, "server")[0]
 
 
-@pytest.mark.parametrize("arch", ["deepseek41", "deepseek_v41", "deepseek_v41_text"])
-def test_v41_metadata_overrides_generic_filename(arch):
-    assert match_profile("DeepSeek-V4-Custom", _profiles(), arch).runtime_block_reason
+def test_v41_metadata_overrides_generic_filename():
+    profile = match_profile("DeepSeek-V4-Custom", _profiles(), "deepseek41")
+    assert profile.source_file == "deepseek-v4_1.yaml"
+    assert profile.min_llama_build == 11870
 
 
 @pytest.mark.parametrize(
     "name,metadata",
     [
-        ("renamed", {"general.architecture": "deepseek41"}),
         ("renamed", {"general.architecture": "deepseek_v41"}),
+        ("renamed", {"general.architecture": "deepseek_v41_text"}),
         (
             "renamed",
             {"general.architecture": "deepseek4", "deepseek4.engram.head_count": 8},
@@ -80,9 +82,9 @@ def test_v41_model_gate_catches_legacy_conversion_and_generic_profile(
     model.name = name
     model.metadata = metadata
     assert not tuner.check_model_build(model, "server")[0]
-    with pytest.raises(ValueError, match="V4.1"):
+    with pytest.raises(ValueError, match="PR #28696"):
         tuner.build_command(model, _config(), ModelProfile("custom"))
-    with pytest.raises(ValueError, match="V4.1"):
+    with pytest.raises(ValueError, match="PR #28696"):
         tuner.build_command(
             _model(tmp_path),
             _config(),
@@ -91,10 +93,15 @@ def test_v41_model_gate_catches_legacy_conversion_and_generic_profile(
         )
 
 
-def test_explicit_profile_runtime_block_prevents_command_export(tmp_path):
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    with pytest.raises(ValueError, match="b11669"):
-        tuner.build_command(_model(tmp_path), _config(), profile)
+def test_current_v41_conversion_passes_the_model_gate(tmp_path, monkeypatch):
+    model = _model(tmp_path)
+    model.name = "DeepSeek-V4.1-Flash-Q2_K"
+    model.metadata = {"general.architecture": "deepseek41"}
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 11870)
+    assert tuner.check_model_build(model, "server")[0]
+    monkeypatch.setattr(tuner, "probe_binary_build_number", lambda _: 11869)
+    ok, message, _ = tuner.check_model_build(model, "server")
+    assert not ok and "b11870" in message
 
 
 @pytest.mark.parametrize("name", ["DeepSeek-V4-Flash", "DeepSeek-V4-Pro", "custom"])

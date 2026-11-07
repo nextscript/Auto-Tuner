@@ -14,7 +14,12 @@ patterns:
   # floors are checked from <arch>.decision.type in tuner.check_model_build.
   - pplx-decider
   - d1-3b
+  - d1-2b
   - d1-omni
+  # b11773 (PR #30361) H2O-Lightning-4B, b11928 (PR #30980) MiniCPM-OCR-Jev,
+  # b11945 (PR #31275) LiquidAI d1-2B / d1-omni-2B (decision types lfm3-d1*).
+  - h2o-lightning
+  - minicpm-ocr-jev
   # b11571/b11572 (PRs #30378/#30383): vLLM Decision 2 and D3. The vllm-sr
   # "Decision-2.0-*" GGUFs are a fork format (decision type decision2);
   # tuner.check_model_build names the fork they need.
@@ -56,14 +61,18 @@ sampling:
 
 notes: >
   TypeSafe-style decision models (OpenJev, lev, Laya, Julia-1, Kev, Nimble,
-  Perplexity pplx-decider, LiquidAI d1-3B and d1-omni-600M, vLLM Decision 2
-  and D3): they answer typed
+  Perplexity pplx-decider, LiquidAI d1-3B, d1-2B, d1-omni-600M and
+  d1-omni-2B, vLLM Decision 2 and D3, H2O-Lightning-4B, MiniCPM-OCR-Jev):
+  they answer typed
   choice/score/noul questions about a state in one forward pass through POST
   /v1/systemone and generate no text, so chat, sampling, reasoning and
   speculation settings have no effect. Needs llama.cpp b11364+ (b11361 for
   all but Nimble); AutoTuner reads the GGUF's decision type and requires
   b11447+ for pplx-decider, b11483+ for d1-3B, b11488+ for d1-omni-600M,
-  b11571+ for vllm-decision2 and b11577+ for vllm-d3. The vllm-sr
+  b11571+ for vllm-decision2, b11577+ for vllm-d3, b11773+ for H2O-Lightning-4B,
+  b11928+ for MiniCPM-OCR-Jev and b11945+ for LiquidAI d1-2B and d1-omni-2B
+  (Granite Switch 4.1, a chat model with a decision adapter, needs b11707+).
+  The vllm-sr
   Decision-2.0 GGUFs use the fork-only type decision2, which mainline
   rejects; AutoTuner names the fork they need.
   The encoder variants (Laya, Julia-1, d1-omni-600M, vLLM Decision 2 and D3)

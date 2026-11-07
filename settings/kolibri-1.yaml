@@ -6,10 +6,11 @@ patterns:
 arch_fallback:
   - kolibri1
 
-# Mainline llama.cpp (b11669) hat keinen kolibri1-Loader (Issue #29922
-# offen). Die GGUFs laden nur mit dem Patch aus Hob-forge/Kolibri-1-GGUF
-# bzw. dem hob-llama.cpp-Release hob-b11434. Fail-closed über den
-# Architektur-String in der llama-Bibliothek, wie bei K2 Horizon.
+# Mainline llama.cpp lädt kolibri1 seit b11709 (PR #30673). Davor nur der
+# Patch aus Hob-forge/Kolibri-1-GGUF bzw. das hob-llama.cpp-Release
+# hob-b11434 (meldet b11434). Deshalb bleibt die Prüfung auf dem
+# Architektur-String in der llama-Bibliothek statt eines Build-Bodens: beide
+# Runtimes enthalten ihn, Mainline vor b11709 nicht.
 required_runtime_markers:
   - kolibri1
 
@@ -39,9 +40,11 @@ notes: >
   Aleph Alpha Kolibri 1: a 78B-total/3.5B-active MoE reasoning model for
   German and English (kolibri1 architecture, 384 experts with 6 active plus
   a shared expert, sliding-window attention, 262,144 tokens of context).
-  Mainline llama.cpp has no kolibri1 loader yet (upstream issue #29922), so
-  AutoTuner only starts it on a runtime whose llama library carries the
-  architecture: the patch in Hob-forge/Kolibri-1-GGUF or the hob-llama.cpp
-  release hob-b11434. Reasoning effort none/low/medium/high is set through
-  the chat template; sampling from the GGUF: temperature 1.0, top-p 0.97,
-  top-k 128.
+  Mainline llama.cpp loads it since b11709 (PR #30673); the hob-llama.cpp
+  release hob-b11434 still works as well. GGUFs made with the earlier hob
+  patch store the pre-tokenizer "kolibri1" and gating type 5, which mainline
+  does not know; on mainline AutoTuner maps them to the equivalent qwen2
+  pre-tokenizer and sigmoid gating with --override-kv. Measured on b12187
+  (Q4_K_M, both GPUs plus CPU experts): 67 tok/s on Vulkan, 63 on HIP.
+  Reasoning effort none/low/medium/high is set through the chat template;
+  sampling from the GGUF: temperature 1.0, top-p 0.97, top-k 128.

@@ -176,6 +176,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--cache-type-v",
     "--chat-template",
     "--chat-template-file",
+    "--connect-code",  # b12187, 40-character code for --connect (PR #28277)
     "--chat-template-kwargs",
     "--ctx-size",
     "--diffusion-algorithm",
@@ -205,6 +206,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--mmproj-device",
     "--models-dir",
     "--models-max",
+    "--models-memory-margin",  # b12187 router option (PR #21231)
     "--models-preset",
     "--moe-cache-mib",
     "--mtmd-batch-max-tokens",
@@ -741,12 +743,6 @@ def _model_runtime_block_reason(model: ModelEntry) -> str:
     """Reject recognized but unvalidated architectures and TTS components."""
     md = model.metadata or {}
     arch = str(md.get("general.architecture") or "").lower()
-    if arch == "xing4_0":
-        return (
-            "Xing 4.0's xing4_0 architecture has no loader in mainline llama.cpp "
-            "b11669 and no validated AutoTuner runtime. Do not substitute the "
-            "DeepSeek or Qwen architecture."
-        )
     if any(
         re.search(r"voxcpm[-_]?2(?=[\s._-]|$)", str(value), re.IGNORECASE)
         for value in (model.name, md.get("general.name", ""))
@@ -756,22 +752,28 @@ def _model_runtime_block_reason(model: ModelEntry) -> str:
             "llama-server chat model. Use voxcpm2-cli or llama-tts-server "
             "with the complete VoxCPM2 assets."
         )
+    # DeepSeek-V4.1-Flash runs on mainline since b11870 (PR #31086) with the
+    # ``deepseek41`` architecture; that floor sits in _ARCH_MIN_BUILD. Files
+    # from the earlier conversion-only PR #28696 (``deepseek_v41*`` names, or
+    # ``deepseek4`` with Engram keys) are a different layout that no released
+    # loader reads.
     is_v41_name = re.search(
         r"deepseek[-_]?v?4[._]?1(?=[\s._-]|$)", model.name, re.IGNORECASE
     )
-    if (
-        is_v41_name
-        or arch in {"deepseek41", "deepseek_v41", "deepseek_v41_text"}
+    if arch != "deepseek41" and (
+        arch in {"deepseek_v41", "deepseek_v41_text"}
         or (
             arch == "deepseek4"
             and any(str(key).startswith("deepseek4.engram.") for key in md)
         )
+        or (is_v41_name and arch == "deepseek4")
     ):
         return (
-            "DeepSeek-V4.1-Flash has no validated llama.cpp inference runtime "
-            "in AutoTuner (b11669 / conversion-only PR #28696). The V4 loader "
-            "and memory plan are not compatible; GGUF conversion alone is "
-            "not inference support."
+            "This DeepSeek-V4.1-Flash GGUF predates mainline support: it uses "
+            f"the '{arch or 'unknown'}' layout of the conversion-only PR #28696, "
+            "which no released llama.cpp loads. llama.cpp b11870+ (PR #31086) "
+            "reads V4.1 as architecture 'deepseek41'; download or convert a "
+            "current GGUF."
         )
     return ""
 
@@ -816,7 +818,7 @@ def _nemotron_latent_mtp_block_reason(
 #: tensors it does not carry.
 _MIN_QWEN4EXP_MTP_BUILD = 11330
 
-#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371, b11538 and b11669
+#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371, b11538, b11669 and b12187
 #: (HIP and Vulkan, one and two GPUs) loads the model and its NextN block, reserves the
 #: MTP graph and then aborts in ``ggml-backend.cpp`` with
 #: ``GGML_ASSERT(buffer)`` while the draft context is initialised. This holds
@@ -825,9 +827,10 @@ _MIN_QWEN4EXP_MTP_BUILD = 11330
 #: ``--no-spec-draft-backend-sampling`` do not avoid it. The embedded GGUF
 #: runs normally without speculation. b11538 reworked the NextN flags and
 #: row cropping (PRs #30017/#30020/#30097) and still aborts the same way;
-#: b11669 (image embeddings for the MTP head, PRs #30257/#30397) too.
+#: b11669 (image embeddings for the MTP head, PRs #30257/#30397) too, and
+#: b12187 (conv-state tail write #31443, MTP hidden-state save/restore #30141).
 #: Lift this only after a real request with accepted drafts on a newer build.
-_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 11669
+_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 12187
 
 
 def qwen4exp_mtp_draft_unusable(model: ModelEntry) -> bool:
@@ -938,9 +941,10 @@ def _prism_hadamard_block_reason(model: ModelEntry, binary: str) -> str:
 #: ROCmFPX (charlie12345/ROCmFPX, continued as ROCmFPX/ROCmFPX) keeps its AMD
 #: FP4/FPx weight formats in a reserved ggml type range (100..111 at its
 #: main-b11100 tag) and numbers their file types 100..124 so upstream can keep
-#: appending to its own compact sequence. Mainline llama.cpp b11669 knows
-#: types 0..42 only and aborts in ``gguf_init_from_reader`` with "invalid
-#: ggml type 100. should be in [0, 43)"; the CPU-only upstream PR #24185 is
+#: appending to its own compact sequence. Mainline llama.cpp b12187 knows
+#: types 0..43 (F8_E4M3 = 43 since b12000, PR #27512) and aborts in
+#: ``gguf_init_from_reader`` with "invalid ggml type 100. should be in
+#: [0, 44)"; the CPU-only upstream PR #24185 is
 #: still open. kingjones777's Agnes-3.0-Flash / Qwen3.8 "MTP-ROCmFP4" and
 #: "ROCmFPX" GGUFs (file_type 106 = ROCmFP4 Strix Lean, 102 = Coherent,
 #: 111 = ROCmFP8) are the shipped examples. A fork runtime names every such
@@ -1163,6 +1167,13 @@ _DECISION_TYPE_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     # b11572 (PR #30383) adds vllm-d3; b11577 (PR #30408) keeps each
     # non-causal sequence in one ubatch, which -np > 1 needs.
     "vllm-d3": (11577, "PR #30383/#30408"),
+    # b11700 (PR #30676) adds the Granite Switch decision adapter; b11707
+    # (PR #30693) the 256-option marker table the converter writes.
+    "granite-switch": (11707, "PR #30676/#30693"),
+    "h2o-lightning": (11773, "PR #30361"),
+    "openbmb-minicpm-ocr-jev": (11928, "PR #30980"),
+    "lfm3-d1": (11945, "PR #31275"),
+    "lfm3-d1-omni": (11945, "PR #31275"),
 }
 #: The vllm-sr "Decision-2.0-*" GGUFs use a fork format (decision type
 #: ``decision2``, ``decision2.*`` tensors) that only the converter's fork
@@ -1176,12 +1187,77 @@ _FORK_ONLY_DECISION_TYPES: Dict[str, str] = {
 _MMPROJ_PROJECTOR_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "minicpmv4_7": (11551, "PR #29416"),
     "nemotron_omni": (11668, "PR #30520"),
+    "muse-spark-audio": (11671, "PR #30616"),
+    "voxtral_rt": (11675, "PR #30629"),
+    "sensenova_u1": (11801, "PR #28919"),
+    "minicpm_ocr_1_0": (11826, "PR #30979"),
+    "soprano": (11850, "PR #28607"),
+    "deepseek41v": (11870, "PR #31086"),
+    "lfm3vl": (11938, "PR #31252"),
+    "lfm3a": (11941, "PR #31257"),
+    "lfm3a_gen": (11941, "PR #31257"),
+    "nemotron_transcribe": (12087, "PR #31471"),
+    "chatterbox": (12097, "PR #30993"),
+    "chatterbox_spkenc": (12097, "PR #30993"),
+    "drama3_gen": (12116, "PR #31613"),
+}
+#: Architectures added to mainline after b11669. An older build stops with
+#: "unknown model architecture"; this names the first build that loads them.
+#: kolibri1 (b11709, PR #30673) stays on its runtime-marker check because the
+#: hob-llama.cpp fork that served it first reports b11434.
+_ARCH_MIN_BUILD: Dict[str, Tuple[int, str]] = {
+    "muse-spark": (11671, "PR #30616"),
+    "beam": (11701, "PR #30670"),
+    "sensenova_u1": (11801, "PR #28919"),
+    "flint": (11803, "PR #30928"),
+    "deepseek41": (11870, "PR #31086"),
+    "lfm3": (11938, "PR #31252"),
+    "limite": (11988, "PR #29433"),
+    "mistral-large4": (11998, "PR #31376"),
+    "clover_moe": (12060, "PR #31306"),
+    "metis16": (12089, "PR #31134"),
+    "xing4_0": (12156, "PR #31589"),
+    "ricursive": (12158, "PR #31692"),
+    "kimi-k31": (12180, "PR #31779"),
 }
 #: ``tokenizer.ggml.model`` values a build must know before it can load the
 #: vocabulary at all (b11455 / PR #30045 added the PLaMo-3 pre-segmentation).
 _TOKENIZER_MODEL_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "plamo3": (11455, "PR #30045"),
 }
+
+
+#: Mainline loads kolibri1 from b11709 (PR #30673). GGUFs converted with the
+#: earlier hob-llama.cpp patch (Hob-forge/Kolibri-1-GGUF) write two values
+#: that mainline does not know: the pre-tokenizer name ``kolibri1`` (the patch
+#: maps it to the qwen2 split regex) and expert gating type 5
+#: ``sigmoid_logit_add`` (select on logits + bias, weight with the sigmoid of
+#: the logits). Mainline's kolibri1 graph does that selection itself and
+#: expects gating type 2 (sigmoid) and the qwen2 pre-tokenizer; without the
+#: overrides it stops with "unknown pre-tokenizer type: 'kolibri1'".
+_MIN_MAINLINE_KOLIBRI_BUILD = 11709
+_HOB_KOLIBRI_GATING_FUNC = 5
+
+
+def kolibri_mainline_overrides(model: ModelEntry, build: Optional[int]) -> List[str]:
+    """``--override-kv`` that lets a hob-converted Kolibri 1 GGUF load on
+    mainline b11709+ unchanged in meaning; empty for every other case
+    (mainline conversions, the hob runtime itself, unknown builds)."""
+    if build is None or build < _MIN_MAINLINE_KOLIBRI_BUILD:
+        return []
+    metadata = model.metadata or {}
+    if str(metadata.get("general.architecture", "") or "").strip() != "kolibri1":
+        return []
+    overrides = []
+    if str(metadata.get("tokenizer.ggml.pre", "") or "").strip() == "kolibri1":
+        overrides.append("tokenizer.ggml.pre=str:qwen2")
+    try:
+        gating = int(metadata.get("kolibri1.expert_gating_func", 0) or 0)
+    except (TypeError, ValueError):
+        gating = 0
+    if gating == _HOB_KOLIBRI_GATING_FUNC:
+        overrides.append("kolibri1.expert_gating_func=int:2")
+    return ["--override-kv", ",".join(overrides)] if overrides else []
 
 
 def _mmproj_projector_type(model: ModelEntry) -> str:
@@ -1205,6 +1281,10 @@ def _metadata_build_floor_reason(model: ModelEntry, binary: str) -> str:
     """Refuse decision types, tokenizers and projectors the build predates."""
     metadata = model.metadata or {}
     floors: List[Tuple[int, str, str]] = []
+    arch = str(metadata.get("general.architecture", "") or "").strip().lower()
+    if arch in _ARCH_MIN_BUILD:
+        build, pr = _ARCH_MIN_BUILD[arch]
+        floors.append((build, pr, f"architecture '{arch}'"))
     decision = decision_model_type(model)
     if decision in _DECISION_TYPE_MIN_BUILD:
         build, pr = _DECISION_TYPE_MIN_BUILD[decision]
@@ -1216,7 +1296,7 @@ def _metadata_build_floor_reason(model: ModelEntry, binary: str) -> str:
     projector = _mmproj_projector_type(model)
     if projector in _MMPROJ_PROJECTOR_MIN_BUILD:
         build, pr = _MMPROJ_PROJECTOR_MIN_BUILD[projector]
-        floors.append((build, pr, f"vision projector '{projector}'"))
+        floors.append((build, pr, f"multimodal projector '{projector}'"))
     if not floors:
         return ""
     detected = probe_binary_build_number(binary)
@@ -2766,6 +2846,7 @@ _KNOWN_MOE_ARCHS = frozenset(
         "deepseek2",
         "deepseek32",
         "deepseek4",
+        "deepseek41",
         "dots1",
         "ernie4_5-moe",
         "ernie4_5_moe",
@@ -2785,11 +2866,13 @@ _KNOWN_MOE_ARCHS = frozenset(
         "jamba",
         "kimi-k3",
         "kimi_k3",
+        "kimi-k31",
         "kimi-linear",
         "lfm2moe",
         "llada-moe",
         "llada_moe",
         "mellum",
+        "metis16",
         "minimax-01",
         "minimax-m2",
         "minimax-m3",
@@ -2798,6 +2881,13 @@ _KNOWN_MOE_ARCHS = frozenset(
         "nomic-bert-moe",
         "olmoe",
         "phimoe",
+        "beam",
+        "clover_moe",
+        "flint",
+        "kolibri1",
+        "mistral-large4",
+        "muse-spark",
+        "xing4_0",
         "qwen2moe",
         "qwen3moe",
         "qwen3vlmoe",
@@ -7237,6 +7327,13 @@ def build_command(
         cmd += ["--mmproj", str(model.mmproj)]
         if config.mmproj_device and not config.no_mmproj_offload:
             cmd += ["--mmproj-device", config.mmproj_device]
+
+    # hob-converted Kolibri 1 GGUFs on mainline b11709+ (see
+    # kolibri_mainline_overrides); probed only for kolibri1 models.
+    if str(model.architecture or "").strip().lower() == "kolibri1":
+        cmd += kolibri_mainline_overrides(
+            model, _probe_binary_build_number(server_binary) if server_binary else None
+        )
 
     # Thinking/Reasoning-Modus (Gemma 4, DeepSeek, etc.)
     # Thinking wird über Prompt-Tags gesteuert (<|think|>), nicht über CLI-Argumente.

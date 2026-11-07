@@ -1,0 +1,45 @@
+display_name: "Clover 35B-A3B Preview (DiffuSpace)"
+patterns:
+  - clover-35b
+  - clover_35b
+  - clover-preview
+arch_fallback:
+  - clover_moe
+
+# Architektur clover_moe seit b12060 (PR #31306), nur autoregressiver Modus
+# (Qwen3.6-MoE-Basis mit Block-Diffusion-Zusatzparametern; die
+# Self-Speculation folgt in einem eigenen PR). Hybrid mit
+# attention.recurrent_layers -> exakte KV-Schätzung.
+min_llama_build: 12060
+max_context: 131072
+recommended_kv_quant: q8_0
+
+# generation_config.json: temperature 1.0, top_p 1.0, presence_penalty 0.9,
+# repetition_penalty 1.05 (gegen Wiederholungen bei langen Ausgaben).
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.05
+    presence_penalty: 0.9
+  coding:
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.05
+    presence_penalty: 0.9
+
+extra_args:
+  - --jinja
+
+notes: >
+  DiffuSpace Clover-35B-A3B-Preview: a block-diffusion language model on a
+  Qwen3.6-MoE base (clover_moe architecture, 131,072 tokens). llama.cpp
+  b12060+ (PR #31306) runs it in autoregressive mode only; the diffusion
+  self-speculation is a separate upstream PR. Sampling from the shipped
+  generation config: temperature 1.0, top-p 1.0, presence penalty 0.9 and
+  repetition penalty 1.05, which the authors set against repetition in long
+  answers. Thinking is controlled through the chat template.

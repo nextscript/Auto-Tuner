@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import tuner
-from settings_loader import ModelProfile, load_profiles, match_profile
+from settings_loader import load_profiles, match_profile
 from test_kv_policy import _model
 
 ROOT = Path(__file__).resolve().parent
@@ -131,14 +131,3 @@ def test_gate_stays_narrow_on_a_gated_build(tmp_path, monkeypatch):
     model.mmproj = tmp_path / "mmproj.gguf"
     draft.metadata = {"general.architecture": "dflash"}  # DFlash1, not DFlash2
     assert "--mmproj" in tuner.build_command(model, config, profile, draft_model=draft)
-
-
-def test_v41_block_names_the_audited_build(tmp_path):
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason and "b10930" not in profile.notes
-    with pytest.raises(ValueError, match="b11669"):
-        tuner.build_command(_model(tmp_path), _config(), profile)
-    renamed = _model(tmp_path)
-    renamed.metadata = {"general.architecture": "deepseek41"}
-    with pytest.raises(ValueError, match="b11669 / conversion-only PR #28696"):
-        tuner.build_command(renamed, _config(), ModelProfile("custom"))

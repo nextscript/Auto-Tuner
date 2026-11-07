@@ -1,0 +1,44 @@
+display_name: "MiniCPM-OCR 1.0 (OpenBMB)"
+patterns:
+  - minicpm-ocr-1.0
+  - minicpm-ocr-1_0
+  - minicpm_ocr_1.0
+  - minicpm-ocr-v1
+  - minicpm-ocr-1-0
+
+# MiniCPM-V-4.6-Stack mit eigenem Projektor minicpm_ocr_1_0 (b11826,
+# PR #30979). Das Modell schreibt die Transkription in den Thinking-Block:
+# mit --reasoning off landet sie in content (PR-Hinweis). Projektor-Boden
+# prüft tuner._metadata_build_floor_reason; der Text-Teil läuft auch älter.
+min_llama_build: 11826
+max_context: 32768
+recommended_kv_quant: q8_0
+
+# OCR: deterministisch.
+sampling:
+  chat:
+    temperature: 0.0
+    top_k: 1
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.0
+    top_k: 1
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+  - --reasoning
+  - "off"
+
+notes: >
+  OpenBMB MiniCPM-OCR 1.0: a document OCR model on the MiniCPM-V 4.6 stack
+  (qwen35 text model plus the minicpm_ocr_1_0 projector, llama.cpp b11826+,
+  PR #30979). The model writes its transcription inside the thinking block,
+  so the profile starts llama-server with --reasoning off and the text
+  arrives in the normal content. Greedy decoding for transcription. The
+  OpenBMB SDK sends cropped page regions; whole pages work but are slower.
+  MiniCPM-OCR-Jev (the page/text decision scorer) uses the decision profile.

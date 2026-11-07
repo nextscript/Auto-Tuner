@@ -4038,6 +4038,18 @@ def _extract_server_api_key(command: Sequence[object]) -> Optional[str]:
     return None
 
 
+#: Launch arguments whose value is a credential. ``--connect-code`` (b12187,
+#: PR #28277) is the 40-character code that opens the server's peer-to-peer
+#: tunnel to anyone who knows it.
+_CREDENTIAL_FLAGS = (
+    "--api-key",
+    "--api-key-file",
+    "--connect-code",
+    "--hf-token",
+    "-hft",
+)
+
+
 def _redacted_command(command: Sequence[object]) -> str:
     """Format a launch command while removing direct credential arguments."""
     args = [str(value) for value in command]
@@ -4048,11 +4060,12 @@ def _redacted_command(command: Sequence[object]) -> str:
             redacted.append("<redacted>")
             hide_next = False
             continue
-        if arg in ("--api-key", "--api-key-file"):
+        flag = arg.split("=", 1)[0]
+        if flag in _CREDENTIAL_FLAGS and "=" in arg:
+            redacted.append(f"{flag}=<redacted>")
+        elif arg in _CREDENTIAL_FLAGS:
             redacted.append(arg)
             hide_next = True
-        elif arg.startswith("--api-key="):
-            redacted.append("--api-key=<redacted>")
         else:
             redacted.append(arg)
     return " ".join(redacted)
@@ -10512,8 +10525,19 @@ class MainWindow(QMainWindow):
                 if c.name == remembered:
                     chosen_idx = idx
         # No remembered choice → prefer external auto pick, else embedded MTP.
+        # A profile with ``auto_draft: false`` lists the paired drafter but
+        # leaves it unselected (MiniCPM-V 4.7 + DSpark measured slower).
+        profile_auto_draft = getattr(
+            match_profile(
+                entry.name, self._profiles, getattr(entry, "architecture", "")
+            ),
+            "auto_draft",
+            True,
+        )
         if not remembered and not deliberate_none:
-            if auto is not None:
+            if auto is not None and not profile_auto_draft:
+                pass
+            elif auto is not None:
                 for i in range(self._cb_draft.count()):
                     if self._cb_draft.itemData(i) == str(auto):
                         chosen_idx = i

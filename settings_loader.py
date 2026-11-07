@@ -44,6 +44,13 @@ class ModelProfile:
     # Recognize a model without claiming an unimplemented inference runtime.
     # Cleared only after its loader, memory plan and template are validated.
     runtime_block_reason: str = ""
+    # When GGUF metadata names one of this profile's ``arch_fallback``
+    # architectures, this profile wins over a filename match elsewhere
+    # (DeepSeek-V4.1 files named "DeepSeek-V4-..." carry deepseek41).
+    arch_authoritative: bool = False
+    # False: a paired external drafter stays selectable but is not chosen
+    # by default (measured slower than no draft for this family).
+    auto_draft: bool = True
     extra_args: List[str] = field(default_factory=list)
     notes: str = ""
     source_file: Optional[str] = None  # which YAML this came from
@@ -265,6 +272,8 @@ def load_profiles(settings_dir: Path) -> List[ModelProfile]:
                 runtime_block_reason=str(
                     data.get("runtime_block_reason", "") or ""
                 ).strip(),
+                arch_authoritative=bool(data.get("arch_authoritative", False)),
+                auto_draft=bool(data.get("auto_draft", True)),
                 extra_args=[str(x) for x in extra],
                 notes=str(data.get("notes", "") or ""),
                 source_file=yml.name,
@@ -368,6 +377,13 @@ def match_profile(
         ):
             for p in profiles:
                 if arch_lower in p.arch_fallback:
+                    return p
+        # A profile that declares its architecture authoritative wins over a
+        # filename match: "DeepSeek-V4-..." carrying deepseek41 (V4.1 Flash,
+        # b11870+) must not inherit V4's floor, sampling and draft settings.
+        if arch_lower and arch_lower not in best.arch_fallback:
+            for p in profiles:
+                if p.arch_authoritative and arch_lower in p.arch_fallback:
                     return p
         return best
 

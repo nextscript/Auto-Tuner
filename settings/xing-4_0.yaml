@@ -1,18 +1,25 @@
-display_name: "Xing 4.0 29B-A4B (recognition only)"
+display_name: "Xing 4.0 29B-A4B (China Telecom)"
 patterns:
   - xing4.0
   - xing4_0
   - xing-4.0
 arch_fallback:
   - xing4_0
+
+# Mainline-Loader seit b12156 (PR #31589): MLA + mHC (DeepSeek-V4-Operatoren)
+# + MoE + MTP-Kopf (nextn_predict_layers 1). Ältere Builds kennen die
+# Architektur nicht. Gespiegeltes A/B über AutoTuners Plan auf b12187
+# (IQ4_NL, R9700, 400 Token, Code-/Prosa-Prompt): ohne MTP Vulkan 82 / HIP
+# 64,5 tok/s; draft-mtp n=1 mit p-min 0 Vulkan 91,7 / 89,9, HIP 77,1 / 74,2;
+# mit p-min 0,75 nur Vulkan 81,5 / 78,0, HIP 75,8 / 67,6. Direkttest: n=2
+# und n=3 langsamer als n=1.
+min_llama_build: 12156
 max_context: 262144
 recommended_kv_quant: q8_0
-runtime_block_reason: >
-  Xing 4.0's xing4_0 architecture has no loader in mainline llama.cpp b11669
-  and no validated AutoTuner runtime. A GGUF file alone does not establish
-  inference support. Do not substitute the DeepSeek or Qwen architecture.
-# Author recommendations, retained for a future validated runtime:
-# https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B
+draft_max: 1
+draft_p_min: 0.0
+
+# https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B (Recommended Parameters)
 sampling:
   chat:
     temperature: 1.0
@@ -28,10 +35,15 @@ sampling:
     repeat_penalty: 1.05
 extra_args:
   - --jinja
+
 notes: >
-  Xing 4.0 29B-A4B is recognized but launch is blocked: mainline llama.cpp
-  b11669 has no xing4_0 loader. The local IQ4_NL GGUF uses that architecture;
-  neither its existence nor a compatible quantization implies runtime
-  support. The author's 256k context and sampling (chat temp 1.0, coding
-  0.8, top_p 0.95, repeat 1.05) are recorded for a future validated runtime.
-  MLA/mHC/MTP support must be checked before this block is removed.
+  Xing 4.0 29B-A4B (formerly TeleChat; xing4_0 architecture: MLA attention,
+  manifold-constrained hyper-connections, 64 experts with 4 active, one MTP
+  layer, 256K context). Mainline llama.cpp loads it since b12156 (PR #31589).
+  AutoTuner uses the embedded MTP head with one draft token and no confidence
+  gate (p-min 0): measured on b12187 (IQ4_NL, R9700) 90-92 tok/s against 82
+  without MTP on Vulkan and 74-77 against 64.5 on HIP; the usual p-min 0.75
+  gate removed most of the gain, longer drafts were slower. Sampling from the
+  model card: chat temperature 1.0, coding 0.8, top-p 0.95, repetition
+  penalty 1.05. Thinking is on by default and can be switched off through
+  the chat template (enable_thinking).

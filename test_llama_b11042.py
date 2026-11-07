@@ -263,10 +263,7 @@ def test_ternary_bonsai_recipes_pin_the_prism_fork_with_its_build_number():
 # ------------------------------------------------------------- carry-over ----
 
 
-def test_v41_block_and_vision_gate_now_name_b11669():
+def test_vision_dflash2_gate_range_is_unchanged():
     # b11030..b11042 does not touch the server, the speculative helpers or
-    # the recurrent memory; the image + DFlash2 request and the V4.1 block
-    # were re-run on b11669 (v5.6.3) and now carry that wording.
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason
+    # the recurrent memory; the image + DFlash2 range gate stays as it was.
     assert tuner.QWEN35_VISION_DFLASH2_BROKEN_SINCE == 10896

@@ -1,4 +1,4 @@
-display_name: "DeepSeek-V4.1-Flash (runtime not yet supported)"
+display_name: "DeepSeek-V4.1-Flash"
 patterns:
   - deepseek-v4.1
   - deepseek_v4.1
@@ -11,20 +11,23 @@ patterns:
   - deepseekv41
   - deepseek41
 
-# deepseek41 is proposed by conversion-only PR #28696, not a released loader.
 arch_fallback:
   - deepseek41
-  - deepseek_v41
-  - deepseek_v41_text
+arch_authoritative: true
 
-runtime_block_reason: >
-  DeepSeek-V4.1-Flash cannot run on llama.cpp b11669. PR #28696 only converts
-  weights; no V4.1 inference graph is implemented. The V4 loader and memory
-  plan are incompatible. Wait for validated runtime support and an AutoTuner
-  profile update; a converted GGUF or a newer build number alone is not enough.
+# Mainline-Loader seit b11870 (PR #31086): Architektur deepseek41 mit eigenem
+# DSv4-KV-Cache (CSA2 Full/Reindex/Reuse), Engram-Tabelle, Bild-Projektor
+# deepseek41v und eigenem Chat-Renderer. Kein MTP-Graph: der DSpark-Draft ist
+# eine separate DFLASH-GGUF (--spec-type draft-dspark). Dateien aus dem
+# reinen Konvertierungs-PR #28696 (deepseek_v41*, deepseek4 + Engram-Keys)
+# sperrt tuner._model_runtime_block_reason weiterhin.
+min_llama_build: 11870
 
 max_context: 1048576
 recommended_kv_quant: q8_0
+performance_target: throughput
+
+# Modellkarte: temperature 1.0, top_p 0.95 (1.0 ebenfalls zulässig).
 sampling:
   chat:
     temperature: 1.0
@@ -41,15 +44,18 @@ sampling:
     repeat_penalty: 1.0
     presence_penalty: 0.0
 
+extra_args:
+  - --jinja
+
 notes: >
-  Recognition-only profile, not runnable support. DeepSeek-V4.1-Flash is a new
-  multimodal 552B-backbone Causal Encoder-Decoder with CSA2, Engram tables and
-  DSpark, not the 284B V4-Flash. Native context is 1,048,576; official sampling
-  is temperature 1.0 and top_p 0.95 (1.0 also allowed). Reasoning effort is an
-  integer from 1 to 100. The publisher provides a Python prompt encoder, not
-  a Jinja template. llama.cpp b11669 has no V4.1 inference implementation;
-  PR #28696 is conversion-only. Do not reuse V4's KV estimate, MTP flags or
-  vision projector. The publisher's FP4-cache efficiency is not a supported
-  llama.cpp cache type. Q8 here is only the unvalidated placeholder default.
-  Sources: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash and
-  https://github.com/ggml-org/llama.cpp/pull/28696.
+  DeepSeek-V4.1-Flash: a multimodal 552B-backbone Causal Encoder-Decoder MoE
+  (deepseek41 architecture: CSA2 attention that shares KV across layers,
+  Engram conditional memory, single-pass mHC) with up to 1,048,576 tokens of
+  context. Mainline llama.cpp runs it since b11870 (PR #31086), including
+  image input through the deepseek41v mmproj and its own chat formatting.
+  There is no in-file MTP head; DSpark speculation uses a separate DFLASH
+  draft GGUF (draft-dspark). AutoTuner budgets KV for every layer, which
+  overestimates the shared CSA2 cache; the plan has not been measured on a
+  real V4.1 GGUF. GGUFs from the earlier conversion-only PR #28696 are
+  refused. Sampling from the model card: temperature 1.0, top-p 0.95;
+  reasoning effort runs from 1 to 100.

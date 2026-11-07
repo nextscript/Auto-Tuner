@@ -1,0 +1,45 @@
+display_name: "Flint 40B-A2.5B (Recursive)"
+patterns:
+  - flint-int4
+  - flint-nvfp4
+  - flint-q
+  - flint_q
+  - recursive-flint
+arch_fallback:
+  - flint
+
+# Architektur flint seit b11803 (PR #30928): MoE (256 Experten, 6 aktiv +
+# Shared) mit SWA/Global-Attention und adaptiver Expert-Aktivierungs-
+# Skalierung (PR #30861, laut PR 10-30 % langsamer). Die hexadezimalen
+# String-Escapes, die das Chat-Template braucht, kamen schon in b11798
+# (PR #30929).
+min_llama_build: 11803
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# RecursiveSI/flint: temperature 1.0, top_p 0.95, top_k 20 (llama-server-
+# Beispiel zusätzlich --min-p 0).
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Recursive Flint: a 39.8B-total/2.5B-active MoE for coding agents (256
+  experts, 6 active plus a shared expert, sliding-window and full attention,
+  262,144 tokens). llama.cpp loads the flint architecture since b11803
+  (PR #30928); the hexadecimal string escapes its chat template needs came
+  in b11798. Sampling from the model card: temperature 1.0, top-p 0.95,
+  top-k 20, min-p 0.

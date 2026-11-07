@@ -193,15 +193,6 @@ def test_chat_models_keep_the_configured_prompt_cache(tmp_path):
 # ------------------------------------------------------- wording re-checks
 
 
-def test_v41_and_xing_blocks_name_b11669():
-    profile = match_profile("DeepSeek-V4.1-Flash-Q4_K_M", _profiles(), "deepseek41")
-    assert "b11669" in profile.runtime_block_reason
-    for pack in sorted((ROOT / "assets/languages").glob("*.json")):
-        notes = json.loads(pack.read_text(encoding="utf-8"))["profile_notes"]
-        assert "b11669" in notes["deepseek-v4_1.yaml"], pack.name
-        assert "b11669" in notes["xing-4_0.yaml"], pack.name
-
-
 # --------------------------------------------------------- build recipes
 
 

@@ -1,0 +1,47 @@
+display_name: "Kimi K3.1 (Moonshot)"
+patterns:
+  - kimi-k3.1
+  - kimi_k3.1
+  - kimi-k3_1
+  - kimi_k3_1
+  - kimik3.1
+  - kimi-k31
+arch_fallback:
+  - kimi-k31
+arch_authoritative: true
+
+# Eigene Architektur kimi-k31 seit b12180 (PR #31779): K3 mit Gated-DSA statt
+# Voll-MLA in den 24 Attention-Layern (69 KDA + 24 DSA von 93). Der
+# Dateiname "Kimi-K3.1-..." traf vorher das K3-Profil mit Boden b10749.
+min_llama_build: 12180
+max_context: 1048576
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+# Modellkarte: temperature 1.0, top-p 0.95 (BrowseComp 1.0).
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Moonshot Kimi K3.1 (Pro): a 2.8T-total/104B-active MoE (896 experts, 16
+  active, latent MoE) with 69 KDA layers and 24 gated-DSA attention layers,
+  1,048,576 tokens of context. Its kimi-k31 architecture needs llama.cpp
+  b12180+ (PR #31779); the text model is supported, vision is not part of
+  that PR. Reasoning effort is set per request (low, high, max; default max).
+  Sampling from the model card: temperature 1.0, top-p 0.95. This is a
+  datacenter-scale model; local use needs aggressive quantization, large
+  system RAM and CPU expert offload.

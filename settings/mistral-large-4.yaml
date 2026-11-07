@@ -1,0 +1,43 @@
+display_name: "Mistral Large 4 1T-A52B"
+patterns:
+  - mistral-large-4
+  - mistral_large_4
+  - mistral-large4
+  - mistrallarge4
+arch_fallback:
+  - mistral-large4
+
+# Architektur mistral-large4 seit b11998 (PR #31376, "le chonk"): MoE mit
+# MLA wie Mistral 4, MoE-amax-Skalierung (daher kein -sm tensor, b11858).
+min_llama_build: 11998
+max_context: 1048576
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+# mistralai/Mistral-Large-4-1T-A52B: für alle Reasoning-Stufen
+# temperature 1.0, top_p 0.95.
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 1.0
+    top_k: 0
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Mistral Large 4: a roughly 1T-total/52B-active MoE with image input and a
+  1,048,576-token context window (mistral-large4 architecture, llama.cpp
+  b11998+, PR #31376). Reasoning effort low, medium or high (default) is set
+  per request. Sampling from Mistral's model card for every reasoning
+  effort: temperature 1.0, top-p 0.95. ggml-org publishes the GGUFs.
+  Datacenter-scale: local use needs aggressive quantization, large system
+  RAM and CPU expert offload.

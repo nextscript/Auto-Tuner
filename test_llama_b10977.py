@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import tuner
-from settings_loader import ModelProfile, load_profiles, match_profile
+from settings_loader import load_profiles, match_profile
 from test_kv_policy import _model
 from test_smoke import _fake_system
 
@@ -171,23 +171,6 @@ def test_maple_context_is_capped_at_the_native_131k(tmp_path):
 
 
 # ------------------------------------------------------------- deepseek ----
-
-
-def test_v41_block_names_b11669(tmp_path):
-    profile = match_profile("DeepSeek-V4.1-Flash", _profiles())
-    assert "b11669" in profile.runtime_block_reason
-    assert "b10948" not in profile.runtime_block_reason
-    assert "b10948" not in profile.notes
-    with pytest.raises(ValueError, match="b11669"):
-        tuner.build_command(_model(tmp_path), _config(), profile)
-    renamed = _model(tmp_path)
-    renamed.metadata = {"general.architecture": "deepseek41"}
-    with pytest.raises(ValueError, match="b11669 / conversion-only PR #28696"):
-        tuner.build_command(renamed, _config(), ModelProfile("custom"))
-    for pack in sorted((ROOT / "assets/languages").glob("*.json")):
-        notes = json.loads(pack.read_text(encoding="utf-8"))["profile_notes"]
-        assert "b11669" in notes["deepseek-v4_1.yaml"], pack.name
-        assert "b10948" not in notes["deepseek-v4_1.yaml"], pack.name
 
 
 # ------------------------------------------------------- vision + dflash2 ----

@@ -38,6 +38,11 @@ extra_args:
 # NVIDIAs llama.cpp-Rezepte nutzen den LiLiCorr-Drafter mit 6 (28-GB-Rezept)
 # bzw. 7 (32-GB-Rezept) Draft-Tokens; AutoTuner setzt dafür p-min 0.
 draft_max: 6
+# b12187 auf R9700 + RX 9070 XT (48 GB): Drafter (0,93 GB) plus Rollback-
+# Snapshots des rekurrenten Zustands (+1,85 GB) drücken den geplanten Kontext
+# von 167.936 auf 16.384 (Vulkan) bzw. 262.144 auf 23.552 (HIP); Decode
+# Vulkan 45,4 -> 48,1, HIP 35,3 -> 26,5 tok/s. Drafter bleibt wählbar.
+auto_draft: false
 
 notes: >
   NVIDIA Nemotron 3.5 Bolt: a 74B-total/9B-active compression of Nemotron
@@ -47,6 +52,8 @@ notes: >
   the expert tensors with the wrong shape and abort. The mmproj uses the
   nemotron_omni projector. NVIDIA's llama.cpp recipes pair the model with
   its LiLiCorr drafter (draft-dflash, 6-7 draft tokens, q8_0 KV for the
-  28 GB recipe); AutoTuner pairs a lilicorr-*.gguf / *-LiLiCorr.gguf draft
-  automatically. Sampling: temperature 1.0, top-p 0.95. Thinking is
+  28 GB recipe); AutoTuner lists a paired DFlash/LiLiCorr draft but does not
+  select it by default: on 48 GB of VRAM (b12187) the draft and its rollback
+  state cut the planned context from 168K/262K to 16K/24K tokens for +7 %
+  decode on Vulkan and -25 % on HIP. Sampling: temperature 1.0, top-p 0.95. Thinking is
   controlled through the chat template (enable_thinking).

@@ -1,0 +1,47 @@
+display_name: "LiquidAI LFM3 (1.7B / VL / Audio / Omni)"
+patterns:
+  - lfm3-
+  - lfm3_
+  - lfm-3-
+arch_fallback:
+  - lfm3
+
+# Architektur lfm3 seit b11938 (PR #31252: LFM3-1.7B, LFM3-VL-2B mit
+# Projektor lfm3vl); Audio/Omni mit den Projektoren lfm3a/lfm3a_gen seit
+# b11941 (PR #31257), Video für die Familie seit b11960 (PR #31283). Die
+# Projektor-Böden prüft tuner._metadata_build_floor_reason.
+min_llama_build: 11938
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# Modellkarten: General (Chat, Tools, Agents, Coding) temperature 0.1,
+# top_k 50, repetition_penalty 1.1; Math/STEM 1.0 / top_p 0.95 / top_k 20.
+# LFM3-VL-2B: 0.1 / top_p 1.0 / top_k 50 / min_p 0 / repetition 1.1.
+sampling:
+  chat:
+    temperature: 0.1
+    top_k: 50
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.1
+  coding:
+    temperature: 0.1
+    top_k: 50
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.1
+
+extra_args:
+  - --jinja
+
+notes: >
+  LiquidAI LFM3 edge family (lfm3 architecture: short convolutions with
+  sliding-window and global attention). LFM3-1.7B (262,144 tokens) and
+  LFM3-VL-2B need llama.cpp b11938+ (PR #31252); LFM3-Audio-2B and
+  LFM3-Omni-2B need b11941+ (PR #31257) for their audio projectors, video
+  input arrived in b11960. Sampling from LiquidAI: temperature 0.1, top-k 50,
+  repetition penalty 1.1 for chat, tools and coding (math and STEM:
+  temperature 1.0, top-p 0.95, top-k 20). Reasoning is on by default except
+  for LFM3-Omni-2B, which does not think. The audio models answer as text
+  in the chat server; speech output uses llama.cpp's audio paths. The d1
+  decision models of the family use the decision profile.

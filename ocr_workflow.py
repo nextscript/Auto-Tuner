@@ -379,7 +379,13 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _redact_command(command: Sequence[str]) -> List[str]:
-    sensitive = {"--api-key", "--hf-token", "-hft", "--mcp-servers-json"}
+    sensitive = {
+        "--api-key",
+        "--hf-token",
+        "-hft",
+        "--mcp-servers-json",
+        "--connect-code",
+    }
     redacted: List[str] = []
     hide_next = False
     for token in command:

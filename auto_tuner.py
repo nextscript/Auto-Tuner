@@ -493,6 +493,7 @@ def _ask_interactive_features(
     non_interactive: bool = False,
     draft_available: Optional[bool] = None,
     thinking_available: Optional[bool] = None,
+    draft_default: bool = True,
 ) -> tuple[bool, bool, bool, bool, Optional[ModelEntry]]:
     """Interaktive Fragen-Kette nach Modellauswahl.
 
@@ -511,10 +512,14 @@ def _ask_interactive_features(
     # Non-interactive runs use the same availability defaults as the GUI:
     # vision/draft/thinking on when available and n-gram on unless explicitly
     # disabled. --ngram remains a compatible explicit-on spelling.
+    # ``draft_default`` False (profile ``auto_draft: false``) keeps a paired
+    # external drafter off unless the user asks for it; embedded MTP is
+    # unaffected.
+    external_draft_off = not draft_default and draft_model is not None
     if non_interactive:
         return (
             model.mmproj is not None,
-            draft_available,
+            draft_available and not external_draft_off,
             thinking_available,
             bool(force_ngram or not disable_ngram),
             draft_model,
@@ -535,7 +540,9 @@ def _ask_interactive_features(
     effective_draft = draft_model
     if draft_available:
         detail = effective_draft.name if effective_draft is not None else "embedded MTP"
-        use_draft = _confirm(f"Draft aktivieren? ({detail})", default_yes=True)
+        use_draft = _confirm(
+            f"Draft aktivieren? ({detail})", default_yes=not external_draft_off
+        )
         if not use_draft:
             effective_draft = None
 
@@ -2131,6 +2138,7 @@ def main(argv: Optional[List[str]] = None) -> int:  # noqa: C901  (complex but i
                 draft_available=(draft_model is not None or model.has_embedded_mtp)
                 and not use_nodraft,
                 thinking_available=model.supports_thinking and not use_nothinking,
+                draft_default=bool(getattr(profile, "auto_draft", True)),
             )
         )
         if not use_draft:

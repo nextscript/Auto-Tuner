@@ -1,0 +1,39 @@
+display_name: "Nemotron 3 / 3.5 Embed (NVIDIA)"
+patterns:
+  - nemotron-3-embed
+  - nemotron-3.5-embed
+  - nemotron-3_5-embed
+  - nemotron3-embed
+  - nemotron3.5-embed
+
+# PR #30877 (b11778) konvertiert Nemotron-3(.5)-Embed (Text; 3.5 auch Bild
+# über das mmproj); b11833 (PR #30974) korrigiert die Tokenisierung von
+# Nemotron-3.5-Embed. Embedding-Endpoint statt Chat.
+min_llama_build: 11833
+max_context: 32768
+recommended_kv_quant: q8_0
+
+extra_args:
+  - --embeddings
+
+performance_target: ""
+
+# Formal: im --embeddings-Betrieb wird nicht gesampelt.
+sampling:
+  chat:
+    temperature: 0.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+draft_max: 0
+
+notes: >
+  NVIDIA Nemotron-3-Embed and Nemotron-3.5-Embed (1B and 8B) retrieval
+  embedding models. NO chat: the profile starts an embedding endpoint
+  (--embeddings, POST /v1/embeddings). Nemotron-3.5-Embed also embeds
+  document page images through its mmproj; queries are text only. Prefix
+  queries with "query:" and documents with "passage:" as the model card
+  does. Needs llama.cpp b11833+ (conversion PR #30877 in b11778,
+  Nemotron-3.5-Embed tokenizer fix PR #30974 in b11833). Context up to
+  32,768 tokens.
