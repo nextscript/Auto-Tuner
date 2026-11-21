@@ -280,9 +280,14 @@ def test_select_hip_msvc_toolset_probes_newest_first(tmp_path: Path) -> None:
         $vs = $env:AUTOTUNER_TEST_WORKSPACE
         $env:VCToolsInstallDir = "$vs\\VC\\Tools\\MSVC\\14.53.36930\\"
         $env:INCLUDE = "$vs\\VC\\Tools\\MSVC\\14.53.36930\\include;C:\\sdk"
-        $mock = Join-Path $vs "mock_clangxx.cmd"
-        Set-Content -LiteralPath $mock -Value "@echo off`r`necho %INCLUDE% | findstr /i 14.50.35717 >nul`r`nexit /b %ERRORLEVEL%" -Encoding ascii
-        $picked = Select-HipMsvcToolset -VsPath $vs -ClangXX $mock
+        function global:mock_clangxx {
+            if ($env:INCLUDE -like "*14.50.35717*") {
+                $global:LASTEXITCODE = 0
+            } else {
+                $global:LASTEXITCODE = 1
+            }
+        }
+        $picked = Select-HipMsvcToolset -VsPath $vs -ClangXX "mock_clangxx"
         "PICKED=$picked"
         "RESTORED_VC=$env:VCToolsInstallDir"
         """,
