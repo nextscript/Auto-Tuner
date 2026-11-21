@@ -119,158 +119,48 @@ Performance Test Result:
   the generic `temp 0.7 / top_k 40`) now runs on its intended samplers —
   a frequent cause of repetition loops and broken tool-calls on models
   tuned for a low `top_k` with a non-zero `min_p`.
-- **Six fast setting profiles per model and performance mode** — the top of the
-  right configuration tile now switches between untouched **Auto**, benchmarked
-  **Perform**, and four renameable **Custom** profiles. Perform is disabled until
-  evidence exists. Editing Auto/Perform forks safely into a free Custom slot,
-  so neither source is overwritten. Every non-Auto slot also stores an independent
-  variant for no drafter, embedded MTP, and each external draft GGUF; switching a
-  Q4/Q8/BF16/DFlash head therefore restores that head's measured `draft_n_max`,
-  threads, and batch settings immediately.
-- **Measured performance suite with resumable short and full searches** — select a
-  normal text/chat GGUF and click **🚀 Performance test**. The default **Quick
-  pass** uses at most 3.125% context, 16,384 prompt tokens, and 128 decode tokens,
-  with no overall model/suite deadline; startup, HTTP, and user-cancellation
-  safeguards remain active. **Standard** validates 12.5% with a 65,536 prompt cap;
-  **Custom** accepts 0.01–100% uncapped. Optional **Try only
-  best Settings** remeasures a conservative shortlist from stable two-sample Quick
-  evidence and falls back to the full search when evidence is missing or noisy.
-  A provisional Quick pass never overwrites an existing validated Standard or
-  Custom Perform profile. Completed-run reuse is keyed to the exact binary
-  build/file, backend/devices, frozen quality/placement, baseline, and search
-  schema, so Vulkan/HIP or build changes force revalidation. All-model suites
-  skip only exact matching model/mode/drafter workloads by default;
-  **Rerun completed model / mode / drafter runs** opts back into them. The MTP
-  option can enumerate every
-  compatible external drafter/quantization as well as embedded MTP and saves each
-  winner separately. Prompts are calibrated through the real `/tokenize` endpoint,
-  candidates use fresh private `llama-server` processes and an excluded warm-up,
-  and every completed mode/head is atomically checkpointed. **Stop after Model**
-  and **Stop after Performance Mode** remain graceful resume boundaries.
-- **Diagram-first graphical performance report + public benchmark page** —
-  **📊 Performance report** keeps a compact in-app Quick/Standard/Custom
-  comparison and writes a self-contained HTML report under
-  `~/.autotuner/reports`. The redesigned dashboard starts with the captured test
-  hardware, fastest result cards, aligned per-model winner charts, speculative
-  acceptance, and every successful candidate diagram. The winner table, method
-  text, and expandable per-run candidate/sample evidence now stay together below
-  the graphics. `python publish_benchmarks.py` creates a path-redacted static
-  snapshot under `benchmark-site/`; pushes to `main` deploy that snapshot to the
-  [public GitHub Pages dashboard](https://dawasteh.github.io/Auto-Tuner/). See the
-  [publishing guide](docs/benchmark-pages.md). Legacy fixed-25% results are
-  classified as Custom; the old legacy tile is gone. The report opens with a
-  **Recommended settings per model** section (fastest lane plus the exact
-  winning threads/batch/ubatch/draft values), keeps the per-run candidate
-  diagrams collapsed until you open them, and repeats the applied settings in
-  the winner table. Standard search (18-candidate budget since v5.3.9) probes
-  decoupled generation/prompt threads and a small thread count for fully
-  offloaded models, checks batch families for its top two thread finalists,
-  adds 2048/2048 and 4096-token micro-batch probes for large-VRAM GPUs,
-  hill-climbs beyond the measured batch family while budget remains, MTP depth
-  stops only after two meaningful regressions, and a
-  candidate must clear 3% in every paired prompt variant before promotion. The
-  fastest performance mode is remembered only when context, token mix, test tier,
-  and drafter are directly comparable. Exact contexts above the static estimate are
-  saved only after a real isolated inference succeeds. `low_vram` remains the safe
-  explicit RAM-KV path. Settings → **Performance profiles** exports/imports the
-  complete portable profile bank and drafter evidence. AutoTuner never changes
+- **Six setting profiles per model and performance mode** — switch between
+  untouched **Auto**, benchmarked **Perform**, and four renameable **Custom**
+  profiles. Editing Auto/Perform forks safely into a free Custom slot, and each
+  non-Auto slot stores independent variants per drafter/MTP head.
+- **Measured performance suite** — click **🚀 Performance test** to run
+  **Quick** (≤3.125% ctx / 16k prompt / 128 decode), **Standard** (12.5% / 64k
+  prompt), or **Custom** (0.01–100% uncapped) benchmarks using isolated
+  `llama-server` runs, `/tokenize`-calibrated prompts, and atomic checkpoints
+  with graceful **Stop after Model / Mode** boundaries. Results are cached by
+  exact binary, backend, devices, and placement; Settings → **Performance
+  profiles** exports/imports the portable profile bank. AutoTuner never changes
   clocks, voltage, fan curves, or power limits.
-- **Faster startup and suite preparation** — model metadata headers are read by a
-  bounded worker pool and cached under `~/.autotuner/cache` using path/size/mtime
-  signatures, so unchanged GGUFs do not repeat the tensor-name scan after every
-  restart. Model discovery now runs in parallel with hardware probing instead of
-  waiting behind WMI/vendor tools. Settings JSON is parsed only when its file
-  signature changes, default profile-bank reads no longer cause disk writes, and
-  all-model performance preparation reuses the already-probed active runtime plus
-  cached binary/drafter resolution. Model benchmarks remain sequential so VRAM,
-  thermals, and measurements stay isolated.
-- **Diagnostics, debug mode, and shareable reports** — **🔍 Diagnose** still shows
-  the selected model's KV/MoE/hybrid analysis. It can also create a redacted
-  support report for all scanned models or, after an explicit confirmation, scan
-  every GGUF header into a detailed Markdown inventory in
-  `~/.autotuner/reports`. Settings offers an opt-in **Debug mode** for additional
-  AutoTuner discovery/config logging; it does not enable server prompt logging.
-  Support reports exclude prompts, API payloads, credentials, raw settings, and
-  llama-server output and redact known home/model paths.
-- **Multi-server (run several models at once)** — Launch no longer
-  refuses while a server is running. Each new model gets the **next free
-  port**: 0 servers → `1234`, 1 → `1235`, 2 → `1236`, … When a server is
-  stopped or exits, its port is reclaimed and the counter effectively
-  **resets** (the next launch reuses the freed port). The status bar shows
-  how many servers are live; **Stop** stops the most recent one.
-- **GPU load-balancing for the 2nd/3rd model** — before launching an
-  *additional* model the AutoTuner **re-reads live VRAM** (so it sees what
-  the already-running models actually hold) and steers the new model onto
-  the **emptier card** via `HIP_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES`.
-  If **no GPU has room** it **refuses with a clear message** instead of
-  piling everything onto a card that's already full (e.g. an R9700 sitting
-  at 31/32 GB). The *first* model still uses the normal automatic
-  multi-GPU split.
-- **Host-memory prompt caching (`--cache-ram` / `-cram`)** — auto-enabled
-  with a Launch-options toggle to turn it off. Cached prompt prefixes live
-  in system RAM and are hot-swapped back when a new request shares a long
-  prefix (system prompt, RAG scaffold, Roo-Code preamble), collapsing
-  time-to-first-token on repeated prompts. Current llama.cpp builds
-  (**b10045+**) support this for Vision/`mtmd` too; older or unprobeable
-  builds conservatively receive `--cache-ram 0` when Vision is active.
-  The default cap is **2048 MiB**, editable in the GUI or with
-  `--cache-ram-mib`; the reserved amount is included in the RAM estimate.
-- **Sticky GUI choices** — the Qt launcher remembers each model's selected
-  **mmproj** and **draft/MTP** dropdown entries plus thinking / **n-gram** /
-  **prompt-cache** toggles in `autotuner_settings.json`. n-gram self-speculation
-  now defaults **on for every model**; an explicit per-model off choice remains
-  authoritative. Each model also remembers its selected/fastest performance
-  target and independent Expert settings for all four targets. Switch models,
-  restart, or change targets — the corresponding choices return.
-- **Fork-folder memory** — if you point the GUI at a parent folder
-  that holds several `*_llama.cpp` builds (e.g. `C:\LAB\ai-local`),
-  the next launch re-expands the same set of builds in the dropdown. Current
-  backend-qualified siblings such as `b10679_vulkan_llama.cpp` and
-  `b10679_hip_llama.cpp`, stable names such as `0.3.0_vulkan_llama.cpp`, and
-  legacy backend-neutral folders remain recognized. Required fork switches
-  preserve the selected HIP/Vulkan backend.
-- **Window geometry, state & inner layout** — QMainWindow
-  `saveGeometry()` (size, position, maximize-state) and `saveState()`
-  (toolbars/docks) are persisted as base64 in the settings JSON. **In
-  addition, each inner `QSplitter` saves its own handle positions** under
-  a stable object name, so the *arrangement of the panes inside the
-  window* (model-list vs config width, and the log-panel height) is
-  restored too — not just the outer window size. `saveState()` alone does
-  not round-trip plain central-widget splitters, hence the separate
-  per-splitter persistence.
-- **Global font size** — persistent font size (clamped 7..22), applied
-  immediately on app start (no flash of the default).
-- **Application settings & Info** — the **⚙ Settings** toolbar button and the
-  Windows title-bar system menu (click the top-left app symbol) provide
-  Settings plus **About AutoTuner** with the visible version and GitHub link.
-  The window title also always shows the running version. Settings controls
-  per-user login autostart on Windows, Linux, and macOS, plus optional **X →
-  notification area/system tray** behavior. Both options are disabled by
-  default; the tray menu and the dedicated **Quit** button always exit normally.
-  **Start minimized after login** (below *Start after login*) opens a login
-  start without a window: in the notification area when *Hide on close* is
-  on, otherwise minimized on the taskbar. Until you save a choice it follows
-  *Hide on close*, so enabling both login options is enough. Only the login
-  entry passes `--autostart`; a manual start always shows the window, and a
-  second start restores a tray-hidden AutoTuner. Entries written by older
-  versions are upgraded in place on the next start when they point at the
-  same installation.
-- **One instance per user** — a second start of `AutoTuner.exe` (or
-  `qt_launcher.py`) does not open a rival window: it brings the running
-  AutoTuner to the front, also out of the notification area, and exits. The
-  lock is scoped to the user and the data folder, so a portable
-  `AUTOTUNER_DATA_DIR` still gets its own instance;
-  `AUTOTUNER_ALLOW_MULTIPLE_INSTANCES=1` switches the guard off for development.
-  Quit from the tray menu always ends the process, and a shutdown watchdog
-  ends a hung teardown after 15 s so no window-less AutoTuner lingers.
-- **Stable theme preview** — switching or previewing a theme preserves the
-  current window and pane/splitter arrangement; responsive Appearance controls
-  retain full theme/font names through sensible widths and tooltips.
-- **Reasoning effort** — selectable per model: `auto` / `off` /
-  `minimal` / `low` / `medium` / `high` / `extra_high`. Think-budget
-  (spin-box, -1 = off, 0 = stop immediately, N = token budget) and optional
-  **preserved reasoning history** (`--reasoning-preserve`) live in the
-  Expert panel.
+- **Graphical performance report + public benchmark page** — **📊 Performance
+  report** writes a self-contained HTML dashboard under `~/.autotuner/reports`.
+  `python publish_benchmarks.py` exports a path-redacted static snapshot to
+  `benchmark-site/` for the
+  [public GitHub Pages dashboard](https://dawasteh.github.io/Auto-Tuner/)
+  ([guide](docs/benchmark-pages.md)).
+- **Fast startup and cached metadata** — GGUF headers are scanned in parallel
+  with hardware probing and cached under `~/.autotuner/cache` by path/size/mtime.
+- **Diagnostics & debug mode** — **🔍 Diagnose** shows KV/MoE/hybrid analysis
+  and can generate a redacted support report or full Markdown GGUF inventory in
+  `~/.autotuner/reports`. Settings offers an opt-in **Debug mode** without
+  enabling server prompt logging.
+- **Multi-server with GPU load-balancing** — launch several models concurrently
+  on sequential free ports (`1234`, `1235`, `1236`, …). Additional models
+  re-read live VRAM, steer onto the emptier card, and refuse with a clear
+  message if no GPU has room.
+- **Host-memory prompt caching (`--cache-ram`)** — auto-enabled with a 2048 MiB
+  default cap (editable in GUI or `--cache-ram-mib`), including vision caching
+  on `b10045+` builds.
+- **Sticky GUI choices, layout, font & single instance** — per-model mmproj,
+  draft/MTP, thinking, n-gram, prompt-cache, target, Expert overrides, window
+  geometry, splitter positions, fork parent folder, and global font size
+  persist in `~/.autotuner/autotuner_settings.json`. Settings also controls
+  per-user login autostart, optional *Start minimized after login*, and
+  *Hide on close* to the tray. A second launch raises the existing instance
+  instead of opening a duplicate (`AUTOTUNER_ALLOW_MULTIPLE_INSTANCES=1`
+  disables the guard).
+- **Reasoning controls** — per-model Effort (`auto` / `off` / `minimal` / `low`
+  / `medium` / `high` / `extra_high`), Think-budget (`--reasoning-budget`), and
+  optional `--reasoning-preserve` live in the Expert panel.
 
 ### Vision control
 
@@ -329,7 +219,7 @@ installed by `requirements.txt`). Word/Office/OpenDocument input additionally
 requires a local LibreOffice installation; without it AutoTuner gives a clear
 error and leaves the source untouched. Unlimited-OCR uses its verified
 `document parsing.` prompt, compatible F16 KV with Flash Attention off,
-deterministic sampling, and requires llama.cpp b10287+ (b10839 is audited). **There is no CMake/build flag for `max_tiles=32`.** The value
+deterministic sampling, and requires llama.cpp b10287+. **There is no CMake/build flag for `max_tiles=32`.** The value
 comes from the projector GGUF metadata. For the full 32-tile Unlimited-OCR
 path, the mmproj must contain `clip.vision.preproc_max_tiles=32`; AutoTuner
 warns when an older projector would silently fall back to 9 tiles. Reconvert
@@ -864,12 +754,11 @@ now receives the planned `-ctk`, `-ctv`, and `-fa` values. Existing manual profi
 are not rewritten. Older measured Q4/F16 winners remain historical evidence but
 must be benchmarked again before automatic reuse with the new search policy.
 
-The Expert K/V dropdowns expose the mainline types `f16`, `bf16`, `q8_0`,
-`q5_0`, `q5_1`, `q4_0`, `q4_1`, and `iq4_nl`, plus fork-only `turbo2`,
-`turbo3`, and `turbo4`. Turbo KV is no longer duplicated as a Launch options
-checkbox. Selecting a TurboQuant type shows a special-fork warning with
-**Dismiss** and **Never Show Again**; current mainline llama.cpp rejects those
-types.
+The Expert K/V dropdowns expose the mainline types `f16`, `bf16`, `f8_e4m3`
+(b12274+, HIP/CUDA; Vulkan currently lacks FP8 `SET_ROWS`), `q8_0`, `q5_0`,
+`q5_1`, `q4_0`, `q4_1`, and `iq4_nl`, plus fork-only `turbo2`, `turbo3`, and
+`turbo4`. Selecting a TurboQuant type shows a fork warning; mainline
+llama.cpp rejects those types.
 
 `kv_quant_factor()` also understands `tq3_0`, `turbo3_tcq`, and the normal to
 Turbo mapping used by compatible terminal/fork flows:
@@ -888,42 +777,26 @@ The tuner intelligently selects the best binary based on your model and settings
 - **Integrated MTP (e.g. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (native since b9190+; PR #22673 in mainline since 16 May 2026; no fork needed).
 - **Ternary-Bonsai / Ternary-Bonsai 2** $\rightarrow$ uses the PrismML prism fork
   (`2b_bNNNN_{vulkan,hip}_llama.cpp`) for the `PTQ1_0` / `PQ2_0` packings: mainline
-  llama.cpp (still b12187) rejects them as unknown ggml types 143 / 142. Since
+  llama.cpp (still b12608) rejects them as unknown ggml types 143 / 142. Since
   b11556 (PR #29600) mainline loads the Hadamard fold (`prism.hadamard.*`) for
   mainline conversions (`Q2_0`, `F16`; e.g. Ternary-Bonsai-2 2B/4B/9B `Q2_0`).
-  AutoTuner therefore checks two loader strings in the selected runtime: the
-  `prism.hadamard` loader, and for the private types also the fork's own
-  `PTQ1_0` / `PQ2_0` file-type names. Without that second check b11669 and later
-  would accept the PrismML `PTQ1_0` / `PQ2_0` GGUFs and fail while loading.
+  AutoTuner checks both the `prism.hadamard` loader and, for private types, the
+  fork's own `PTQ1_0` / `PQ2_0` file-type names.
 - **Agnes-3.0-Flash Preview, kingjones777 `MTP-ROCmFP4` / `ROCmFPX` GGUFs** $\rightarrow$
-  need the ROCmFPX fork (`github.com/ROCmFPX/ROCmFPX`, legacy
-  `charlie12345/ROCmFPX`). Their weights use the fork's reserved ggml types
-  100–111 (`Q4_0_ROCMFP4` = 100, `Q8_0_ROCMFPX` = 103; file types 100–124, e.g.
-  106 = *ROCmFP4 Strix Lean*), which mainline llama.cpp (still b12187) rejects as
-  `invalid ggml type 100. should be in [0, 44)`; the CPU-only upstream PR #24185
-  is still open. AutoTuner records the tensor types during the header scan
-  and refuses such a GGUF before launch on a runtime whose llama library has
-  no `ROCmFP` loader string. Agnes itself is a folded `qwen35` conversion: the
-  standard quants (0xKitkat, ngquocvinh) load on mainline, while the
-  `ffn_*_par` conversions (jakeatx, quimmedes) need their own forks. The pinned
-  recipes `rocmfpx_{vulkan,hip}_llama_build.ps1` produce
-  `fpx_b11544_{vulkan,hip}_llama.cpp`; measured 2026-09-19: STRIX_LEAN decodes
-  about 67 tok/s on HIP (R9700) and 29 tok/s on Vulkan with the in-file MTP
-  head, COHERENT matches on HIP but drops to 5 tok/s on Vulkan, and image
-  requests work with the MTP head loaded on both backends.
+  need the ROCmFPX fork (`github.com/ROCmFPX/ROCmFPX`). Their weights use
+  reserved ggml types 100–111 (`Q4_0_ROCMFP4` = 100, `Q8_0_ROCMFPX` = 103),
+  which mainline llama.cpp (still b12608) rejects as
+  `invalid ggml type 100. should be in [0, 44)`. AutoTuner refuses them before
+  launch unless the selected runtime carries the `ROCmFP` loader. Standard
+  quants of Agnes load on mainline.
 - **EschaLabs W2 GGUFs (e.g. `Escha-Qwen3.8-27B-W2`, `-Q8E`)** $\rightarrow$ need the
-  Escha fork of llama.cpp (`github.com/Ajay9o9/llama.cpp-escha`, branch
-  `escha-w2-dense` for the dense 27B, `escha-w2` for the 35B-A3B MoE). Their
-  native 2/3-bit Escha code (`escha_lut` codec table, `escha_code` weight
-  tensors, `<arch>.escha.version`) has no mainline loader: b11538 stops with
-  `check_tensor_dims: tensor 'blk.0.ssm_out.weight' not found`, so AutoTuner
-  refuses the model before launch unless the selected runtime's llama library
-  carries the Escha loader. On that fork the separate MTP head
-  (`Escha-Qwen3.8-27B-W2-MTP-F16-headQ4.gguf`, with or without an `mtp-`
-  prefix) is paired automatically and starts with `-md` +
-  `--spec-type draft-mtp`: the fork's MTP-only loader makes `token_embd` /
-  `output_norm` optional and the head carries no codec of its own. The fork's
-  GPU kernels are CUDA; AutoTuner has not validated it on AMD hardware.
+  Escha fork (`github.com/Ajay9o9/llama.cpp-escha`, branch `escha-w2-dense` for
+  27B, `escha-w2` for 35B-A3B). AutoTuner checks for the `escha_lut` loader and
+  pairs the separate MTP head automatically.
+- **KRAFTON Raon-1 Mini / Nano (`raon1` / `raon1nano`)** $\rightarrow$ mainline
+  llama.cpp (b12608) has no loader yet; AutoTuner checks for the `raon1`
+  runtime marker so `krafton-ai/llama.cpp` or a future mainline merge passes
+  automatically.
 - **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
 
 Example — run Devstral, override context, and pass an extra flag
@@ -1008,7 +881,7 @@ matches. See `settings/_default.yaml`.
 | `fastcontext-1_0-4b.yaml` | Microsoft FastContext 1.0 4B SFT/RL repository explorer, 262k, GGUF sampling defaults | `qwen3` (filename-gated) |
 | `xing-4_0.yaml` | Xing 4.0 29B-A4B (MLA + mHC MoE), embedded MTP head with one draft token and p-min 0 (measured +10–20 %); mainline b12156+ | `xing4_0` |
 | `voxcpm2.yaml` | VoxCPM2 BaseLM: **Voice Lab TTS component, ordinary chat launch blocked** | `minicpm4` (filename-gated, not an architecture-wide block) |
-| `minimax-m3.yaml` | MiniMax-M3 428B-A23B multimodal MSA MoE | `minimax-m3` |
+| `minimax-m3.yaml` | MiniMax-M3 / M3.1 multimodal MSA MoE (M3.1 b12432+) | `minimax-m3` |
 | `glm-5.yaml` | GLM-5/5.1 | `glm5` |
 | `glm-5_2.yaml` | GLM-5.2 + GLM-5.3 (non-Flash), 1M + IndexShare/MTP | `glm-dsa` |
 | `glm-5_3-cybersecurity.yaml` | dealignai GLM-5.3-CYBERSECURITY-FP8 GGUFs, distinct repetition/template defaults | `glm-dsa` (filename-gated) |
@@ -1030,7 +903,7 @@ matches. See `settings/_default.yaml`.
 | `ling-3_0-vl.yaml` | Ling-3.0-flash-VL image/video model (ling3vl projector + M-RoPE), b11156+; older builds refused by metadata gate | `bailingmoe3` with `rope.dimension_sections` (filename-gated; no local weights tested) |
 | `kimi-linear.yaml` | Kimi Linear 48B-A3B, 1M hybrid KDA/MLA (corrected SSM state contract b10749+) | `kimi-linear` |
 | `kimi-k3.yaml` | Kimi-K3 text path (loader b10448; corrected SSM state contract b10749+) | `kimi-k3` |
-| `kimi-k3_1.yaml` | Kimi K3.1 (Pro) 2.8T-A104B text path (KDA + gated DSA), 1M; b12180+ | `kimi-k31` (authoritative) |
+| `kimi-k3_1.yaml` | Kimi K3.1 (Pro) 2.8T-A104B (KDA + gated DSA, 1M); text b12180+, vision b12259+ | `kimi-k31` (authoritative) |
 | `lfm3.yaml` | LiquidAI LFM3-1.7B / VL-2B / Audio-2B / Omni-2B, 256K; b11938+ (audio b11941+) | `lfm3` |
 | `muse-spark-open.yaml` | Muse Spark Open 816B-A42B text/image/audio latent MoE, 1M; b11671+ | `muse-spark` |
 | `mistral-large-4.yaml` | Mistral Large 4 1T-A52B, image input, 1M; b11998+ | `mistral-large4` |
@@ -1041,6 +914,10 @@ matches. See `settings/_default.yaml`.
 | `minicpm-ocr-1_0.yaml` | OpenBMB MiniCPM-OCR 1.0 document OCR, `--reasoning off`, greedy; b11826+ | filename (`qwen35`) |
 | `nemotron-3_5-transcribe.yaml` | NVIDIA Nemotron 3.5 Transcribe 30B-A4B speech-to-text, `--reasoning off`, 64K; b12087+ | filename (`nemotron_h_moe`) |
 | `nemotron-embed.yaml` | NVIDIA Nemotron-3 / 3.5-Embed 1B / 8B (**embedding**, not chat); b11833+ | filename |
+| `inkling-2.yaml` | Thinking Machines Inkling 2 (b12406+) and looped Inkling 2 Mini (b12600+), 1M, vision + DSpark | `inkling2` / `inkling2_loop` (authoritative) |
+| `domyn-edge.yaml` | Domyn Edge 4B dense agentic coding/reasoning, 256K recommended (1M native); b12568+ | `domynedge` (authoritative) |
+| `zaya1.yaml` | Zyphra Zaya1 8B CCA hybrid MoE, 131K; b12519+ | `zaya1` (authoritative) |
+| `raon-1.yaml` | KRAFTON Raon-1 Mini (`raon1`) / Nano (`raon1nano`), 262K; fork marker `raon1` (`krafton-ai/llama.cpp`) | `raon1` / `raon1nano` (authoritative) |
 
 Per-release notes on individual profiles (why a profile exists, what was
 measured, which build it needs) live in
@@ -1125,168 +1002,83 @@ repo keeps the build recipes in separate scripts so this README stays short:
 | [`setup_llamacpp_cuda.ps1`](building%20llama.cpp/setup_llamacpp_cuda.ps1) | Windows NVIDIA/CUDA one-shot setup helper. |
 | [`setup_llamacpp_turboquant_cuda.ps1`](building%20llama.cpp/setup_llamacpp_turboquant_cuda.ps1) | Windows NVIDIA/CUDA TurboQuant setup helper. |
 
-Run a recipe with `pwsh -File <recipe>.ps1`. The Pandaking
-HIP recipes default to `C:\Program Files\AMD\ROCm\7.2`, were audited with
-ROCm HIP SDK 7.2.3, and compile only `gfx1201`, shared by the RX 9070 XT and
-AI PRO R9700. `-RocmPath` remains caller-selectable and the chosen SDK is
-probed before each build. They use upstream's required Windows combination of
-Ninja plus ROCm `clang`/`clang++`; Vulkan remains a separate Visual Studio tree.
-The recipes deliberately do not pass `CMAKE_HIP_COMPILER`: current llama.cpp's
-Windows HIP path does not consume it, and CMake otherwise reports a misleading
-unused-variable warning. Compiler diagnostics remain enabled (no blanket
-warning suppression and no `/WX`/`-Werror` policy for upstream/template code).
-The installed SDK still lacks LLVM PR #201563, so the helper applies that exact
-HIP/MSVC `<cmath>` include-order fix to a workspace-local clang resource copy.
-b10911 (PR #28091) had enabled precompiled headers and a unity build for the
-model sources; b10977 (PR #28892) removes every `target_precompile_headers`
-again after the PCH/`CACHE_LINE_SIZE` heap-corruption report (PR #28882),
-while the unity build of `src/models` stays. Both recipes were re-run
-unchanged on b10930, b10948, b10977 and b11030; the clang `-fno-pch-timestamp`
-option (PR #28816) is still emitted but now idle. b11030's split of
-`ggml-vulkan.cpp` into buffer/debug sources plus shared headers (PR #28732)
-is picked up by upstream's CMake lists and needed no recipe change either.
-b11105…b11160 adds no CMake option; the user-built b11160 trees come from the
-unchanged recipes, and the stable recipes resolve `latest` to **v0.5.0**
-(= b11146); both stable recipes built and verified v0.5.0 unchanged. The new
-RDNA3/RDNA4 int8 cooperative-matrix MMQ path (PR #27952)
-is compiled in through the existing `GL_KHR_cooperative_matrix` detection and
-enabled automatically on both gfx1201 cards. b11160…b11195 adds no CMake
-option either (only the ggml 0.25.3 bump and the tiled CPU matmul sources);
-the user-built b11195 trees carry exactly the b11160 option set.
-b11195…b11249 changes CMake only for Windows ARM64/ARM64EC with MSVC; the
-user-built b11249 trees again carry the identical option set.
-b11538…b11669 adds no CMake option and changes no default (only the version
-bumps to llama.cpp 0.7.0 / ggml 0.27.0, s390x and ARM KleidiAI lines, and
-hidden symbol visibility for *shared* ggml builds, which the static recipes
-do not produce); the user-built b11669 `CMakeCache.txt` files equal b11538's.
-**Stable v0.7.0 is the b11669 commit** (`620d2225c`; v0.6.0 was b11429), so a
-stable 0.7.0 build is the same source and differs only in its version string
-(`0.7.0` instead of `0.7.0-dev`). The stable recipes now insist on exactly
-that string: the old check also accepted `0.7.0-dev` for a stable build.
-HIP builds now find OpenSSL: ROCm `clang` uses the GNU driver, so CMake's
-FindOpenSSL never searched the Windows installer layout and every HIP
-`llama-server` through b11669 was built without HTTPS (`-hf` downloads,
-https MCP servers). The recipes pass `C:\Program Files\OpenSSL-Win64` (or
-`OPENSSL_ROOT_DIR`) explicitly. A HIP tree without OpenSSL now counts as
-incomplete when OpenSSL-Win64 is installed, so re-running the HIP recipe on an
-existing tree (e.g. `-Tag b11669`) rebuilds it with HTTPS; the Vulkan/MSVC
-trees always had it. F16C/FMA are active on both backends (MSVC's `/arch:AVX2`
-implies them), so b11669's F16C fixes for AVX2 CPUs (PRs #30270/#30343) apply
-without a recipe change.
-b11669…b12187 adds only the CMake options `LLAMA_CONNECT` (default OFF; it
-downloads the prebuilt `llama-connect` tool that `--connect` needs) and a SYCL
-switch; the recipes do not set either. The user-built b12187 trees use the
-recipe flags unchanged, and the HIP tree links OpenSSL. The stable recipes
-resolve the latest release (now v0.9.0 = b12110) and need no change.
-MSBuild's MSB8027 "two files named llama.cpp" warning in the Vulkan tree is
-benign: `src/models/llama.cpp` is folded into a unity source and only one
-`llama.obj` is produced.
-It also places matching ROCm 7 DLLs beside each executable and links the SDK's
-rocBLAS/hipBLASLt kernel directories, preventing Windows from loading a stale
-System32/ROCm 7.1 runtime. Windows HIP builds set
-`GGML_CUDA_NO_PEER_COPY=ON`: direct copies between the R9700 and RX 9070 XT can
-silently corrupt decoded tokens even while timing output looks valid, so the
-safe staged transfer path is mandatory. Both backends enable AVX2, AVX-VNNI
-and BMI2 while keeping AVX-512 off. Vulkan shader capabilities (integer
-dot/cooperative matrix/BF16) are detected by current `glslc`, not guessed
-through a GPU target.
+Run a recipe with `pwsh -File <recipe>.ps1`.
 
-Mainline clones retain full history so the embedded compatibility build is
-truthful. Stable and pre-release recipes verify tag, commit, numeric build,
-runtime version, backend-exclusive device listing, and both AMD cards. HIP
-verification additionally checks the no-peer-copy CMake bit and launches a
-bounded two-GPU layer split that must decode exactly `HIP MULTI GPU OK`; this
-catches numerical corruption that `llama-bench` throughput alone cannot see.
-The default oracle is
-`I:\models\Microsoft\fastcontext-1.0-4b-rl-q8_0.gguf`; set
-`AUTOTUNER_HIP_VERIFY_MODEL` to an equivalent compatible Qwen3 GGUF when it is
-stored elsewhere. Mutable third-party branch/PR recipes are pinned to reviewed
-2026-08-28 commits so each Vulkan/HIP sibling is source-identical, and no
-recipe recursively replaces a known-good destination. A destination that
-fails the safety gate is resumed and rebuilt in place without deleting its
-source checkout. The CUDA helpers remain backend-neutral legacy output
-producers and are not renamed automatically.
+Key recipe details (Windows):
+- **HIP (ROCm 7.2, `gfx1201`):** uses Ninja + ROCm `clang`/`clang++`
+  (`-RocmPath` defaults to `C:\Program Files\AMD\ROCm\7.2`).
+  `Select-HipMsvcToolset` automatically probes installed Visual Studio MSVC
+  toolsets newest-first so VS 2026 (`14.52+`/`14.53+`, which fails with
+  `STL1000` under ROCm 7.2's Clang 21) falls back cleanly to the newest
+  compatible STL (e.g. `14.50.x`), and `Get-HipCompatibilityResourceDir`
+  applies the workspace-local LLVM PR #201563 `<cmath>` include-order fix.
+  OpenSSL-Win64 (`C:\Program Files\OpenSSL-Win64` or `OPENSSL_ROOT_DIR`) is
+  passed explicitly so HIP builds include HTTPS support (`-hf`, https MCP).
+  `GGML_CUDA_NO_PEER_COPY=ON` prevents silent PCIe multi-GPU token corruption,
+  ROCm 7 runtime DLLs and `rocblas`/`hipblaslt` kernel junctions are placed
+  beside `llama-server.exe`, and post-build verification runs a two-GPU layer
+  split that must decode `HIP MULTI GPU OK` (default oracle
+  `I:\models\Microsoft\fastcontext-1.0-4b-rl-q8_0.gguf`, overridable via
+  `AUTOTUNER_HIP_VERIFY_MODEL`).
+- **Vulkan:** uses Visual Studio x64 + `SPIRV-Headers` + `glslc`. Both
+  backends enable AVX2, AVX-VNNI, and BMI2 with AVX-512 off.
+- **Llama Chat UI:** recipes detect `ui/apps/chat` + `scripts/ui-assets.cmake`
+  (`b12451+`, letting CMake build Llama Chat from source with
+  `LLAMA_USE_PREBUILT_UI=OFF`) as well as legacy `tools/ui` and
+  `tools/server/webui` layouts.
+- **Safety:** mainline clones keep full history for truthful build numbers;
+  existing known-good outputs are never overwritten (incomplete trees resume in
+  place). Latest stable resolves automatically (currently `v1.0.0` = `b12359`).
 
-Ubuntu/Linux users can either build upstream llama.cpp normally or adapt the
-same CMake flags from the recipes. The only AutoTuner requirement is that the
-resulting binary is discoverable, e.g. `LLAMA_CPP_DIR=/opt/ai-local/b9888_llama.cpp`
-with `build/bin/llama-server` inside.
+Ubuntu/Linux users can build upstream llama.cpp directly and point
+`LLAMA_CPP_DIR` at the checkout containing `build/bin/llama-server`.
 
-## Server features (audited through llama.cpp b12187)
+## Server features (audited through llama.cpp b12608)
 
-The **b12187** (`cf659f240`, `0.9.0-dev`; stable v0.8.0 = b11960, v0.9.0 =
-b12110) [audit](docs/llama-b12187-audit.md) covers 518 commits after b11669.
-New options are `--connect` / `--connect-code` (peer-to-peer tunnel; the code
-is redacted from AutoTuner's logs) and the router-only
-`--models-memory-margin` (423 names / 336 long options). **Xing 4.0** and
-**DeepSeek-V4.1-Flash** now run on mainline (b12156 / b11870) and are no
-longer blocked; Xing uses its MTP head with one draft token (+10–20 % decode).
-Kolibri 1 runs on mainline b11709+, including GGUFs made with the earlier hob patch (AutoTuner maps their pre-tokenizer and gating type). New profiles: **Kimi K3.1**, **LFM3**,
-**Muse Spark Open**, **Mistral Large 4**, **Clover**, **Ripple**, **Limite**,
-**Flint**, **MiniCPM-OCR 1.0**, **Nemotron 3.5 Transcribe** and
-**Nemotron-Embed**; every architecture, decision type and projector added
-after b11669 has a build floor. LiLiCorr drafters run as `draft-dflash` again
-(they were sent as MTP), a draft head is no longer paired with a model of
-another size, and drafters measured slower than no draft (Bolt + LiLiCorr,
-MiniCPM-V 4.7 + DSpark) stay selectable but are not chosen by default. See [validation](docs/v5.6.4-validation.md).
+The **b12608** (`93cb37ea7`, `1.0.0-dev`; stable **v1.0.0** = `b12359`)
+[audit](docs/llama-b12608-audit.md) covers 421 commits after b12187
+(429 option names / 343 long options):
 
-The previous **b11669** (`620d2225c`, `0.7.0-dev`, = stable **v0.7.0**)
-[audit](docs/llama-b11669-audit.md) covered 131 commits after b11538. The only
-CLI addition is **`--spec-draft-n-ubatch`** (420 names / 333 long options);
-AutoTuner sends `--spec-draft-n-ubatch 64` for external DFlash/DFlash2/
-LiLiCorr drafts and MTP heads (measured: −1.26 GiB VRAM for Qwen3.8-27B +
-DFlash2 on Vulkan, −0.22 GiB for Gemma 4 + MTP, same speed and acceptance).
-Decision models run without prompt cache, as llama.cpp now defaults. Mainline
-loads **Prism Bonsai 2** Q2_0/F16 conversions from b11556; the Prism gate now
-also checks the fork's own `PTQ1_0`/`PQ2_0` loader, which b11669 would
-otherwise have let through. New profiles: **Nemotron 3.5 Super VL / Bolt**,
-**MiniCPM-V 4.7**, **Bonsai 2 2B/4B/9B**, **Laguna XS 2.1**, **Kolibri 1**
-(fork-only); new vision projectors and the vLLM decision types have build
-floors, and LiLiCorr drafters pair automatically. The HIP build recipes now
-link OpenSSL (HTTPS was missing) and the stable recipe rejects a `-dev`
-build. Qwen3.8 Flash Next `draft-mtp` still aborts upstream and stays off.
-Throughput was within ±2 % of b11538
-([validation](docs/v5.6.3-validation.md)). Summaries of earlier audits are in
-[CHANGELOG.md](CHANGELOG.md#earlier-llamacpp-audit-summaries); every audit
-has its own file under [docs/](docs/).
+- **CLI changes:** added `--ple` / `--shard` (repeatable external shard/PLE
+  aliases), `--moe-cache-cpu-share`, `--tts-lang`, `--tts-voice`,
+  `--allow-unauthenticated-tools`, `--media-allow-private-urls`, and
+  `--ui-mcp-proxy-allow-private-urls`; removed deprecated `-dt` /
+  `--defrag-thold` (never emitted by AutoTuner).
+- **FP8 KV cache (`f8_e4m3`, b12274+):** supported in `kv_quant_factor()` and
+  the Expert K/V dropdown (verified on b12608 HIP; Vulkan currently aborts on
+  `SET_ROWS`, so Auto stays on `q8_0`).
+- **New profiles & guards:** **Inkling 2 / Inkling 2 Mini** (`inkling-2.yaml`;
+  fixes collision with `ling-ring.yaml` and refuses early pre-PR
+  `inkling2.num_loops` GGUFs), **Domyn Edge 4B** (`domyn-edge.yaml`),
+  **Zyphra Zaya1 8B** (`zaya1.yaml`), and **KRAFTON Raon-1 Mini / Nano**
+  (`raon-1.yaml`, gated on `raon1` fork marker). Build floors added for all 7
+  new architectures and 15 new multimodal projectors; Kimi K3.1 vision
+  (`b12259+`) and MiniMax-M3.1 (`b12432+`) noted.
+- **Rechecked on b12608:** Qwen3.8 Flash Next `draft-mtp` still aborts upstream
+  (`GGML_ASSERT(buffer)`) and stays gated; Agnes ROCmFP4 and Bonsai 2
+  `PTQ1_0`/`PQ2_0` remain fork-only. See [validation](docs/v5.6.5-validation.md)
+  and [CHANGELOG.md](CHANGELOG.md) for earlier audits.
 
 | Flag | Support |
 |------|---------|
 | `-fa [on\|off\|auto]` | ✅ Emits `-fa on` **or** `-fa off` explicitly; model profiles such as Unlimited-OCR can require the reference non-FA path |
-| `-ctk/-ctv f16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl` | ✅ All in the dropdown |
-| `--fit off` | ✅ Always emitted so llama.cpp's own auto-fit pass (default `on`) doesn't silently re-adjust the computed values (AutoTuner is the authority) |
-| `--lazy-mode on` / `-lzm` | ✅ Explicit for giant architecture-marked row tables (qwen4exp/Gemma 4), independent of b10867's device-dependent `auto`. Compatibility preparation translates the name to legacy `--tensor-read-lazy` when advertised; unsupported memory controls are retained so the runtime rejects the command. Eager overrides require replanning. Active mapped pages still consume OS-managed RAM; this is not a residency cap. |
-| `--perf` | ✅ Explicitly asserts performance timings so fork defaults cannot hide prompt/eval tokens/s; users can append `--no-perf` |
-| `--metrics` | ✅ Prometheus endpoint `GET /metrics`, including b10282+ speculative draft/accept counters (see "Monitoring") |
-| `--slots` / `--no-slots` | ✅ Emitted explicitly so the Expert toggle remains authoritative even though current mainline defaults `/slots` on |
-| `--cache-ram` / `-cram` | ✅ Host-memory prompt caching (PR #16391), auto-on with a 2048 MiB bounded default, adjustable in GUI/CLI and included in RAM planning. Vision caching is enabled for b10045+ and forced to `0` for older/unprobeable builds. Decision models always get `0` (llama.cpp b11642+ default; their states seldom repeat). |
-| `--reasoning on/off/auto` | ✅ Via dropdown |
-| `--reasoning-budget N` | ✅ Via spin-box. **Renamed from `--think-budget` at b9625** (the old spelling is gone, not an alias); AutoTuner emits the new name and still reads the legacy one back from older persisted settings |
-| `--reasoning-preserve` | ✅ Optional Expert checkbox; omitted leaves the llama.cpp default (template default before b10786, **enabled by default since b10786** for templates that support it). Add `--no-reasoning-preserve` to the Extra CLI flags to force it off. |
-| `--chat-template-kwargs ...` | ✅ The dropdown produces this automatically |
-| `--jinja` | ✅ Ticked visibly |
-| `-lm, --load-mode {none,mmap,mlock,mmap+mlock,dio}` | ✅ Complete Expert dropdown. b10151's non-mmap `mlock` and explicit `mmap+mlock` semantics are version-gated; legacy checkbox snapshots are migrated. |
-| `-md` external drafter | ✅ Model/tensor-aware speculative path; `--spec-draft-device` pins the budgeted GPU. Multi-GPU HIP/CUDA/Vulkan ordering keeps shared target output heads on that GPU too. Unknown device identity fails safely. |
-| `--spec-type draft-mtp` | ✅ Integrated/sidecar MTP (Qwen3-Next, Qwen3.6-MTP, GLM-4.7/5.2, DeepSeek V3.2 etc.). On broken b10741-b10748 runtimes, command preparation disables only MTP while preserving compatible ngram speculation; standalone MTP heads and array-backed NextN targets are rejected before launch. Full MTP resumes on b10749+. |
-| `--spec-type draft-eagle3` / `draft-dflash` / `draft-dspark` | ✅ Architecture/tensor-aware sidecar detection. Generic DSpark is emitted on b10164+; Nemotron3.5 uses its b10665 profile gate. DFlash2 reuses `draft-dflash` and accepts mainline b10658+ (reviewed PR #27342 builds remain a legacy fallback). |
-| `--spec-type ngram-mod` (draftless) | ✅ Via `ngram_method: ngram-mod` (default). Suppressed on MTP models because `draft-mtp,ngram-mod` crashes mid-generation (#23154 was stale-closed, not confirmed fixed; rechecked at b11160) |
-| `--spec-type ngram-map-k4v` (draftless) | ✅ The MTP-**compatible** ngram method from ggerganov's MTP cleanup (PR #23269). Via `ngram_method: ngram-map-k4v` it runs together with `draft-mtp` → this is how you combine "MTP + ngram" |
-| `--spec-type ngram-map-k / ngram-simple / ngram-cache` | ✅ Selectable via `ngram_method`; only the type token is emitted, sub-parameters are left to the llama.cpp defaults |
-| `--spec-draft-n-max` | ✅ Expert overrides remain authoritative. DFlash derives block-size minus its anchor (Qwen3.8 DFlash2: 8 → 7); performance tuning then increases depth one token at a time until decode speed regresses instead of stopping at a fixed list. |
-| `--spec-draft-p-min` | ✅ Via `draft_p_min` for ordinary external/integrated MTP (explicit 0.75). Qwen3.8 DFlash2 and LiLiCorr drafters keep the upstream value 0.0 because their candidate selector performs the lattice pruning. |
-| `--spec-draft-n-ubatch` | ✅ b11629+: `64` for external DFlash / DFlash2 / LiLiCorr drafts and standalone MTP heads (measured −1.26 GiB VRAM for Qwen3.8-27B + DFlash2 on Vulkan, −0.22 GiB for Gemma 4 + MTP, unchanged speed and acceptance). Plain draft models keep the target `-ub`; pruned on older builds |
-| `--spec-draft-sampling {greedy,probabilistic}` | ✅ b11368+: known value flag for Extra CLI flags (pruned on older builds, removed with a withdrawn draft). Not set by default: with AutoTuner's p-min 0.75 plans both modes measured within run variation |
-| `--spec-ngram-map-k4v-size-n/-size-m/-min-hits` | ✅ Via `ngram_k4v_size_n` / `ngram_k4v_size_m` / `ngram_k4v_min_hits` in the YAML (defaults 16/24/1 from PR #23269) |
-| `--spec-draft-ngl` | ✅ Always 99 (keep the MTP head on GPU) |
-| `--n-cpu-moe` / `--override-tensor` | ✅ `--n-cpu-moe` active; `-ot` prepared for targeted expert placement |
-| `--moe-cache-mib N` | ✅ b11480+: known value flag for Extra CLI flags (pruned on older builds). **Not set automatically:** on hybrid MoE plans it decoded 38…62 % slower or failed to allocate on Vulkan (RDNA4) and traded +3…16 % decode for −13…32 % prefill on HIP; AutoTuner reserves no VRAM for a cache you add yourself |
-| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted for dense, **capacity-fill for MoE**, with single-GPU pinning; for multi-server the 2nd/3rd model is pinned to the emptier card via `HIP_/GGML_VK_VISIBLE_DEVICES`. A manual hard-pin to one card is available three ways — CLI `--gpu NAME`, the toolbar **GPU** dropdown, or the `forced_gpu` key in the settings JSON — all resolving through `compute_config(force_gpu=…)` |
-| `-mmdev, --mmproj-device DEVICE` | ✅ b10541+: automatically pins the complete multimodal projector to AutoTuner's selected post-visibility-remap `main_gpu`, matching the VRAM budget. Safely pruned for older/forked binaries that do not advertise the flag. |
-| `--rope-scaling yarn` | ✅ Already present |
-| `--numa` | ✅ Already present |
-| `--no-context-shift` | ✅ No longer duplicated (dedup via a seen-set) |
-| `--tools-runtime docker:…` | ✅ Correct value parsing/capability pruning through Extra CLI flags; never auto-enabled because it executes tools across a Docker/host trust boundary |
-| Unlimited-OCR / DeepSeek-OCR MTMD | ✅ Separate prompt/profile handling despite their shared `deepseek2-ocr` architecture; b10287+ Unlimited gate and stale-projector warning; shared GUI/TUI image/PDF/Office workflow; F16 compatibility KV when `-fa off`, manual precision override, DRY guard, and normal `/v1/chat/completions` API |
+| `-ctk/-ctv f16/bf16/f8_e4m3/q8_0/q5_0/q5_1/q4_0/q4_1/iq4_nl` | ✅ All in the Expert dropdown (`f8_e4m3` b12274+ HIP/CUDA; Auto defaults to `q8_0`) |
+| `--fit off` | ✅ Always emitted so llama.cpp's own auto-fit pass doesn't override AutoTuner's plan |
+| `--lazy-mode on` / `-lzm` | ✅ Explicit for giant architecture-marked row tables (`qwen4exp`/Gemma 4); translates to `--tensor-read-lazy` on legacy builds |
+| `--ple` / `--shard` | ✅ b12233+: known repeatable value aliases for Extra CLI flags (pruned on older builds) |
+| `--perf` | ✅ Explicitly enabled for throughput timings; append `--no-perf` to silence |
+| `--metrics` | ✅ Prometheus endpoint `GET /metrics`, including speculative draft/accept counters |
+| `--slots` / `--no-slots` | ✅ Emitted explicitly so the Expert toggle remains authoritative |
+| `--cache-ram` / `-cram` | ✅ Host-memory prompt caching, auto-on with 2048 MiB cap (vision on b10045+; off for decision models) |
+| `--reasoning on/off/auto` / `--reasoning-budget N` / `--reasoning-preserve` | ✅ Exposed in the Expert reasoning panel |
+| `--chat-template-kwargs` / `--jinja` | ✅ Managed from profile and GUI controls |
+| `-lm, --load-mode {none,mmap,mlock,mmap+mlock,dio}` | ✅ Complete Expert dropdown; full GPU offloads on Windows default to `none` |
+| `-md` / `--spec-type` (`draft-mtp`, `draft-eagle3`, `draft-dflash`, `draft-dspark`, `ngram-*`) | ✅ Metadata-driven speculative decoding with `--spec-draft-device`, `--spec-draft-ngl 99`, `--spec-draft-n-max`, `--spec-draft-p-min`, and `--spec-draft-n-ubatch 64` for DFlash/MTP heads |
+| `--n-cpu-moe` / `--override-tensor` / `--moe-cache-mib` / `--moe-cache-cpu-share` | ✅ `--n-cpu-moe` active; MoE cache options recognized as value flags for Extra CLI flags (opt-in) |
+| `--tensor-split` / `--main-gpu` | ✅ Priority-weighted for dense, capacity-fill for MoE, single-GPU pinning and `--gpu NAME` override |
+| `-mmdev, --mmproj-device DEVICE` | ✅ b10541+: pins multimodal projector to the planned `main_gpu` |
+| `--tts-lang` / `--tts-voice` | ✅ b12440+: recognized as value flags for Extra CLI flags (pruned on older builds) |
+| `--rope-scaling yarn` / `--numa` / `--no-context-shift` / `--tools-runtime` | ✅ Supported and cleanly deduplicated/pruned across build versions |
 
 ### Speculative decoding (MTP + n-gram)
 

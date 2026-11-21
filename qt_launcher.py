@@ -4590,6 +4590,7 @@ class ExpertPanel(QWidget):
         "q5_1",
         "f16",
         "bf16",
+        "f8_e4m3",
         "turbo4",
         "turbo3",
         "turbo2",

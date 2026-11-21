@@ -1,3 +1,6 @@
+# Legacy Voice Lab (tc-mb/llama.cpp-omni) Vulkan build for VoxCPM2.
+# Note: mainline llama.cpp b12531+ (PR #32443) also includes native VoxCPM2
+# support in llama-tts / llama-server (/tts) via voxcpm2_gen / voxcpm2_spkenc.
 $ErrorActionPreference = 'Stop'
 $src = 'L:/LAB/ai-local/voicelab_llama.cpp-omni'
 if (!(Test-Path "$src/CMakeLists.txt")) { throw 'Clone tc-mb/llama.cpp-omni into the dedicated Voice Lab directory first.' }

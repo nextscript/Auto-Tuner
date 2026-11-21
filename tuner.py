@@ -208,6 +208,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--models-max",
     "--models-memory-margin",  # b12187 router option (PR #21231)
     "--models-preset",
+    "--moe-cache-cpu-share",  # b12191 (PR #30966)
     "--moe-cache-mib",
     "--mtmd-batch-max-tokens",
     "--model",
@@ -216,6 +217,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--n-gpu-layers",
     "--numa",
     "--parallel",
+    "--ple",  # b12233 alias of --shard (PR #31185)
     "--pooling",
     "--port",
     "--predict",
@@ -230,6 +232,7 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--rope-scale",
     "--rope-scaling",
     "--samplers",
+    "--shard",  # b12233 external GGUF shards / PLE (PR #31185)
     "--spec-draft-device",
     "--device-draft",
     "-devd",
@@ -266,6 +269,8 @@ _ARG_FLAGS_WITH_VALUES: Set[str] = {
     "--tools-runtime",
     "--top-k",
     "--top-p",
+    "--tts-lang",  # b12440+ server TTS option
+    "--tts-voice",  # b12440+ server TTS option
     "--ubatch-size",
     "-lzm",
     "-ts",
@@ -307,6 +312,8 @@ _REPEATABLE_VALUE_FLAGS: Set[str] = {
     "--control-vector",
     "--control-vector-scaled",
     "--api-key",
+    "--ple",
+    "--shard",
 }
 
 _FLAG_ALIAS_GROUPS: Tuple[Set[str], ...] = (
@@ -327,6 +334,7 @@ _FLAG_ALIAS_GROUPS: Tuple[Set[str], ...] = (
     {"-ngl", "--gpu-layers", "--n-gpu-layers"},
     {"-np", "--parallel"},
     {"-p", "--prompt"},
+    {"--ple", "--shard"},
     {"-sm", "--split-mode"},
     {"-t", "--threads"},
     {"-tb", "--threads-batch"},
@@ -775,6 +783,23 @@ def _model_runtime_block_reason(model: ModelEntry) -> str:
             "reads V4.1 as architecture 'deepseek41'; download or convert a "
             "current GGUF."
         )
+    # Early pre-PR Inkling 2 Mini conversions (e.g. Unsloth's first upload)
+    # wrote architecture ``inkling2`` with ``inkling2.num_loops`` /
+    # ``inkling2.loop.core_start`` and ``block_count=48`` over only 24 physical
+    # blocks. Mainline llama.cpp b12600+ (PR #32694) loads Inkling 2 Mini as
+    # architecture ``inkling2_loop`` (``loop.start``/``loop.end``/``loop.count``)
+    # and aborts on the early layout with "tensor 'blk.24.attn_q.weight' not
+    # found".
+    if arch == "inkling2" and (
+        "inkling2.num_loops" in md or "inkling2.loop.core_start" in md
+    ):
+        return (
+            "This Inkling 2 Mini GGUF predates mainline support: it uses the "
+            "early 'inkling2' + 'inkling2.num_loops' layout, which llama.cpp "
+            "aborts on ('tensor blk.24.attn_q.weight not found'). llama.cpp "
+            "b12600+ (PR #32694) reads Inkling 2 Mini as architecture "
+            "'inkling2_loop'; download or convert a current GGUF."
+        )
     return ""
 
 
@@ -818,19 +843,16 @@ def _nemotron_latent_mtp_block_reason(
 #: tensors it does not carry.
 _MIN_QWEN4EXP_MTP_BUILD = 11330
 
-#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371, b11538, b11669 and b12187
+#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371 through b12608
 #: (HIP and Vulkan, one and two GPUs) loads the model and its NextN block, reserves the
 #: MTP graph and then aborts in ``ggml-backend.cpp`` with
 #: ``GGML_ASSERT(buffer)`` while the draft context is initialised. This holds
 #: for a separate ``mtp-*.gguf`` head and for the same block embedded with
 #: ``merge_mtp_head.py``; ``--ctx-checkpoints 0``, F16 KV and
 #: ``--no-spec-draft-backend-sampling`` do not avoid it. The embedded GGUF
-#: runs normally without speculation. b11538 reworked the NextN flags and
-#: row cropping (PRs #30017/#30020/#30097) and still aborts the same way;
-#: b11669 (image embeddings for the MTP head, PRs #30257/#30397) too, and
-#: b12187 (conv-state tail write #31443, MTP hidden-state save/restore #30141).
+#: runs normally without speculation.
 #: Lift this only after a real request with accepted drafts on a newer build.
-_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 12187
+_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 12608
 
 
 def qwen4exp_mtp_draft_unusable(model: ModelEntry) -> bool:
@@ -1200,6 +1222,21 @@ _MMPROJ_PROJECTOR_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "chatterbox": (12097, "PR #30993"),
     "chatterbox_spkenc": (12097, "PR #30993"),
     "drama3_gen": (12116, "PR #31613"),
+    "magevl": (12192, "PR #31819"),
+    "kimik31": (12259, "PR #31980"),
+    "inkling2v": (12406, "PR #32217"),
+    "zonos3_gen": (12424, "PR #32020"),
+    "zonos3_spkenc": (12424, "PR #32020"),
+    "higgs_audio": (12426, "PR #32329"),
+    "vibevoice_asr": (12426, "PR #32329"),
+    "fish_s2_gen": (12452, "PR #32330"),
+    "fish_s2_spkenc": (12452, "PR #32330"),
+    "yue2_gen": (12458, "PR #32369"),
+    "minimax_music3_gen": (12479, "PR #32435"),
+    "kokoro": (12494, "PR #32413"),
+    "tiny_voca": (12497, "PR #32427"),
+    "voxcpm2_gen": (12531, "PR #32443"),
+    "voxcpm2_spkenc": (12531, "PR #32443"),
 }
 #: Architectures added to mainline after b11669. An older build stops with
 #: "unknown model architecture"; this names the first build that loads them.
@@ -1219,6 +1256,13 @@ _ARCH_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "xing4_0": (12156, "PR #31589"),
     "ricursive": (12158, "PR #31692"),
     "kimi-k31": (12180, "PR #31779"),
+    "inkling2": (12406, "PR #32217"),
+    "zonos3": (12424, "PR #32020"),
+    "kokoro": (12494, "PR #32413"),
+    "tiny-voca": (12497, "PR #32427"),
+    "zaya1": (12519, "PR #32071"),
+    "domynedge": (12568, "PR #32559"),
+    "inkling2_loop": (12600, "PR #32694"),
 }
 #: ``tokenizer.ggml.model`` values a build must know before it can load the
 #: vocabulary at all (b11455 / PR #30045 added the PLaMo-3 pre-segmentation).
@@ -2776,6 +2820,8 @@ def kv_quant_factor(quant: str) -> float:
     q = quant.lower()
     if q in ("f16", "fp16", "bf16"):
         return 1.0
+    if q in ("f8_e4m3", "fp8"):
+        return 0.50
     if q in ("q8_0", "q8_1", "q8"):
         return 0.55
     if q in ("q5_0", "q5_1", "q5"):
@@ -2884,10 +2930,14 @@ _KNOWN_MOE_ARCHS = frozenset(
         "beam",
         "clover_moe",
         "flint",
+        "inkling2",
+        "inkling2_loop",
         "kolibri1",
         "mistral-large4",
         "muse-spark",
+        "raon1",
         "xing4_0",
+        "zaya1",
         "qwen2moe",
         "qwen3moe",
         "qwen3vlmoe",

@@ -3,6 +3,54 @@
 Release history of AutoTuner. Each llama.cpp audit and each release
 validation has its own file under [docs/](docs/).
 
+### v5.6.5 — llama.cpp b12608 (1.0.0-dev / v1.0.0) audit, Inkling 2 / Raon-1 / Domyn Edge / Zaya1, Windows build fixes
+
+- **421 upstream commits audited (b12187 → b12608, spanning stable v1.0.0 =
+  b12359):** 429 option names / 343 long options. Added `--ple` / `--shard`
+  (repeatable value aliases), `--moe-cache-cpu-share`, `--tts-lang`,
+  `--tts-voice`, `--allow-unauthenticated-tools`, `--media-allow-private-urls`,
+  and `--ui-mcp-proxy-allow-private-urls`; removed deprecated `-dt` /
+  `--defrag-thold` (never emitted by AutoTuner).
+- **FP8 KV cache (`f8_e4m3`, b12274, PR #28392):** added to
+  `kv_quant_factor()` (`0.50`) and the Expert K/V dropdown. Live-verified on
+  b12608 HIP; Vulkan currently aborts on `SET_ROWS` for FP8 KV, so Auto stays
+  on `q8_0`.
+- **New profiles and pre-launch guards:**
+  - **Inkling 2 / Inkling 2 Mini** (`inkling-2.yaml`, `inkling2` b12406+,
+    `inkling2_loop` b12600+, `arch_authoritative: true`): fixes the filename
+    collision where `Inkling-2-Mini` previously matched `ling-ring.yaml`. Early
+    pre-PR Inkling 2 Mini GGUFs (`inkling2` + `inkling2.num_loops`) abort on
+    mainline and are now refused pre-launch with a clear message pointing to
+    mainline `inkling2_loop` (`b12600+`, PR #32694).
+  - **Domyn Edge 4B** (`domyn-edge.yaml`, `domynedge`, b12568+), **Zyphra
+    Zaya1 8B** (`zaya1.yaml`, `zaya1`, b12519+), and **KRAFTON Raon-1 Mini /
+    Nano** (`raon-1.yaml`, `raon1` / `raon1nano`, runtime-marker gated for
+    `krafton-ai/llama.cpp` until mainline support lands).
+  - Updated `kimi-k3_1.yaml` (vision `kimik31` since b12259) and
+    `minimax-m3.yaml` (MiniMax-M3.1 since b12432); verified `PaddleOCR-VL-1.6`
+    live on b12608.
+- **New build floors:** 7 architectures (`inkling2`, `inkling2_loop`,
+  `domynedge`, `zaya1`, `zonos3`, `kokoro`, `tiny-voca`) and 15 multimodal
+  projectors (`magevl`, `kimik31`, `inkling2v`, `voxcpm2_gen`/`_spkenc`, etc.);
+  hybrid and MoE tables updated; all 9 language packs updated.
+- **Build recipes (`building llama.cpp/`):**
+  - `windows_llama_build_common.ps1`: `Select-HipMsvcToolset` probes installed
+    VS 2026 MSVC toolsets newest-first with ROCm 7.2's Clang 21 and selects the
+    newest STL it accepts (fixing `STL1000` on MSVC `14.52+`/`14.53+`) across
+    all Windows HIP recipes, with normalized trailing-slash and case-insensitive
+    path replacement.
+  - `windows_llama_build_common.ps1`, `setup_llamacpp_cuda.ps1`, and
+    `setup_llamacpp_turboquant_cuda.ps1`: detect llama.cpp b12451+'s moved
+    Llama Chat UI (`ui/apps/chat` + `scripts/ui-assets.cmake`) so CMake builds
+    it from source cleanly (`LLAMA_USE_PREBUILT_UI=OFF`).
+- **Docs cleanup:** trimmed historical bloat and duplicated sections from
+  `README.md`, fixed outdated paths/counts in `docs/themes.md` and
+  `docs/languages.md`, and refreshed `models_metadata.md`.
+- **Rechecked on b12608:** Qwen3.8 Flash Next `draft-mtp` still aborts with
+  `GGML_ASSERT(buffer)` (gate kept, verified build b12608); Agnes ROCmFP4 and
+  Bonsai 2 PTQ1_0/PQ2_0 stay refused on mainline.
+- [Audit](docs/llama-b12608-audit.md) · [Validation](docs/v5.6.5-validation.md).
+
 ### v5.6.4 — llama.cpp b12187 audit (after v0.8.0 / v0.9.0), Xing 4.0 and DeepSeek-V4.1 on mainline, eleven new profiles
 
 - **518 upstream commits audited (b11669 → b12187, spanning stable v0.8.0 =

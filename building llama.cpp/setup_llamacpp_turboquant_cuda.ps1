@@ -542,35 +542,40 @@ OK "TurboQuant Basis b$baseBuild; Fork-Commit $forkCommit"
 
 # --- 9. UI BAUEN (layout-tolerant; sonst Prebuilt-UI) ---
 Log "Pruefe Web-UI"
-$uiDir = $null
-foreach ($relativeUiDir in @("tools\ui", "tools\server\webui")) {
-    $candidateUiDir = Join-Path $dir $relativeUiDir
-    if (Test-Path (Join-Path $candidateUiDir "package.json")) {
-        $uiDir = $candidateUiDir
-        break
-    }
-}
 $uiPrebuilt = "ON"
-if ($uiDir) {
-    $distDir = Join-Path $uiDir "dist"
-    if (Test-Path $distDir) {
-        OK "UI bereits gebaut - uebersprungen"
-    } else {
-        Log "Baue Web-UI aus $uiDir..."
-        Push-Location $uiDir
-        try {
-            if (Test-Path "package-lock.json") { npm ci } else { npm install }
-            if ($LASTEXITCODE -ne 0) { throw "npm dependency install failed" }
-            npm run build
-            if ($LASTEXITCODE -ne 0) { throw "npm UI build failed" }
-        } finally {
-            Pop-Location
-        }
-        OK "UI gebaut"
-    }
+if ((Test-Path (Join-Path $dir "ui\apps\chat\package.json")) -and (Test-Path (Join-Path $dir "scripts\ui-assets.cmake"))) {
+    OK "Llama Chat (ui\apps\chat) wird direkt waehrend des CMake-Builds gebaut"
     $uiPrebuilt = "OFF"
 } else {
-    WARN "Keine UI-Quellen gefunden - CMake verwendet die Prebuilt-UI"
+    $uiDir = $null
+    foreach ($relativeUiDir in @("tools\ui", "tools\server\webui")) {
+        $candidateUiDir = Join-Path $dir $relativeUiDir
+        if (Test-Path (Join-Path $candidateUiDir "package.json")) {
+            $uiDir = $candidateUiDir
+            break
+        }
+    }
+    if ($uiDir) {
+        $distDir = Join-Path $uiDir "dist"
+        if (Test-Path $distDir) {
+            OK "UI bereits gebaut - uebersprungen"
+        } else {
+            Log "Baue Web-UI aus $uiDir..."
+            Push-Location $uiDir
+            try {
+                if (Test-Path "package-lock.json") { npm ci } else { npm install }
+                if ($LASTEXITCODE -ne 0) { throw "npm dependency install failed" }
+                npm run build
+                if ($LASTEXITCODE -ne 0) { throw "npm UI build failed" }
+            } finally {
+                Pop-Location
+            }
+            OK "UI gebaut"
+        }
+        $uiPrebuilt = "OFF"
+    } else {
+        WARN "Keine UI-Quellen gefunden - CMake verwendet die Prebuilt-UI"
+    }
 }
 
 # --- 10. CMAKE CONFIGURE ---

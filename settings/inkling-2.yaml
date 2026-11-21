@@ -1,0 +1,45 @@
+display_name: "Inkling 2 / Inkling 2 Mini (Thinking Machines)"
+patterns:
+  - inkling-2
+  - inkling_2
+  - inkling2
+arch_fallback:
+  - inkling2
+  - inkling2_loop
+arch_authoritative: true
+
+# inkling2 landed in b12406 (PR #32217, image token fix b12413 #32294, parser
+# b12455 #32381); looped Inkling 2 Mini (inkling2_loop) landed in b12600
+# (PR #32694, enforced per-architecture in tuner._ARCH_MIN_BUILD).
+min_llama_build: 12406
+max_context: 1048576
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+# Official GGUF / Unsloth defaults: temperature 1.0, top_p 1.0, top_k 0, min_p 0.0.
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+  coding:
+    temperature: 1.0
+    top_k: 0
+    top_p: 1.0
+    min_p: 0.0
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Thinking Machines Inkling 2 and Inkling 2 Mini: multimodal hybrid MoE
+  models with 1,048,576 context and DSpark speculative drafts. Inkling 2
+  (inkling2, text + inkling2v vision) needs llama.cpp b12406+ (b12455+ for the
+  Inkling chat parser); looped Inkling 2 Mini (inkling2_loop) needs b12600+
+  (PR #32694). Early pre-PR Inkling 2 Mini GGUFs written as inkling2 with
+  inkling2.num_loops do not load on mainline and are refused with a clear
+  message. Sampling follows the shipped GGUF defaults (temperature 1.0, top-p
+  1.0, top-k 0, min-p 0.0).

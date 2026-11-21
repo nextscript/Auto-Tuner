@@ -36,14 +36,14 @@ draft_p_min: 0.75
 ngram_method: ngram-mod
 
 notes: >
-  MiniMax-M3 is a native multimodal 428B-A23B MoE with MiniMax Sparse
-  Attention (MSA) and 1M context. Use llama.cpp b10142 or newer for the text,
-  MSA, vision, and specialized tool-call path. Vision additionally requires
-  an M3 mmproj. Use an MSA-aware GGUF conversion that retains every
-  blk.N.index_q_proj/index_k_proj tensor; older dense-fallback GGUFs are not
-  equivalent. Flash Attention is required for the intended sparse path;
-  unsupported no-FA/unified-KV multi-sequence modes can fall back to dense
-  attention and lose the 1M-context efficiency. Released weights do not
+  MiniMax-M3 / M3.1 is a native multimodal MoE with MiniMax Sparse Attention
+  (MSA) and 1M context. Use llama.cpp b10142+ for MiniMax-M3 text, MSA,
+  vision, and tool calling, and b12432+ (PR #32301) for MiniMax-M3.1. Vision
+  additionally requires an M3 mmproj. Use an MSA-aware GGUF conversion that
+  retains every blk.N.index_q_proj/index_k_proj tensor; older dense-fallback
+  GGUFs are not equivalent. Flash Attention is required for the intended sparse
+  path; unsupported no-FA/unified-KV multi-sequence modes can fall back to
+  dense attention and lose the 1M-context efficiency. Released weights do not
   contain the advertised MTP modules, so AutoTuner keeps conservative
   draftless speculation. Official sampling is temp 1.0 / top_p 0.95; other
   sampler fields are inherited from GGUF metadata.

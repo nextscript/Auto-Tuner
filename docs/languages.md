@@ -1,6 +1,6 @@
 # AutoTuner language packs
 
-AutoTuner v5.4.1 includes these validated interface packs:
+AutoTuner ships nine validated built-in interface packs:
 
 - English (UK), the fallback and default
 - Deutsch
@@ -10,51 +10,35 @@ AutoTuner v5.4.1 includes these validated interface packs:
 - Français
 - Ελληνικά
 - Polski
-- Русский (new in v5.4.1)
+- Русский
 
-Open the persistent **⋯** toolbar and use **Language** to change the interface
-immediately. Missing translations always fall back to English (UK), so an older
-custom pack remains usable when a later AutoTuner version adds controls.
+Open the **⋯** toolbar and use **Language** to switch live. Missing strings
+always fall back to English (UK), so older custom packs remain usable when new
+controls are added.
 
-## What is translated (v5.4.1)
+## What is translated
 
-Every built-in pack carries 427 strings:
+Every built-in pack covers:
 
-- toolbar, launch-options, server, and settings labels (the original 83);
-- the two-level hover help of every control: the **In short:** and
-  **Technical details:** section labels and both texts;
-- the Expert panel sections and labels, the performance-test dialog, the OCR
-  dialog, the performance analysis window, and the path-manager dialog;
-- message boxes (update, folder and launch errors, Expert copy/paste);
-- the model context menu, the **★ Favourites** tree section, and the
-  list/tree row tooltips (favourite state, vision, draft, thinking, tool use);
-- the performance-target descriptions shown in the Performance tooltip and in
-  the performance-test dialog;
-- the metric explanations of the performance analysis.
+- toolbar, launch-options, server, and settings labels;
+- two-level hover help (**In short:** / **Technical details:**) on all controls;
+- Expert panel sections/labels, performance-test, OCR, performance-report, and
+  path-manager dialogs;
+- message boxes, model context menu, **★ Favourites**, and model-row tooltips;
+- performance-target descriptions and metric explanations;
+- `profile_notes` explanations for every bundled `settings/*.yaml` profile.
 
-Hover help is stored as plain text. `localization.setting_tooltip_html()`
-builds the HTML that Qt shows; `LanguageManager.translate_tooltip()` takes it
-apart again, translates the section labels and both texts, and rebuilds it.
-Lines the application composes at runtime keep their dynamic part: a pack
-translates `Active build:` and `Resolved path:` once, and the tier bullet list
-`• balanced: …` is translated through the tier description. Texts that Qt
-widgets cannot retranslate live (item tooltips, dynamic labels, message boxes)
-go through `localization.translate()` when they are created, and switching the
-language rebuilds the model list.
+Hover help is stored as plain text; `localization.setting_tooltip_html()` builds
+the Qt HTML and `LanguageManager.translate_tooltip()` translates it live while
+preserving dynamic suffixes (`Active build:`, `Resolved path:`, etc.).
+`test_localization.py` verifies with `ast` that every GUI help constant and
+every shipped profile note is present and translated across all nine packs.
 
-`test_localization.py` extracts every help constant from `qt_launcher.py` with
-the `ast` module (`_setting_tooltip(...)` arguments, `_tr(...)` arguments, the
-model-row tooltip constants, the metric help, the fork tooltip constants, and
-the performance-target descriptions) and fails when any built-in pack lacks a
-key or leaves a long text untranslated. Adding a control with hover help
-therefore means adding its two texts to all nine packs.
+## Model profile explanations
 
-## Model profile explanations (v5.3.9)
-
-Every model profile under `settings/*.yaml` carries a `notes` explanation that
-the configuration preview shows for the selected model. Since v5.3.9 the YAML
-text is the English canonical version, and language packs may translate it
-through an optional `profile_notes` object keyed by the profile file name:
+Each `settings/*.yaml` file carries an English canonical `notes` field.
+Language packs translate it via an optional `profile_notes` object keyed by
+profile filename:
 
 ```json
 {
@@ -69,63 +53,27 @@ through an optional `profile_notes` object keyed by the profile file name:
 }
 ```
 
-- Switching the language re-renders the preview, so the explanation follows
-  the interface language immediately.
-- Lookup order: the active pack, then the English (UK) pack, then the YAML
-  `notes` text. A pack may translate any subset of profiles.
-- All nine bundled packs translate every shipped profile (76 in v5.4.1).
-  The YAML `notes` text is the English source; a custom pack may translate any
-  subset through `profile_notes`.
-- Keys must be profile file names (`name.yaml`, letters, digits, `.`, `_`, `-`);
-  values are non-empty strings up to 20,000 characters; at most 500 entries.
+- Lookup order: active pack → English (UK) pack → YAML `notes`.
+- Keys must be valid profile filenames (`name.yaml`); values are non-empty
+  strings up to 20,000 characters (max 500 entries).
 - The CLI/TUI prints the English YAML text.
 
 ## Custom packs
 
-Choose **Open language folder** once. AutoTuner opens
-`~/.autotuner/languages` and creates
-`custom-language-template.json` if it does not already exist. The template is a
-complete copy of the English catalogue, including the hover help and
-`profile_notes`, and is never overwritten after creation.
+Click **Open language folder** to open `~/.autotuner/languages` and create
+`custom-language-template.json` (a complete copy of the English catalogue,
+never overwritten once created).
 
-A pack is UTF-8 JSON:
+Rules for custom UTF-8 JSON packs (`schema_version: 1`, max 2 MiB, max 2,000
+strings):
 
-```json
-{
-  "schema_version": 1,
-  "id": "example",
-  "name": "Example language",
-  "locale": "xx-XX",
-  "strings": {
-    "⚙ Settings": "⚙ My translation",
-    "Language:": "My language label:",
-    "In short:": "Briefly:",
-    "Changes AutoTuner's interface language immediately.": "My hover text"
-  },
-  "profile_notes": {
-    "qwen3_8.yaml": "My explanation for Qwen3.8"
-  }
-}
-```
+- `id`: 1–64 chars, letters/digits/`.`/`_`/`-`, starting with a letter or digit.
+- `name`: native display name shown in the dropdown.
+- `locale`: intended locale tag.
+- `strings`: maps exact English (UK) source text to its translation (partial
+  packs fall back to English).
+- `profile_notes`: optional map of profile filename → translated note.
 
-Rules:
-
-- `id` must be 1–64 characters and contain only letters, digits, `.`, `_`, or
-  `-`; it must start with a letter or digit.
-- `name` is the native display name shown in the dropdown.
-- `locale` documents the intended locale.
-- `strings` maps the exact English (UK) source text to its translation. Entries
-  may be omitted; English is then used for those strings. Hover-help texts are
-  keyed by their plain English text, not by the generated HTML.
-- `profile_notes` is optional and follows the rules above.
-- A pack is limited to 2 MiB and 2,000 strings.
-
-Select **Custom language pack…**, choose the JSON file, and confirm replacement
-if that custom ID already exists. AutoTuner validates a staged copy before it
-atomically replaces anything in the language folder. Invalid JSON, schemas, IDs,
-string values, or profile notes are rejected without changing the active
-language.
-
-Built-in packs under `assets/languages` are read-only application resources.
-Custom packs under `~/.autotuner/languages` survive source updates and compiled
-binary swaps.
+Use **Custom language pack…** to import a file. AutoTuner validates a staged
+copy before replacing anything in `~/.autotuner/languages`. Custom packs survive
+both source updates and compiled binary swaps.

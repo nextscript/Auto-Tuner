@@ -6,13 +6,12 @@ AutoTuner ships **System**, **Dark**, **Dark Gray**, **Light**, **High Contrast*
 
 Use **⚙ Settings → Customize…** to edit the selected theme's colors and UI/monospace fonts. Built-ins stay read-only: their editor draft automatically appends `-user` to the ID and name and saves as a new user theme. Selecting an existing user theme lets you edit and overwrite it with the same ID; changing its ID creates a separate theme instead. **Open folder** opens the place for manually installed themes; click **Reload** after copying a file there.
 
-User themes are kept beside the source clone or executable:
+User themes live under AutoTuner's shared data folder:
 
-- clone: `<AutoTuner>/autotuner_themes/`
-- portable EXE/binary: `<folder containing AutoTuner.exe>/autotuner_themes/`
-- if that location is read-only, AutoTuner uses `~/autotuner_themes/`.
+- default: `~/.autotuner/themes/` (Windows: `%USERPROFILE%\.autotuner\themes\`)
+- portable override: `<AUTOTUNER_DATA_DIR>/themes/`
 
-They are not inside the packaged application resources, so source updates and binary swaps retain them.
+They are stored outside the packaged application resources, so source updates and binary swaps retain them.
 
 ## JSON format (schema v1)
 

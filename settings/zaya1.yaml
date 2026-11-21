@@ -1,0 +1,38 @@
+display_name: "Zaya1 8B (Zyphra)"
+patterns:
+  - zaya1
+  - zaya-1
+  - zaya_1
+arch_fallback:
+  - zaya1
+arch_authoritative: true
+
+# Architecture zaya1 landed in b12519 (PR #32071): Zyphra's hybrid MoE with
+# Compressed Convolutional Attention (CCA) and MLP routing.
+min_llama_build: 12519
+max_context: 131072
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+sampling:
+  chat:
+    temperature: 0.8
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+  coding:
+    temperature: 0.6
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.05
+    repeat_penalty: 1.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  Zyphra Zaya1 8B: hybrid MoE reasoning model using Compressed Convolutional
+  Attention (CCA) and an EDA depth-mixing router (zaya1 architecture). Needs
+  llama.cpp b12519+ (PR #32071). Uses throughput placement for MoE offload and
+  --jinja for chat/reasoning formatting.

@@ -109,6 +109,64 @@ function Get-Sha256FileHash {
     }
 }
 
+function Select-HipMsvcToolset {
+    param(
+        [Parameter(Mandatory = $true)][string]$VsPath,
+        [Parameter(Mandatory = $true)][string]$ClangXX
+    )
+
+    # The MSVC STL hard-fails on unsupported clang (STL1000 in yvals_core.h):
+    # VS 2026's newest toolsets (14.52+) require Clang 22, while ROCm 7.2
+    # ships Clang 21. Probe the installed toolsets newest-first with the
+    # actual ROCm clang and return the newest one its STL still accepts.
+    $msvcRoot = Join-Path $VsPath "VC\Tools\MSVC"
+    if (-not (Test-Path $msvcRoot -PathType Container)) {
+        throw "No MSVC toolset directories found under $msvcRoot"
+    }
+    $toolsets = @(
+        Get-ChildItem $msvcRoot -Directory |
+            Where-Object { $_.Name -match '^\d+(\.\d+)+$' } |
+            Sort-Object { [version]$_.Name } -Descending
+    )
+    if ($toolsets.Count -eq 0) {
+        throw "No versioned MSVC toolset directories found under $msvcRoot"
+    }
+
+    $probeFile = [IO.Path]::GetTempFileName()
+    $currentName = Split-Path ($env:VCToolsInstallDir.TrimEnd('\', '/')) -Leaf
+    $savedVcDir = $env:VCToolsInstallDir
+    $savedInclude = if ($null -ne $env:INCLUDE) { $env:INCLUDE } else { "" }
+    $oldTokenPattern = [regex]::Escape("MSVC\$currentName\")
+    try {
+        [IO.File]::WriteAllText($probeFile, "#include <array>`nint main(){return 0;}`n")
+        foreach ($toolset in $toolsets) {
+            $env:VCToolsInstallDir = $toolset.FullName
+            $env:INCLUDE = [regex]::Replace(
+                $savedInclude,
+                $oldTokenPattern,
+                "MSVC\$($toolset.Name)\",
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase
+            )
+            $previousErrorActionPreference = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                & $ClangXX -fsyntax-only -x c++ $probeFile 2>&1 | Out-Null
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
+            if ($exitCode -eq 0) {
+                return $toolset.FullName
+            }
+        }
+    } finally {
+        $env:VCToolsInstallDir = $savedVcDir
+        $env:INCLUDE = $savedInclude
+        Remove-Item $probeFile -Force -ErrorAction SilentlyContinue
+    }
+    throw "No installed MSVC toolset accepts this ROCm clang (MSVC STL error STL1000). Install an older C++ toolset (e.g. 14.50.x or 14.44.x) via the Visual Studio installer."
+}
+
 function Import-VisualStudioBuildEnvironment {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere -PathType Leaf)) {
@@ -300,6 +358,28 @@ function Initialize-LlamaBuildEnvironment {
     $env:ROCM_PATH = $RocmPath
     $env:HIP_PATH = "$RocmPath\"
     $env:PATH = "$bin;$env:PATH"
+    # VsDevCmd (18) defaults to the newest installed MSVC toolset and cannot
+    # be told to use another one, so swap the toolset paths in the imported
+    # environment when the default's STL rejects the ROCm clang (STL1000).
+    $hipToolset = (Select-HipMsvcToolset -VsPath $vs.Path -ClangXX $clangxx).TrimEnd('\', '/')
+    $currentToolsetDir = (Resolve-Path $env:VCToolsInstallDir).Path.TrimEnd('\', '/')
+    if (-not $hipToolset.Equals($currentToolsetDir, [StringComparison]::OrdinalIgnoreCase)) {
+        $tokenOld = [regex]::Escape("MSVC\$(Split-Path $currentToolsetDir -Leaf)\")
+        $tokenNew = "MSVC\$(Split-Path $hipToolset -Leaf)\"
+        foreach ($var in "VCToolsInstallDir", "INCLUDE", "LIB", "LIBPATH", "PATH") {
+            if (Test-Path "Env:$var") {
+                $replaced = [regex]::Replace(
+                    [string](Get-Item "Env:$var").Value,
+                    $tokenOld,
+                    $tokenNew,
+                    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+                )
+                Set-Item "Env:$var" $replaced
+            }
+        }
+        $env:VCToolsVersion = Split-Path $hipToolset -Leaf
+        Write-Host "==> MSVC toolset for ROCm clang: $env:VCToolsVersion (newest STL this clang accepts)"
+    }
     $ninja = Resolve-NinjaPath -VisualStudioPath $vs.Path
     $compatResourceDir = Get-HipCompatibilityResourceDir `
         -Clang $clang -RocmPath $RocmPath -Workspace $Workspace
@@ -500,6 +580,17 @@ function Invoke-LlamaUiBuild {
     if (-not $Enabled) {
         return "OFF"
     }
+    # Since b12451 (PR #32032), Llama Chat lives in ui/apps/chat alongside
+    # ui/lib/{ui,voice}, and scripts/ui-assets.cmake stages and builds it out
+    # of tree when LLAMA_BUILD_UI=ON and LLAMA_USE_PREBUILT_UI=OFF.
+    $cmakeUiSource = Join-Path $Repo "ui\apps\chat\package.json"
+    $cmakeUiScript = Join-Path $Repo "scripts\ui-assets.cmake"
+    if ((Test-Path $cmakeUiSource -PathType Leaf) -and (Test-Path $cmakeUiScript -PathType Leaf)) {
+        Assert-CommandAvailable "npm"
+        Write-Host "==> Letting CMake build Llama Chat from ui/apps/chat"
+        return "OFF"
+    }
+
     $uiSource = $null
     foreach ($relative in ("tools/ui", "tools/server/webui")) {
         $candidate = Join-Path $Repo $relative

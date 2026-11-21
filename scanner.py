@@ -975,6 +975,12 @@ _HYBRID_ARCHS = frozenset(
         "lfm2",  # LFM2 dense hybrid (short-conv + attention)
         "lfm2moe",  # LFM2.5-MoE hybrid (b9672 hybrid)
         "lfm3",  # LFM3 (b11938): short-conv + SWA/global attention
+        "zaya1",  # Zaya1 (b12519): compressed convolutional attention + MoE
+        "zonos3",  # Zonos3-mini (b12424): hybrid TTS backbone
+        "inkling2",  # Inkling 2 (b12406): short-conv + hybrid attention MoE
+        "inkling2_loop",  # Inkling 2 Mini (b12600): looped hybrid MoE
+        "raon1",  # KRAFTON Raon-1 Mini (fork): KDA + MLA hybrid MoE
+        "raon1nano",  # KRAFTON Raon-1 Nano (fork): KDA + MLA hybrid dense
         "metis16",  # Metis-1.6 (b12089): Mamba-2 + GQA, depth recurrence
         "clover_moe",  # Clover (b12060): Qwen3.6-MoE GDN hybrid
         "deepseek41",  # DeepSeek-V4.1 (b11870): like deepseek4, full-layer KV

@@ -1,0 +1,49 @@
+display_name: "Raon-1 Mini / Nano (KRAFTON)"
+patterns:
+  - raon-1
+  - raon_1
+  - raon1
+arch_fallback:
+  - raon1
+  - raon1nano
+arch_authoritative: true
+
+# Mainline llama.cpp (as of b12608) has no raon1 / raon1nano loader and stops
+# with "unknown model architecture". Gate on the runtime marker so KRAFTON's
+# fork (krafton-ai/llama.cpp) or a future mainline merge passes automatically.
+required_runtime_markers:
+  - raon1
+max_context: 262144
+recommended_kv_quant: q8_0
+performance_target: throughput
+
+# KRAFTON model card: general chat uses low temperature + presence penalty 1.5
+# to curb repetition in thinking chains; agentic/coding uses temp 1.0, top_k 20,
+# top_p 0.95, presence penalty 0.0 (matching the shipped GGUF sampling keys).
+sampling:
+  chat:
+    temperature: 0.1
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 1.5
+  coding:
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+extra_args:
+  - --jinja
+
+notes: >
+  KRAFTON Raon-1 Mini (raon1 hybrid KDA/MLA MoE, optional DFlash drafter) and
+  Raon-1 Nano (raon1nano hybrid KDA/MLA dense with PLE and embedded MTP),
+  262,144 context. Mainline llama.cpp (b12608) has no raon1/raon1nano loader
+  yet; AutoTuner checks for the raon1 runtime marker so KRAFTON's llama.cpp
+  fork (krafton-ai/llama.cpp) or a future mainline merge runs cleanly.
+  Sampling follows KRAFTON's card (chat: temp 0.1, presence penalty 1.5;
+  coding/agentic: temp 1.0, top-k 20, top-p 0.95, presence penalty 0.0).

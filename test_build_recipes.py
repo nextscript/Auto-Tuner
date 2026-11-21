@@ -229,3 +229,65 @@ def test_stable_recipe_accepts_prefixed_and_unprefixed_exact_tags() -> None:
     assert '$alternateTag = if ($Tag.StartsWith("v"))' in common
     assert "git clone --branch $remoteTag --single-branch" in common
     assert "Checkout is not the requested exact stable tag $remoteTag" in common
+
+
+def test_all_windows_powershell_recipes_parse_cleanly() -> None:
+    recipes_dir = ROOT / "building llama.cpp"
+    ps1_files = sorted(recipes_dir.glob("*.ps1"))
+    assert len(ps1_files) >= 15
+    result = _run_pwsh(
+        """
+        $dir = Split-Path -Parent $env:AUTOTUNER_TEST_COMMON_RECIPE
+        $files = Get-ChildItem -LiteralPath $dir -Filter "*.ps1" | Sort-Object Name
+        foreach ($f in $files) {
+            $null = [scriptblock]::Create((Get-Content -LiteralPath $f.FullName -Raw))
+        }
+        "Parsed $($files.Count) scripts OK"
+        """
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"Parsed {len(ps1_files)} scripts OK" in result.stdout
+
+
+def test_ui_build_detects_b12451_llama_chat_cmake_layout(tmp_path: Path) -> None:
+    (tmp_path / "ui" / "apps" / "chat").mkdir(parents=True)
+    (tmp_path / "ui" / "apps" / "chat" / "package.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (tmp_path / "scripts").mkdir(parents=True)
+    (tmp_path / "scripts" / "ui-assets.cmake").write_text("# cmake", encoding="utf-8")
+    result = _run_pwsh(
+        """
+        . $env:AUTOTUNER_TEST_COMMON_RECIPE
+        function global:Assert-CommandAvailable { param([string]$Name) }
+        $out = Invoke-LlamaUiBuild -Repo $env:AUTOTUNER_TEST_WORKSPACE -Enabled $true
+        "RESULT=$out"
+        """,
+        env={"AUTOTUNER_TEST_WORKSPACE": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RESULT=OFF" in result.stdout
+    assert "Letting CMake build Llama Chat" in result.stdout
+
+
+def test_select_hip_msvc_toolset_probes_newest_first(tmp_path: Path) -> None:
+    msvc_root = tmp_path / "VC" / "Tools" / "MSVC"
+    for ver in ("14.44.35207", "14.50.35717", "14.53.36930"):
+        (msvc_root / ver / "include").mkdir(parents=True)
+    result = _run_pwsh(
+        """
+        . $env:AUTOTUNER_TEST_COMMON_RECIPE
+        $vs = $env:AUTOTUNER_TEST_WORKSPACE
+        $env:VCToolsInstallDir = "$vs\\VC\\Tools\\MSVC\\14.53.36930\\"
+        $env:INCLUDE = "$vs\\VC\\Tools\\MSVC\\14.53.36930\\include;C:\\sdk"
+        $mock = Join-Path $vs "mock_clangxx.cmd"
+        Set-Content -LiteralPath $mock -Value "@echo off`r`necho %INCLUDE% | findstr /i 14.50.35717 >nul`r`nexit /b %ERRORLEVEL%" -Encoding ascii
+        $picked = Select-HipMsvcToolset -VsPath $vs -ClangXX $mock
+        "PICKED=$picked"
+        "RESTORED_VC=$env:VCToolsInstallDir"
+        """,
+        env={"AUTOTUNER_TEST_WORKSPACE": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "14.50.35717" in result.stdout
+    assert "14.53.36930\\" in result.stdout
