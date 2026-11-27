@@ -1,21 +1,30 @@
-display_name: "Raon-1 Mini / Nano (KRAFTON)"
+display_name: "Raon-1 Mini (KRAFTON)"
 patterns:
   - raon-1
   - raon_1
   - raon1
 arch_fallback:
   - raon1
-  - raon1nano
 arch_authoritative: true
 
-# Mainline llama.cpp (as of b12608) has no raon1 / raon1nano loader and stops
-# with "unknown model architecture". Gate on the runtime marker so KRAFTON's
-# fork (krafton-ai/llama.cpp) or a future mainline merge passes automatically.
+# Mainline llama.cpp loads raon1 (Raon-1-mini-preview) since b12758 (PR #32176).
+# Keep the runtime-marker check rather than a bare build floor so both mainline
+# b12758+ and earlier krafton-ai/llama.cpp fork builds pass, while pre-b12758
+# mainline builds are refused pre-launch. Raon-1 Nano (raon1nano, PR #32200)
+# is split into raon-1-nano.yaml so it stays gated on its own marker.
 required_runtime_markers:
   - raon1
 max_context: 262144
 recommended_kv_quant: q8_0
 performance_target: throughput
+
+# The sibling dflash-raon-1-mini-preview drafter uses 4-stream mHC target
+# features (dflash.target_hidden_size=10240 vs embedding_length=2560), which
+# mainline llama.cpp (through b12811) does not support yet (fc.weight shape
+# mismatch). Keep auto_draft off so Raon-1 Mini starts cleanly on mainline;
+# check_draft_model_build also guards manual selection on binaries lacking
+# target_hidden_size support.
+auto_draft: false
 
 # KRAFTON model card: general chat uses low temperature + presence penalty 1.5
 # to curb repetition in thinking chains; agentic/coding uses temp 1.0, top_k 20,
@@ -40,10 +49,13 @@ extra_args:
   - --jinja
 
 notes: >
-  KRAFTON Raon-1 Mini (raon1 hybrid KDA/MLA MoE, optional DFlash drafter) and
-  Raon-1 Nano (raon1nano hybrid KDA/MLA dense with PLE and embedded MTP),
-  262,144 context. Mainline llama.cpp (b12608) has no raon1/raon1nano loader
-  yet; AutoTuner checks for the raon1 runtime marker so KRAFTON's llama.cpp
-  fork (krafton-ai/llama.cpp) or a future mainline merge runs cleanly.
-  Sampling follows KRAFTON's card (chat: temp 0.1, presence penalty 1.5;
-  coding/agentic: temp 1.0, top-k 20, top-p 0.95, presence penalty 0.0).
+  KRAFTON Raon-1 Mini (raon1 hybrid RDA/KDA + gated MLA MoE, 128 experts / 6
+  active + 1 shared, 262,144 context). Mainline llama.cpp loads raon1 since
+  b12758 (PR #32176); the raon1 runtime-marker check also accepts
+  krafton-ai/llama.cpp fork builds while refusing pre-b12758 mainline. The
+  companion DFlash drafter (dflash.target_hidden_size=10240 for 4 mHC streams)
+  is not yet supported on mainline b12811 (fc.weight shape mismatch), so
+  auto_draft stays off and manual selection requires a runtime with
+  target_hidden_size support. Sampling follows KRAFTON's card (chat: temp 0.1,
+  presence penalty 1.5; coding/agentic: temp 1.0, top-k 20, top-p 0.95,
+  presence penalty 0.0).

@@ -7815,53 +7815,294 @@
 
 ---
 
+## Ternary-Bonsai-2.5-27B-mmproj-BF16.gguf
+**Pfad:** `prism-ml\Ternary-Bonsai-2.5-27B-mmproj-BF16.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[334]` |
+| `GGUF.kv_count` | `[26]` |
+| `general.architecture` | `[ 99 108 105 112]` |
+| `general.type` | `[109 109 112 114 111 106]` |
+| `general.sampling.top_k` | `[20]` |
+| `general.sampling.top_p` | `[0.95]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 72 102]` |
+| `general.size_label` | `[52 54 49 77]` |
+| `general.license` | `[ 97 112  97  99 104 101  45  50  46  48]` |
+| `general.tags` | `[105 109  97 103 101  45 116 101 120 116  45 116 111  45 116 101 120 116]` |
+| `general.file_type` | `[32]` |
+| `clip.has_vision_encoder` | `[ True]` |
+| `clip.vision.projection_dim` | `[5120]` |
+| `clip.vision.image_size` | `[768]` |
+| `clip.vision.patch_size` | `[16]` |
+| `clip.vision.embedding_length` | `[1152]` |
+| `clip.vision.feed_forward_length` | `[4304]` |
+| `clip.vision.block_count` | `[27]` |
+| `clip.vision.attention.head_count` | `[16]` |
+| `clip.vision.image_mean` | `[0.5]` |
+| `clip.vision.image_std` | `[0.5]` |
+| `clip.projector_type` | `[113 119 101 110  51 118 108  95 109 101 114 103 101 114]` |
+| `clip.use_gelu` | `[ True]` |
+| `clip.vision.spatial_merge_size` | `[2]` |
+| `clip.vision.attention.layer_norm_epsilon` | `[1.e-06]` |
+| `clip.vision.is_deepstack_layers` | `[False]` |
+| `general.quantization_version` | `[2]` |
+
+---
+
+## Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf
+**Pfad:** `prism-ml\Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| Fehler | Konnte Metadaten nicht lesen: np.uint32(42) is not a valid GGMLQuantizationType |
+
+---
+
+## mmproj-SenseNova-Loop-9B-F16.gguf
+**Pfad:** `sensenova\mmproj-SenseNova-Loop-9B-F16.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[334]` |
+| `GGUF.kv_count` | `[30]` |
+| `general.architecture` | `[ 99 108 105 112]` |
+| `general.type` | `[109 109 112 114 111 106]` |
+| `general.sampling.top_p` | `[0.95]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 83 101 110 115 101  78 111 118  97  32  76 111 111 112  32  57  66]` |
+| `general.finetune` | `[57 98]` |
+| `general.basename` | `[ 83 101 110 115 101  78 111 118  97  45  76 111 111 112]` |
+| `general.size_label` | `[52 53 54 77]` |
+| `general.license` | `[ 97 112  97  99 104 101  45  50  46  48]` |
+| `general.tags` | `[105 109  97 103 101  45 116 101 120 116  45 116 111  45 116 101 120 116]` |
+| `general.languages` | `[122 104]` |
+| `general.file_type` | `[1]` |
+| `clip.has_vision_encoder` | `[ True]` |
+| `clip.vision.projection_dim` | `[4096]` |
+| `clip.vision.image_size` | `[768]` |
+| `clip.vision.patch_size` | `[16]` |
+| `clip.vision.embedding_length` | `[1152]` |
+| `clip.vision.feed_forward_length` | `[4304]` |
+| `clip.vision.block_count` | `[27]` |
+| `clip.vision.attention.head_count` | `[16]` |
+| `clip.vision.image_mean` | `[0.5]` |
+| `clip.vision.image_std` | `[0.5]` |
+| `clip.projector_type` | `[113 119 101 110  51 118 108  95 109 101 114 103 101 114]` |
+| `clip.use_gelu` | `[ True]` |
+| `clip.vision.spatial_merge_size` | `[2]` |
+| `clip.vision.attention.layer_norm_epsilon` | `[1.e-06]` |
+| `clip.vision.is_deepstack_layers` | `[False]` |
+| `clip.vision.image_min_pixels` | `[65536]` |
+| `clip.vision.image_max_pixels` | `[16777216]` |
+| `general.quantization_version` | `[2]` |
+
+---
+
+## SenseNova-Loop-9B-BF16.gguf
+**Pfad:** `sensenova\SenseNova-Loop-9B-BF16.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[490]` |
+| `GGUF.kv_count` | `[56]` |
+| `general.architecture` | `[115 101 110 115 101 110 111 118  97  95 108 111 111 112]` |
+| `general.type` | `[109 111 100 101 108]` |
+| `general.sampling.top_p` | `[0.95]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 83 101 110 115 101  78 111 118  97  32  76 111 111 112  32  57  66]` |
+| `general.basename` | `[ 83 101 110 115 101  78 111 118  97  45  76 111 111 112]` |
+| `general.size_label` | `[57 66]` |
+| `general.license` | `[ 97 112  97  99 104 101  45  50  46  48]` |
+| `general.tags` | `[105 109  97 103 101  45 116 101 120 116  45 116 111  45 116 101 120 116]` |
+| `general.languages` | `[122 104]` |
+| `sensenova_loop.block_count` | `[57]` |
+| `sensenova_loop.context_length` | `[524288]` |
+| `sensenova_loop.embedding_length` | `[4096]` |
+| `sensenova_loop.feed_forward_length` | `[12288]` |
+| `sensenova_loop.attention.head_count` | `[16]` |
+| `sensenova_loop.attention.head_count_kv` | `[4]` |
+| `sensenova_loop.rope.scaling.type` | `[121  97 114 110]` |
+| `sensenova_loop.rope.scaling.factor` | `[2.]` |
+| `sensenova_loop.rope.scaling.original_context_length` | `[262144]` |
+| `sensenova_loop.rope.dimension_sections` | `[0]` |
+| `sensenova_loop.rope.freq_base` | `[1.e+07]` |
+| `sensenova_loop.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `sensenova_loop.attention.key_length` | `[256]` |
+| `sensenova_loop.attention.value_length` | `[256]` |
+| `general.file_type` | `[32]` |
+| `sensenova_loop.nextn_predict_layers` | `[1]` |
+| `sensenova_loop.ssm.conv_kernel` | `[4]` |
+| `sensenova_loop.ssm.state_size` | `[128]` |
+| `sensenova_loop.ssm.group_count` | `[16]` |
+| `sensenova_loop.ssm.time_step_rank` | `[32]` |
+| `sensenova_loop.ssm.inner_size` | `[4096]` |
+| `sensenova_loop.attention.recurrent_layers` | `[False]` |
+| `sensenova_loop.full_attention_interval` | `[4]` |
+| `sensenova_loop.rope.dimension_count` | `[64]` |
+| `sensenova_loop.loop.start` | `[4]` |
+| `sensenova_loop.loop.end` | `[28]` |
+| `sensenova_loop.loop.count` | `[2]` |
+| `sensenova_loop.mhc.start` | `[4]` |
+| `sensenova_loop.mhc.end` | `[28]` |
+| `sensenova_loop.mhc.streams` | `[2]` |
+| `sensenova_loop.mhc.iterations` | `[20]` |
+| `sensenova_loop.mhc.fixed_identity` | `[False]` |
+| `sensenova_loop.mhc.pre_scale` | `[1.]` |
+| `general.quantization_version` | `[2]` |
+| `tokenizer.ggml.model` | `[103 112 116  50]` |
+| `tokenizer.ggml.pre` | `[113 119 101 110  51  53]` |
+| `tokenizer.ggml.tokens` | `[91 80 65 68 50 52 56 51 49 57 93]` |
+| `tokenizer.ggml.token_type` | `[5]` |
+| `tokenizer.ggml.merges` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.eos_token_id` | `[248046]` |
+| `tokenizer.ggml.padding_token_id` | `[248044]` |
+| `tokenizer.ggml.add_bos_token` | `[False]` |
+| `tokenizer.ggml.add_eos_token` | `[False]` |
+| `tokenizer.chat_template` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.normalizer.nfc` | `[ True]` |
+| `tokenizer.ggml.clean_spaces` | `[False]` |
+
+**tokenizer.ggml.merges:**
+```jinja
+[195 163 196 163 196 164 195 163 196 164 196 172 195 163 196 163 194 190
+ 195 163 196 163 196 187  32 195 163 196 163 196 173]
+```
+
+**tokenizer.chat_template:**
+```jinja
+[123  37  45 ...  32  37 125]
+```
+
+---
+
+## SenseNova-Loop-9B-Q8_0.gguf
+**Pfad:** `sensenova\SenseNova-Loop-9B-Q8_0.gguf`
+
+| Metadaten-Schlüssel | Wert |
+|---|---|
+| `GGUF.version` | `[3]` |
+| `GGUF.tensor_count` | `[490]` |
+| `GGUF.kv_count` | `[56]` |
+| `general.architecture` | `[115 101 110 115 101 110 111 118  97  95 108 111 111 112]` |
+| `general.type` | `[109 111 100 101 108]` |
+| `general.sampling.top_p` | `[0.95]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 83 101 110 115 101  78 111 118  97  32  76 111 111 112  32  57  66]` |
+| `general.basename` | `[ 83 101 110 115 101  78 111 118  97  45  76 111 111 112]` |
+| `general.size_label` | `[57 66]` |
+| `general.license` | `[ 97 112  97  99 104 101  45  50  46  48]` |
+| `general.tags` | `[105 109  97 103 101  45 116 101 120 116  45 116 111  45 116 101 120 116]` |
+| `general.languages` | `[122 104]` |
+| `sensenova_loop.block_count` | `[57]` |
+| `sensenova_loop.context_length` | `[524288]` |
+| `sensenova_loop.embedding_length` | `[4096]` |
+| `sensenova_loop.feed_forward_length` | `[12288]` |
+| `sensenova_loop.attention.head_count` | `[16]` |
+| `sensenova_loop.attention.head_count_kv` | `[4]` |
+| `sensenova_loop.rope.scaling.type` | `[121  97 114 110]` |
+| `sensenova_loop.rope.scaling.factor` | `[2.]` |
+| `sensenova_loop.rope.scaling.original_context_length` | `[262144]` |
+| `sensenova_loop.rope.dimension_sections` | `[0]` |
+| `sensenova_loop.rope.freq_base` | `[1.e+07]` |
+| `sensenova_loop.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `sensenova_loop.attention.key_length` | `[256]` |
+| `sensenova_loop.attention.value_length` | `[256]` |
+| `sensenova_loop.nextn_predict_layers` | `[1]` |
+| `sensenova_loop.ssm.conv_kernel` | `[4]` |
+| `sensenova_loop.ssm.state_size` | `[128]` |
+| `sensenova_loop.ssm.group_count` | `[16]` |
+| `sensenova_loop.ssm.time_step_rank` | `[32]` |
+| `sensenova_loop.ssm.inner_size` | `[4096]` |
+| `sensenova_loop.attention.recurrent_layers` | `[False]` |
+| `sensenova_loop.full_attention_interval` | `[4]` |
+| `sensenova_loop.rope.dimension_count` | `[64]` |
+| `sensenova_loop.loop.start` | `[4]` |
+| `sensenova_loop.loop.end` | `[28]` |
+| `sensenova_loop.loop.count` | `[2]` |
+| `sensenova_loop.mhc.start` | `[4]` |
+| `sensenova_loop.mhc.end` | `[28]` |
+| `sensenova_loop.mhc.streams` | `[2]` |
+| `sensenova_loop.mhc.iterations` | `[20]` |
+| `sensenova_loop.mhc.fixed_identity` | `[False]` |
+| `sensenova_loop.mhc.pre_scale` | `[1.]` |
+| `tokenizer.ggml.model` | `[103 112 116  50]` |
+| `tokenizer.ggml.pre` | `[113 119 101 110  51  53]` |
+| `tokenizer.ggml.tokens` | `[91 80 65 68 50 52 56 51 49 57 93]` |
+| `tokenizer.ggml.token_type` | `[5]` |
+| `tokenizer.ggml.merges` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.eos_token_id` | `[248046]` |
+| `tokenizer.ggml.padding_token_id` | `[248044]` |
+| `tokenizer.ggml.add_bos_token` | `[False]` |
+| `tokenizer.ggml.add_eos_token` | `[False]` |
+| `tokenizer.chat_template` | *Siehe Code-Block unten* |
+| `tokenizer.ggml.normalizer.nfc` | `[ True]` |
+| `tokenizer.ggml.clean_spaces` | `[False]` |
+| `general.quantization_version` | `[2]` |
+| `general.file_type` | `[7]` |
+
+**tokenizer.ggml.merges:**
+```jinja
+[195 163 196 163 196 164 195 163 196 164 196 172 195 163 196 163 194 190
+ 195 163 196 163 196 187  32 195 163 196 163 196 173]
+```
+
+**tokenizer.chat_template:**
+```jinja
+[123  37  45 ...  32  37 125]
+```
+
+---
+
 ## dspark-Inkling-2-Mini-Q8_0.gguf
 **Pfad:** `thinkingmachines\dspark-Inkling-2-Mini-Q8_0.gguf`
 
 | Metadaten-Schlüssel | Wert |
 |---|---|
 | `GGUF.version` | `[3]` |
-| `GGUF.tensor_count` | `[54]` |
-| `GGUF.kv_count` | `[41]` |
+| `GGUF.tensor_count` | `[58]` |
+| `GGUF.kv_count` | `[39]` |
 | `general.architecture` | `[100 102 108  97 115 104]` |
 | `general.type` | `[109 111 100 101 108]` |
-| `general.name` | `[ 73 110 107 108 105 110 103  45  50  45  77 105 110 105]` |
-| `general.size_label` | `[51 49 56 77]` |
+| `general.sampling.temp` | `[1.]` |
+| `general.name` | `[ 83 114  99  95  66  51  53  55  52  48]` |
+| `general.size_label` | `[51 54 56 77]` |
 | `dflash.block_count` | `[3]` |
 | `dflash.context_length` | `[1048576]` |
 | `dflash.embedding_length` | `[2304]` |
 | `dflash.feed_forward_length` | `[9216]` |
 | `dflash.attention.head_count` | `[24]` |
 | `dflash.attention.head_count_kv` | `[8]` |
-| `dflash.rope.freq_base` | `[1.e+06]` |
-| `dflash.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
 | `dflash.attention.key_length` | `[128]` |
 | `dflash.attention.value_length` | `[128]` |
-| `dflash.vocab_size` | `[201024]` |
-| `dflash.vocab_size_unpadded` | `[200058]` |
+| `dflash.rope.dimension_count` | `[128]` |
+| `dflash.rope.freq_base` | `[1.e+06]` |
+| `dflash.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `dflash.attention.sliding_window` | `[1025]` |
+| `dflash.attention.sliding_window_pattern` | `[ True]` |
+| `dflash.final_logit_softcapping` | `[30.]` |
 | `dflash.block_size` | `[8]` |
 | `dflash.target_layers` | `[48]` |
-| `dflash.dspark.markov_rank` | `[256]` |
 | `dflash.sample_from_anchor` | `[False]` |
 | `dflash.has_confidence_head` | `[False]` |
-| `dflash.attention.causal` | `[False]` |
-| `dflash.attention.sliding_window` | `[1024]` |
-| `dflash.attention.sliding_window_pattern` | `[ True]` |
-| `dflash.rope.dimension_count` | `[128]` |
-| `dflash.final_logit_softcapping` | `[30.]` |
+| `dflash.has_markov_context` | `[ True]` |
 | `tokenizer.ggml.model` | `[103 112 116  50]` |
 | `tokenizer.ggml.pre` | `[105 110 107 108 105 110 103  50]` |
 | `tokenizer.ggml.tokens` | *Siehe Code-Block unten* |
 | `tokenizer.ggml.token_type` | `[3]` |
 | `tokenizer.ggml.merges` | `[196 160  83  67  72  32  79]` |
 | `tokenizer.ggml.eos_token_id` | `[200006]` |
+| `tokenizer.ggml.padding_token_id` | `[199999]` |
 | `tokenizer.ggml.eot_token_id` | `[200006]` |
 | `tokenizer.ggml.add_bos_token` | `[False]` |
 | `tokenizer.ggml.add_eos_token` | `[False]` |
 | `tokenizer.chat_template` | *Siehe Code-Block unten* |
 | `tokenizer.ggml.clean_spaces` | `[False]` |
 | `tokenizer.ggml.mask_token_id` | `[0]` |
-| `general.basename` | `[ 73 110 107 108 105 110 103  45  50  45  77 105 110 105]` |
 | `general.quantization_version` | `[2]` |
 | `general.file_type` | `[7]` |
 
@@ -7884,48 +8125,48 @@
 | Metadaten-Schlüssel | Wert |
 |---|---|
 | `GGUF.version` | `[3]` |
-| `GGUF.tensor_count` | `[734]` |
-| `GGUF.kv_count` | `[58]` |
-| `general.architecture` | `[105 110 107 108 105 110 103  50]` |
+| `GGUF.tensor_count` | `[744]` |
+| `GGUF.kv_count` | `[59]` |
+| `general.architecture` | `[105 110 107 108 105 110 103  50  95 108 111 111 112]` |
 | `general.type` | `[109 111 100 101 108]` |
 | `general.name` | `[ 73 110 107 108 105 110 103  45  50  45  77 105 110 105]` |
 | `general.size_label` | `[ 49  50  56 120  49  46  56  66]` |
-| `inkling2.block_count` | `[48]` |
-| `inkling2.context_length` | `[1048576]` |
-| `inkling2.embedding_length` | `[2304]` |
-| `inkling2.feed_forward_length` | `[1152]` |
-| `inkling2.attention.head_count` | `[24]` |
-| `inkling2.attention.head_count_kv` | `[8]` |
-| `inkling2.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
-| `inkling2.expert_count` | `[128]` |
-| `inkling2.expert_used_count` | `[8]` |
-| `inkling2.attention.key_length` | `[128]` |
-| `inkling2.attention.value_length` | `[128]` |
+| `inkling2_loop.block_count` | `[24]` |
+| `inkling2_loop.context_length` | `[1048576]` |
+| `inkling2_loop.embedding_length` | `[2304]` |
+| `inkling2_loop.feed_forward_length` | `[1152]` |
+| `inkling2_loop.attention.head_count` | `[24]` |
+| `inkling2_loop.attention.head_count_kv` | `[8]` |
+| `inkling2_loop.attention.layer_norm_rms_epsilon` | `[1.e-06]` |
+| `inkling2_loop.expert_count` | `[128]` |
+| `inkling2_loop.expert_used_count` | `[8]` |
+| `inkling2_loop.attention.key_length` | `[128]` |
+| `inkling2_loop.attention.value_length` | `[128]` |
 | `general.file_type` | `[32]` |
-| `inkling2.num_loops` | `[3]` |
-| `inkling2.loop.core_start` | `[6]` |
-| `inkling2.loop.core_end` | `[18]` |
-| `inkling2.loop.gate_rank` | `[64]` |
-| `inkling2.vocab_size` | `[201024]` |
-| `inkling2.vocab_size_unpadded` | `[200058]` |
-| `inkling2.expert_feed_forward_length` | `[1152]` |
-| `inkling2.attention.key_length_swa` | `[128]` |
-| `inkling2.attention.value_length_swa` | `[128]` |
-| `inkling2.rope.dimension_count` | `[0]` |
-| `inkling2.attention.sliding_window` | `[1024]` |
-| `inkling2.attention.sliding_window_pattern` | `[False]` |
-| `inkling2.shortconv.l_cache` | `[4]` |
-| `inkling2.expert_weights_scale` | `[8.]` |
-| `inkling2.activation.situ_beta` | `[4.]` |
-| `inkling2.activation.situ_linear_beta` | `[25.]` |
-| `inkling2.attn_res.block_size` | `[6]` |
-| `inkling2.final_logit_softcapping` | `[30.]` |
-| `inkling2.attention.relative_length` | `[16]` |
-| `inkling2.attention.relative_extent` | `[1024]` |
-| `inkling2.attention.qk_clip` | `[22.627417]` |
-| `inkling2.attention.relative_clip` | `[8.]` |
-| `inkling2.attention.log_scale_floor` | `[8192]` |
-| `inkling2.attention.log_scale_alpha` | `[0.1]` |
+| `inkling2_loop.loop.count` | `[3]` |
+| `inkling2_loop.loop.start` | `[6]` |
+| `inkling2_loop.loop.end` | `[18]` |
+| `inkling2_loop.loop.gate_rank` | `[64]` |
+| `inkling2_loop.vocab_size` | `[201024]` |
+| `inkling2_loop.vocab_size_unpadded` | `[200058]` |
+| `inkling2_loop.expert_feed_forward_length` | `[1152]` |
+| `inkling2_loop.attention.key_length_swa` | `[128]` |
+| `inkling2_loop.attention.value_length_swa` | `[128]` |
+| `inkling2_loop.rope.dimension_count` | `[0]` |
+| `inkling2_loop.attention.sliding_window` | `[1024]` |
+| `inkling2_loop.attention.sliding_window_pattern` | `[False]` |
+| `inkling2_loop.shortconv.l_cache` | `[4]` |
+| `inkling2_loop.expert_weights_scale` | `[8.]` |
+| `inkling2_loop.activation.situ_beta` | `[4.]` |
+| `inkling2_loop.activation.situ_linear_beta` | `[25.]` |
+| `inkling2_loop.attn_res.block_size` | `[6]` |
+| `inkling2_loop.final_logit_softcapping` | `[30.]` |
+| `inkling2_loop.attention.relative_length` | `[16]` |
+| `inkling2_loop.attention.relative_extent` | `[1024]` |
+| `inkling2_loop.attention.qk_clip` | `[22.627417]` |
+| `inkling2_loop.attention.relative_clip` | `[8.]` |
+| `inkling2_loop.attention.log_scale_floor` | `[8192]` |
+| `inkling2_loop.attention.log_scale_alpha` | `[0.1]` |
 | `general.quantization_version` | `[2]` |
 | `tokenizer.ggml.model` | `[103 112 116  50]` |
 | `tokenizer.ggml.pre` | `[105 110 107 108 105 110 103  50]` |
@@ -7944,6 +8185,7 @@
 | `general.sampling.top_p` | `[1.]` |
 | `general.sampling.min_p` | `[0.]` |
 | `general.basename` | `[ 73 110 107 108 105 110 103  45  50  45  77 105 110 105]` |
+| `inkling2_loop.loop.varying` | `[False]` |
 
 **tokenizer.ggml.tokens:**
 ```jinja

@@ -843,7 +843,7 @@ def _nemotron_latent_mtp_block_reason(
 #: tensors it does not carry.
 _MIN_QWEN4EXP_MTP_BUILD = 11330
 
-#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371 through b12608
+#: ``draft-mtp`` itself still cannot be used with qwen4exp: b11371 through b12811
 #: (HIP and Vulkan, one and two GPUs) loads the model and its NextN block, reserves the
 #: MTP graph and then aborts in ``ggml-backend.cpp`` with
 #: ``GGML_ASSERT(buffer)`` while the draft context is initialised. This holds
@@ -852,7 +852,7 @@ _MIN_QWEN4EXP_MTP_BUILD = 11330
 #: ``--no-spec-draft-backend-sampling`` do not avoid it. The embedded GGUF
 #: runs normally without speculation.
 #: Lift this only after a real request with accepted drafts on a newer build.
-_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 12608
+_QWEN4EXP_MTP_HEAD_VERIFIED_BUILD = 12811
 
 
 def qwen4exp_mtp_draft_unusable(model: ModelEntry) -> bool:
@@ -1237,11 +1237,14 @@ _MMPROJ_PROJECTOR_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "tiny_voca": (12497, "PR #32427"),
     "voxcpm2_gen": (12531, "PR #32443"),
     "voxcpm2_spkenc": (12531, "PR #32443"),
+    "moshi": (12619, "PR #32491"),
+    "moshi_gen": (12619, "PR #32491"),
+    "hy_v4_flash": (12755, "PR #32960"),
 }
 #: Architectures added to mainline after b11669. An older build stops with
 #: "unknown model architecture"; this names the first build that loads them.
-#: kolibri1 (b11709, PR #30673) stays on its runtime-marker check because the
-#: hob-llama.cpp fork that served it first reports b11434.
+#: kolibri1 (b11709, PR #30673) and raon1 (b12758, PR #32176) stay on their
+#: runtime-marker checks because earlier fork builds report lower build numbers.
 _ARCH_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "muse-spark": (11671, "PR #30616"),
     "beam": (11701, "PR #30670"),
@@ -1263,6 +1266,8 @@ _ARCH_MIN_BUILD: Dict[str, Tuple[int, str]] = {
     "zaya1": (12519, "PR #32071"),
     "domynedge": (12568, "PR #32559"),
     "inkling2_loop": (12600, "PR #32694"),
+    "moshi": (12619, "PR #32491"),
+    "hy_v4_flash": (12755, "PR #32960"),
 }
 #: ``tokenizer.ggml.model`` values a build must know before it can load the
 #: vocabulary at all (b11455 / PR #30045 added the PLaMo-3 pre-segmentation).
@@ -1370,6 +1375,20 @@ _DRAFT_CONTEXT_UBATCH = 64
 #: NVIDIA LiLiCorr drafters: added in b11641 (PR #30506), lattice walk and
 #: n_tokens condition fixed in b11668 (PR #30520).
 _MIN_LILICORR_BUILD = 11668
+#: Inkling 2 / Inkling 2 Mini DSpark drafters with ``dflash.has_markov_context``:
+#: added in b12720 (PR #32218).
+_MIN_INKLING2_DSPARK_BUILD = 12720
+#: Inkling 2 Mini DFlash2 drafters with ``dflash.selector_softcap_after_correction``:
+#: added in b12785 (PR #33073).
+_MIN_INKLING2_DFLASH2_BUILD = 12785
+#: Multi-stream DFlash drafters (e.g. KRAFTON Raon-1 Mini, 4 mHC streams ->
+#: ``dflash.target_hidden_size = 10240`` vs ``dflash.embedding_length = 2560``)
+#: widen ``fc.weight`` to ``n_target_layers * target_hidden_size``. Mainline
+#: ``src/models/dflash.cpp`` (reproduced through b12811 HIP and Vulkan) does
+#: not read ``target_hidden_size`` and aborts in ``check_tensor_dims`` on
+#: ``fc.weight`` (expected 12800, got 51200). Lift once upstream reads
+#: ``dflash.target_hidden_size`` in ``dflash.cpp``.
+_DFLASH_TARGET_HIDDEN_SIZE_VERIFIED_BUILD = 12811
 
 
 def _clef_image_note(model: ModelEntry, binary: str) -> str:
@@ -1795,6 +1814,56 @@ def check_draft_model_build(
                 "speculation instead.",
                 detected,
             )
+
+    draft_md = draft_model.metadata or {}
+    if draft_model.architecture.lower().strip() == "dflash":
+        if bool(draft_md.get("dflash.has_markov_context")):
+            detected = probe_binary_build_number(binary)
+            if detected is not None and detected < _MIN_INKLING2_DSPARK_BUILD:
+                return (
+                    False,
+                    f"The Inkling 2 DSpark draft {draft_model.path.name} needs "
+                    f"llama.cpp b{_MIN_INKLING2_DSPARK_BUILD}+ (PR #32218); "
+                    f"b{detected} lacks dflash.has_markov_context support. "
+                    "Update llama.cpp or disable the external drafter.",
+                    detected,
+                )
+        if bool(draft_md.get("dflash.selector_softcap_after_correction")):
+            detected = probe_binary_build_number(binary)
+            if detected is not None and detected < _MIN_INKLING2_DFLASH2_BUILD:
+                return (
+                    False,
+                    f"The Inkling 2 Mini DFlash2 draft {draft_model.path.name} "
+                    f"needs llama.cpp b{_MIN_INKLING2_DFLASH2_BUILD}+ "
+                    f"(PR #33073); b{detected} lacks post-correction softcap "
+                    "support. Update llama.cpp or disable the external drafter.",
+                    detected,
+                )
+        try:
+            dflash_target_hidden = int(draft_md.get("dflash.target_hidden_size") or 0)
+            dflash_embd = int(draft_md.get("dflash.embedding_length") or 0)
+        except (TypeError, ValueError):
+            dflash_target_hidden = 0
+            dflash_embd = 0
+        if (
+            dflash_target_hidden > 0
+            and dflash_embd > 0
+            and dflash_target_hidden != dflash_embd
+        ):
+            detected = probe_binary_build_number(binary)
+            if detected is not None:
+                return (
+                    False,
+                    f"The DFlash draft {draft_model.path.name} expects a multi-stream "
+                    f"target projection (dflash.target_hidden_size={dflash_target_hidden} "
+                    f"vs embedding_length={dflash_embd}). Mainline llama.cpp "
+                    f"(reproduced through b{_DFLASH_TARGET_HIDDEN_SIZE_VERIFIED_BUILD} "
+                    "HIP and Vulkan) ignores target_hidden_size in dflash.cpp and "
+                    "aborts with a fc.weight shape mismatch. Run the target model "
+                    "without this draft or use a fork that supports multi-stream "
+                    "DFlash target_hidden_size (e.g. krafton-ai/llama.cpp).",
+                    detected,
+                )
 
     if is_gemma_backbone_dflash(draft_model):
         detected = probe_binary_build_number(binary)
@@ -2909,6 +2978,7 @@ _KNOWN_MOE_ARCHS = frozenset(
         "hunyuan_moe",
         "hyv4",
         "hy_v4",
+        "hy_v4_flash",
         "jamba",
         "kimi-k3",
         "kimi_k3",

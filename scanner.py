@@ -979,8 +979,9 @@ _HYBRID_ARCHS = frozenset(
         "zonos3",  # Zonos3-mini (b12424): hybrid TTS backbone
         "inkling2",  # Inkling 2 (b12406): short-conv + hybrid attention MoE
         "inkling2_loop",  # Inkling 2 Mini (b12600): looped hybrid MoE
-        "raon1",  # KRAFTON Raon-1 Mini (fork): KDA + MLA hybrid MoE
-        "raon1nano",  # KRAFTON Raon-1 Nano (fork): KDA + MLA hybrid dense
+        "raon1",  # KRAFTON Raon-1 Mini (b12758): KDA + MLA hybrid MoE
+        "raon1nano",  # KRAFTON Raon-1 Nano (fork / PR #32200): KDA + MLA hybrid dense
+        "sensenova_loop",  # SenseNova-Loop 9B (PR #32588): looped hybrid GDN + attention
         "metis16",  # Metis-1.6 (b12089): Mamba-2 + GQA, depth recurrence
         "clover_moe",  # Clover (b12060): Qwen3.6-MoE GDN hybrid
         "deepseek41",  # DeepSeek-V4.1 (b11870): like deepseek4, full-layer KV
@@ -994,6 +995,7 @@ _HYBRID_ARCHS = frozenset(
         "glm5-next",
         "hyv4",  # HY4 Gated DSA/IndexCache (fork-only allocation contract)
         "hy_v4",
+        "hy_v4_flash",  # HY4 Flash (b12755): DSA iSWA cache + MoE
         "qwen35",  # Qwen3.5–3.8 dense: linear + full attention
         "qwen35moe",  # Qwen3.5–3.8 MoE: linear + full attention
         "qwen4exp",  # Qwen3.8 Flash Next preview: GDN + 1-in-4 attention

@@ -1,9 +1,15 @@
-display_name: "HY4 Preview (Tencent, mainline)"
+display_name: "HY4 Preview / Flash (Tencent, mainline)"
 # Filename alone cannot distinguish AngelSlim's incompatible hyv4 GGUFs
-# from the official hy_v4 conversion. Resolve this profile from metadata.
-patterns: []
+# from the official hy_v4 conversion; match hy_v4 from metadata and match
+# HY4 Flash (hy_v4_flash, b12755+, PR #32960) by architecture or filename.
+patterns:
+  - hy4-flash
+  - hy4_flash
+  - hy-v4-flash
+  - hy_v4_flash
 arch_fallback:
   - hy_v4
+  - hy_v4_flash
 min_llama_build: 10813
 max_context: 1048576
 recommended_kv_quant: q8_0
@@ -27,11 +33,12 @@ extra_args:
   - --jinja
 ngram_method: ngram-mod
 notes: >
-  Mainline support for Tencent HY4 Preview with general.architecture=hy_v4
-  landed in PR #28127 (first available local release tag b10813). The older
-  AngelSlim hyv4 GGUF format remains a separate patched-runtime profile;
-  renaming its metadata does not convert its tensors. Official HY4 sampling
-  and native 1M context are shared, but memory remains hardware-limited.
-  The stock converter drops nextn/MTP layers; its GGUF does not contain
-  an embedded drafter on b10839.
-  Source: https://github.com/ggml-org/llama.cpp/pull/28127.
+  Mainline support for Tencent HY4 Preview (general.architecture=hy_v4, PR
+  #28127, b10813+) and Tencent HY4 Flash 220B-A12B (hy_v4_flash text +
+  hy_v4_flash vision on DSA iSWA cache, PR #32960, b12755+ enforced per
+  architecture). The older AngelSlim hyv4 GGUF format remains a separate
+  patched-runtime profile; renaming its metadata does not convert its tensors.
+  Official HY4 sampling (temperature 0.9, top-p 1.0, top-k off) and native 1M
+  context are shared, while memory remains hardware-limited.
+  Sources: https://github.com/ggml-org/llama.cpp/pull/28127 and
+  https://github.com/ggml-org/llama.cpp/pull/32960.

@@ -3,6 +3,52 @@
 Release history of AutoTuner. Each llama.cpp audit and each release
 validation has its own file under [docs/](docs/).
 
+### v5.6.6 — llama.cpp b12811 (1.1.0-dev / v1.1.0) audit, Inkling 2 Mini & Raon-1 Mini on mainline, Bonsai 2.5 / SenseNova-Loop / Raon-1 Nano profiles
+
+- **203 upstream commits audited (b12608 → b12811, spanning stable v1.1.0 =
+  b12774):** 430 option names / 344 long options. Added `--ui-agent` (b12724,
+  PR #33004 — boolean flag for browser-only agent mode in Llama Chat); no
+  options removed. Confirmed AutoTuner never emits `-sm tensor` (refused for
+  Hadamard-folded models since b12779, PR #33080).
+- **Mainline blocker re-check on b12811 (HIP & Vulkan):**
+  - **Inkling 2 Mini (`inkling2_loop`) + mmproj + DSpark:** live-verified
+    end-to-end on b12811 HIP (21/28 drafts accepted) and Vulkan (19/30 drafts
+    accepted); added draft build floors for Inkling 2 DSpark (`b12720+`, PR
+    #32218) and Inkling 2 Mini DFlash2 (`b12785+`, PR #33073). Pre-PR
+    `inkling2` + `inkling2.num_loops` guard kept for stale conversions.
+  - **KRAFTON Raon-1 Mini (`raon1`):** mainline since **b12758** (PR #32176),
+    live-verified on b12811 HIP (49.9 tok/s) and Vulkan (18.9 tok/s). Companion
+    DFlash drafter (`dflash.target_hidden_size=10240`, 4 mHC streams) aborts on
+    mainline b12811 (`fc.weight` shape mismatch); `raon-1.yaml` sets
+    `auto_draft: false` and `check_draft_model_build` refuses multi-stream
+    DFlash sidecars (`dflash.target_hidden_size != embedding_length`) pre-launch
+    on mainline builds (verified through `b12811`).
+  - **KRAFTON Raon-1 Nano (`raon1nano`):** still not mainline (PR #32200 open);
+    split into `raon-1-nano.yaml` gated on `raon1nano` so it stays blocked on
+    mainline b12811 now that `raon1` is present in mainline binaries.
+  - **Qwen3.8 Flash Next `draft-mtp`:** still aborts with
+    `GGML_ASSERT(buffer)` in `ggml-backend.cpp:346` on both b12811 HIP and
+    Vulkan (gate kept, verified build bumped to `12811`).
+  - **FP8 KV (`f8_e4m3`) on Vulkan:** still aborts on `SET_ROWS` (issue
+    #32315); works on HIP (Auto stays on `q8_0`). **Agnes ROCmFP4** and
+    **Bonsai 2 `PTQ1_0`/`PQ2_0`** remain fork-only (`[0, 44)`).
+- **New profiles and build floors:**
+  - **PrismML Ternary-Bonsai 2.5 (`bonsai-2_5.yaml`, 262K, `qwen35`, no fork
+    pin):** fixes `Ternary-Bonsai-2.5-27B-Q2_0-mtp.gguf` previously matching
+    `bonsai-ternary.yaml` (Bonsai 1, 64K + `2b_llama` pin). Live-verified on
+    mainline b12811 HIP (61.4 tok/s) and Vulkan (65.2 tok/s) with `mmproj` and
+    embedded `draft-mtp`.
+  - **SenseTime SenseNova-Loop 9B (`sensenova-loop.yaml`, 524K, hybrid):**
+    replaces `_default.yaml` fallback and gates on the `sensenova_loop` runtime
+    marker until upstream PR #32588 merges.
+  - **Tencent HY4 Flash (`hy_v4_flash`, b12755+, PR #32960)** added to
+    `hy4-mainline.yaml`, `_ARCH_MIN_BUILD`, `_MMPROJ_PROJECTOR_MIN_BUILD`,
+    `_HYBRID_ARCHS`, and `_KNOWN_MOE_ARCHS`; **Kyutai Hibiki / Moshi**
+    (`moshi` / `moshi_gen`, b12619+, PR #32491) added to build floors.
+  - Updated all 9 language packs with translated `profile_notes` and refreshed
+    `models_metadata.md`.
+- [Audit](docs/llama-b12811-audit.md) · [Validation](docs/v5.6.6-validation.md).
+
 ### v5.6.5 — llama.cpp b12608 (1.0.0-dev / v1.0.0) audit, Inkling 2 / Raon-1 / Domyn Edge / Zaya1, Windows build fixes
 
 - **421 upstream commits audited (b12187 → b12608, spanning stable v1.0.0 =

@@ -1,0 +1,52 @@
+display_name: "Ternary-Bonsai 2.5 (PrismML, Q2_0)"
+# Longer than "ternary-bonsai" (Bonsai 1) and distinct from "ternary-bonsai-2-"
+# (Bonsai 2 2B/4B/9B) and "ternary-bonsai-2-27b" (Bonsai 2 27B PTQ1_0/PQ2_0).
+patterns:
+  - ternary-bonsai-2.5
+  - ternary-bonsai-2_5
+  - ternary_bonsai_2_5
+  - bonsai-2.5
+  - bonsai-2_5
+
+# Qwen3.8-27B hybrid backbone (qwen35), 262,144 native context.
+max_context: 262144
+recommended_kv_quant: q8_0
+
+# No server_binary pin: the mainline Q2_0 GGUF (ggml type 42) with
+# prism.hadamard.* metadata and embedded NextN/MTP layer loads directly on
+# mainline llama.cpp b11556+ (PR #29600) on both HIP and Vulkan (live-verified
+# on b12811 with mmproj + draft-mtp). Pre-b11556 builds or any fork-only
+# PQ2_0/PTQ1_0 packings are guarded by tuner._prism_hadamard_block_reason.
+
+extra_args:
+  - --jinja
+
+# Official PrismML Bonsai 2.5 Thinking defaults: temp 1.0, top_p 0.95, top_k 20,
+# min_p 0.0 (PrismML explicitly recommends --min-p 0 for Bonsai 2.5 on
+# llama.cpp, unlike Bonsai 2's 0.05). Reasoning defaults to xhigh (or medium).
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    temperature: 1.0
+    top_k: 20
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+notes: >
+  PrismML Ternary-Bonsai 2.5 (27B Qwen3.8 hybrid-attention backbone, qwen35,
+  262,144 native context) with Hadamard-folded ternary weights, optional vision
+  projector (mmproj BF16), and embedded NextN/MTP speculative decoding. The
+  mainline Q2_0 GGUF (ggml type 42) loads directly on mainline llama.cpp
+  b11556+ (PR #29600) on both HIP and Vulkan (live-verified on b12811 with
+  mmproj and draft-mtp); older builds without the prism.hadamard loader are
+  refused pre-launch. Note: llama.cpp b12779+ (PR #33080) requires layer split
+  (-sm layer, AutoTuner's default) for Hadamard-folded models. Official
+  thinking-mode sampling: temperature 1.0, top-p 0.95, top-k 20, min-p 0.0.

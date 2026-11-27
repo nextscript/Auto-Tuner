@@ -775,17 +775,19 @@ The tuner intelligently selects the best binary based on your model and settings
 
 - **Gemma 4 (with or without draft)** $\rightarrow$ uses the selected `llama.cpp` build. Mainline runs the `gemma4-assistant` MTP head (`--spec-type draft-mtp`) and sibling drafters natively since b9190 (PR #23398); only a build too old to advertise `--spec-type` still falls back to a legacy `ik_llama.cpp` tree if one is installed.
 - **Integrated MTP (e.g. Qwen3.6-27B-MTP)** $\rightarrow$ uses standard `llama.cpp` (native since b9190+; PR #22673 in mainline since 16 May 2026; no fork needed).
-- **Ternary-Bonsai / Ternary-Bonsai 2** $\rightarrow$ uses the PrismML prism fork
+- **Ternary-Bonsai / Ternary-Bonsai 2 / 2.5** $\rightarrow$ uses the PrismML prism fork
   (`2b_bNNNN_{vulkan,hip}_llama.cpp`) for the `PTQ1_0` / `PQ2_0` packings: mainline
-  llama.cpp (still b12608) rejects them as unknown ggml types 143 / 142. Since
+  llama.cpp (still b12811) rejects them as unknown ggml types 143 / 142. Since
   b11556 (PR #29600) mainline loads the Hadamard fold (`prism.hadamard.*`) for
-  mainline conversions (`Q2_0`, `F16`; e.g. Ternary-Bonsai-2 2B/4B/9B `Q2_0`).
+  mainline conversions (`Q2_0`, `F16`; e.g. Ternary-Bonsai-2 2B/4B/9B `Q2_0` and
+  Ternary-Bonsai-2.5 27B `Q2_0-mtp`, live-verified on b12811 HIP & Vulkan).
   AutoTuner checks both the `prism.hadamard` loader and, for private types, the
-  fork's own `PTQ1_0` / `PQ2_0` file-type names.
+  fork's own `PTQ1_0` / `PQ2_0` file-type names (and keeps layer split, `-sm layer`,
+  as required by b12779+ PR #33080).
 - **Agnes-3.0-Flash Preview, kingjones777 `MTP-ROCmFP4` / `ROCmFPX` GGUFs** $\rightarrow$
   need the ROCmFPX fork (`github.com/ROCmFPX/ROCmFPX`). Their weights use
   reserved ggml types 100–111 (`Q4_0_ROCMFP4` = 100, `Q8_0_ROCMFPX` = 103),
-  which mainline llama.cpp (still b12608) rejects as
+  which mainline llama.cpp (still b12811) rejects as
   `invalid ggml type 100. should be in [0, 44)`. AutoTuner refuses them before
   launch unless the selected runtime carries the `ROCmFP` loader. Standard
   quants of Agnes load on mainline.
@@ -793,10 +795,15 @@ The tuner intelligently selects the best binary based on your model and settings
   Escha fork (`github.com/Ajay9o9/llama.cpp-escha`, branch `escha-w2-dense` for
   27B, `escha-w2` for 35B-A3B). AutoTuner checks for the `escha_lut` loader and
   pairs the separate MTP head automatically.
-- **KRAFTON Raon-1 Mini / Nano (`raon1` / `raon1nano`)** $\rightarrow$ mainline
-  llama.cpp (b12608) has no loader yet; AutoTuner checks for the `raon1`
-  runtime marker so `krafton-ai/llama.cpp` or a future mainline merge passes
-  automatically.
+- **KRAFTON Raon-1 Mini (`raon1`) vs Nano (`raon1nano`)** $\rightarrow$ Raon-1
+  Mini runs on mainline llama.cpp since **b12758** (PR #32176, live-verified on
+  b12811; its multi-stream DFlash drafter still requires `target_hidden_size`
+  support and stays guarded). Raon-1 Nano (`raon1nano`, upstream PR #32200 open)
+  has its own `raon-1-nano.yaml` profile gated on the `raon1nano` marker.
+- **SenseTime SenseNova-Loop 9B (`sensenova_loop`)** $\rightarrow$ upstream PR
+  #32588 is still open on b12811; `sensenova-loop.yaml` gates on the
+  `sensenova_loop` runtime marker so mainline is refused pre-launch and a PR
+  build or future mainline merge unlocks automatically.
 - **Turbo-Quant Mode** $\rightarrow$ uses `tq_llama.cpp`.
 
 Example — run Devstral, override context, and pass an extra flag
@@ -914,10 +921,13 @@ matches. See `settings/_default.yaml`.
 | `minicpm-ocr-1_0.yaml` | OpenBMB MiniCPM-OCR 1.0 document OCR, `--reasoning off`, greedy; b11826+ | filename (`qwen35`) |
 | `nemotron-3_5-transcribe.yaml` | NVIDIA Nemotron 3.5 Transcribe 30B-A4B speech-to-text, `--reasoning off`, 64K; b12087+ | filename (`nemotron_h_moe`) |
 | `nemotron-embed.yaml` | NVIDIA Nemotron-3 / 3.5-Embed 1B / 8B (**embedding**, not chat); b11833+ | filename |
-| `inkling-2.yaml` | Thinking Machines Inkling 2 (b12406+) and looped Inkling 2 Mini (b12600+), 1M, vision + DSpark | `inkling2` / `inkling2_loop` (authoritative) |
+| `inkling-2.yaml` | Thinking Machines Inkling 2 (b12406+) and looped Inkling 2 Mini (b12600+, DSpark b12720+, DFlash2 b12785+), 1M, vision + DSpark | `inkling2` / `inkling2_loop` (authoritative) |
 | `domyn-edge.yaml` | Domyn Edge 4B dense agentic coding/reasoning, 256K recommended (1M native); b12568+ | `domynedge` (authoritative) |
 | `zaya1.yaml` | Zyphra Zaya1 8B CCA hybrid MoE, 131K; b12519+ | `zaya1` (authoritative) |
-| `raon-1.yaml` | KRAFTON Raon-1 Mini (`raon1`) / Nano (`raon1nano`), 262K; fork marker `raon1` (`krafton-ai/llama.cpp`) | `raon1` / `raon1nano` (authoritative) |
+| `raon-1.yaml` | KRAFTON Raon-1 Mini (`raon1`), 262K; mainline b12758+ / `krafton-ai/llama.cpp` (`auto_draft: false`) | `raon1` (authoritative) |
+| `raon-1-nano.yaml` | KRAFTON Raon-1 Nano (`raon1nano`), 262K; gated on `raon1nano` marker (PR #32200 open) | `raon1nano` (authoritative) |
+| `bonsai-2_5.yaml` | PrismML Ternary-Bonsai 2.5 (`Q2_0`, Hadamard + embedded MTP + vision), 262K; mainline b11556+ | filename (`qwen35`) |
+| `sensenova-loop.yaml` | SenseTime SenseNova-Loop 9B looped hybrid VLM + MTP, 524K; gated on `sensenova_loop` marker (PR #32588 open) | `sensenova_loop` (authoritative) |
 
 Per-release notes on individual profiles (why a profile exists, what was
 measured, which build it needs) live in
@@ -1028,36 +1038,40 @@ Key recipe details (Windows):
   `tools/server/webui` layouts.
 - **Safety:** mainline clones keep full history for truthful build numbers;
   existing known-good outputs are never overwritten (incomplete trees resume in
-  place). Latest stable resolves automatically (currently `v1.0.0` = `b12359`).
+  place). Latest stable resolves automatically (currently `v1.1.0` = `b12774`).
 
 Ubuntu/Linux users can build upstream llama.cpp directly and point
 `LLAMA_CPP_DIR` at the checkout containing `build/bin/llama-server`.
 
-## Server features (audited through llama.cpp b12608)
+## Server features (audited through llama.cpp b12811)
 
-The **b12608** (`93cb37ea7`, `1.0.0-dev`; stable **v1.0.0** = `b12359`)
-[audit](docs/llama-b12608-audit.md) covers 421 commits after b12187
-(429 option names / 343 long options):
+The **b12811** (`00d5c142c`, `1.1.0-dev`; stable **v1.1.0** = `b12774`)
+[audit](docs/llama-b12811-audit.md) covers 203 commits after b12608
+(430 option names / 344 long options):
 
-- **CLI changes:** added `--ple` / `--shard` (repeatable external shard/PLE
-  aliases), `--moe-cache-cpu-share`, `--tts-lang`, `--tts-voice`,
-  `--allow-unauthenticated-tools`, `--media-allow-private-urls`, and
-  `--ui-mcp-proxy-allow-private-urls`; removed deprecated `-dt` /
-  `--defrag-thold` (never emitted by AutoTuner).
-- **FP8 KV cache (`f8_e4m3`, b12274+):** supported in `kv_quant_factor()` and
-  the Expert K/V dropdown (verified on b12608 HIP; Vulkan currently aborts on
-  `SET_ROWS`, so Auto stays on `q8_0`).
-- **New profiles & guards:** **Inkling 2 / Inkling 2 Mini** (`inkling-2.yaml`;
-  fixes collision with `ling-ring.yaml` and refuses early pre-PR
-  `inkling2.num_loops` GGUFs), **Domyn Edge 4B** (`domyn-edge.yaml`),
-  **Zyphra Zaya1 8B** (`zaya1.yaml`), and **KRAFTON Raon-1 Mini / Nano**
-  (`raon-1.yaml`, gated on `raon1` fork marker). Build floors added for all 7
-  new architectures and 15 new multimodal projectors; Kimi K3.1 vision
-  (`b12259+`) and MiniMax-M3.1 (`b12432+`) noted.
-- **Rechecked on b12608:** Qwen3.8 Flash Next `draft-mtp` still aborts upstream
-  (`GGML_ASSERT(buffer)`) and stays gated; Agnes ROCmFP4 and Bonsai 2
-  `PTQ1_0`/`PQ2_0` remain fork-only. See [validation](docs/v5.6.5-validation.md)
-  and [CHANGELOG.md](CHANGELOG.md) for earlier audits.
+- **CLI changes:** added `--ui-agent` (b12724, PR #33004 — Llama Chat agent mode
+  with browser-side tools only, no server tools or MCP proxy); no flags removed.
+- **Mainline blocker re-check:**
+  - **Inkling 2 Mini (`inkling2_loop`) + mmproj + DSpark** is now live-verified
+    end-to-end on b12811 HIP and Vulkan (DSpark `b12720+`, DFlash2 `b12785+`,
+    HIP/Vulkan FA indexed/compact bias `b12801`/`b12809`).
+  - **Raon-1 Mini (`raon1`)** landed on mainline in **b12758** (PR #32176) and
+    is live-verified on b12811 HIP & Vulkan; its multi-stream DFlash drafter
+    (`target_hidden_size=10240`) is guarded pre-launch, and **Raon-1 Nano**
+    (`raon1nano`, PR #32200 open) is split into `raon-1-nano.yaml`.
+  - **Qwen3.8 Flash Next `draft-mtp`** still aborts upstream
+    (`GGML_ASSERT(buffer)` in `ggml-backend.cpp:346` on both HIP & Vulkan);
+    **FP8 KV (`f8_e4m3`)** still aborts on Vulkan (`SET_ROWS`, #32315) while
+    working on HIP; **Agnes ROCmFP4** and **Bonsai 2 `PTQ1_0`/`PQ2_0`** remain
+    fork-only.
+- **New profiles & floors:** **Ternary-Bonsai 2.5** (`bonsai-2_5.yaml`, mainline
+  `Q2_0` + `mmproj` + `draft-mtp` live-verified on b12811 HIP & Vulkan),
+  **SenseNova-Loop 9B** (`sensenova-loop.yaml`, gated on `sensenova_loop` until
+  PR #32588 merges), **Raon-1 Nano** (`raon-1-nano.yaml`), **HY4 Flash**
+  (`hy_v4_flash`, `b12755+`, PR #32960) in `hy4-mainline.yaml`, and **Kyutai
+  Hibiki / Moshi** (`moshi` / `moshi_gen`, `b12619+`, PR #32491). See
+  [validation](docs/v5.6.6-validation.md) and [CHANGELOG.md](CHANGELOG.md) for
+  earlier audits.
 
 | Flag | Support |
 |------|---------|

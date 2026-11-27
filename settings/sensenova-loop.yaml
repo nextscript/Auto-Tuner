@@ -1,0 +1,53 @@
+display_name: "SenseNova-Loop 9B (SenseTime)"
+patterns:
+  - sensenova-loop
+  - sensenova_loop
+  - sensenova loop
+arch_fallback:
+  - sensenova_loop
+arch_authoritative: true
+
+# Upstream llama.cpp PR #32588 ("model : add SenseNova Loop support") is still
+# open as of b12811; mainline aborts with "unknown model architecture:
+# 'sensenova_loop'". Gate on the runtime marker so a PR build or a future
+# mainline merge unlocks automatically.
+required_runtime_markers:
+  - sensenova_loop
+
+# Shipped GGUF declares sensenova_loop.context_length = 524288 (YaRN 2x over
+# 262,144 base), hybrid GDN/SSM + full attention (interval 4) with 2-pass
+# shared-weight looping (32 physical -> 56 logical layers), mHC residual
+# streams, Qwen3-VL vision projector, and optional embedded MTP layer.
+max_context: 524288
+recommended_kv_quant: q8_0
+
+extra_args:
+  - --jinja
+
+# Matches the shipped GGUF general.sampling.* keys (temp 1.0, top_p 0.95).
+sampling:
+  chat:
+    temperature: 1.0
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+  coding:
+    temperature: 1.0
+    top_k: 40
+    top_p: 0.95
+    min_p: 0.0
+    repeat_penalty: 1.0
+    presence_penalty: 0.0
+
+notes: >
+  SenseTime SenseNova-Loop 9B (sensenova_loop): multimodal looped hybrid
+  transformer (32 physical / 56 logical layers via 2-pass weight sharing,
+  GDN/SSM + full attention every 4th layer, 2-stream mHC, optional embedded
+  MTP, Qwen3-VL vision projector, 524,288 native context via YaRN). Mainline
+  llama.cpp through b12811 has no sensenova_loop loader yet (upstream PR
+  #32588 is open); AutoTuner checks for the sensenova_loop runtime marker so
+  a PR build or a future mainline merge runs automatically while current
+  mainline is refused pre-launch. Sampling follows the shipped GGUF defaults
+  (temperature 1.0, top-p 0.95).

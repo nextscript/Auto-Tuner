@@ -36,10 +36,13 @@ extra_args:
 
 notes: >
   Thinking Machines Inkling 2 and Inkling 2 Mini: multimodal hybrid MoE
-  models with 1,048,576 context and DSpark speculative drafts. Inkling 2
-  (inkling2, text + inkling2v vision) needs llama.cpp b12406+ (b12455+ for the
-  Inkling chat parser); looped Inkling 2 Mini (inkling2_loop) needs b12600+
-  (PR #32694). Early pre-PR Inkling 2 Mini GGUFs written as inkling2 with
-  inkling2.num_loops do not load on mainline and are refused with a clear
-  message. Sampling follows the shipped GGUF defaults (temperature 1.0, top-p
-  1.0, top-k 0, min-p 0.0).
+  models with 1,048,576 context and DSpark / DFlash2 speculative drafts.
+  Inkling 2 (inkling2, text + inkling2v vision) needs llama.cpp b12406+
+  (b12455+ for the Inkling chat parser); looped Inkling 2 Mini (inkling2_loop)
+  needs b12600+ (PR #32694), with Inkling 2 DSpark from b12720+ (PR #32218),
+  Inkling 2 Mini DFlash2 from b12785+ (PR #33073), and Flash Attention
+  indexed/compact bias on HIP (b12801, PR #33063) and Vulkan (b12809, PR
+  #32898) — live-verified end-to-end with mmproj + DSpark on b12811. Early
+  pre-PR Inkling 2 Mini GGUFs written as inkling2 with inkling2.num_loops do
+  not load on mainline and are refused with a clear message. Sampling follows
+  the shipped GGUF defaults (temperature 1.0, top-p 1.0, top-k 0, min-p 0.0).

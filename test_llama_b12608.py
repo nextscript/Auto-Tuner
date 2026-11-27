@@ -243,13 +243,13 @@ def test_new_b12608_profiles_match_and_gate(name, arch, profile_file, floor):
 
 def test_raon1_matches_and_uses_runtime_marker():
     profiles = _profiles()
-    for name, arch in [
-        ("raon-1-mini-preview-Q6_K", "raon1"),
-        ("raon-1-nano-Q8_0_MTP", "raon1nano"),
+    for name, arch, expected_file, expected_marker in [
+        ("raon-1-mini-preview-Q6_K", "raon1", "raon-1.yaml", "raon1"),
+        ("raon-1-nano-Q8_0_MTP", "raon1nano", "raon-1-nano.yaml", "raon1nano"),
     ]:
         profile = match_profile(name, profiles, arch)
-        assert profile.source_file == "raon-1.yaml"
-        assert profile.required_runtime_markers == ["raon1"]
+        assert profile.source_file == expected_file
+        assert profile.required_runtime_markers == [expected_marker]
         assert profile.sampling["chat"]["temperature"] == 0.1
         assert profile.sampling["chat"]["presence_penalty"] == 1.5
         assert profile.sampling["coding"]["temperature"] == 1.0
